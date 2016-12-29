@@ -23,7 +23,8 @@ executable vcr
     -- -prof -fprof-auto -rtsopts
 
     -- other-modules:
-    other-extensions:   StrictData
+    --other-extensions:
+    default-extensions:  StrictData
 
     build-depends:
         transformers == 0.5.*,

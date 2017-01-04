@@ -69,8 +69,6 @@ data Output
 data Drop
     = DSyslog Format
     | DFile FilePath Format Delimiter
-    -- | DStdout Format Delimit
-    -- | DStderr Format Delimit
     deriving (Show, Eq)
 
 options :: Parser Options
@@ -149,7 +147,8 @@ dropParse = subparser $
     syslog = pure $ DSyslog FormatJSON
     -- TODO, file options
     file = DFile
-        <$> argument str (metavar "FILE" <> help "destination filename")
+        <$> argument str (metavar "FILE"
+            <> help "destination filename, '-' for stdout")
         <*> pure FormatJSON
         <*> pure (Delimiter "\n")
 
@@ -249,7 +248,10 @@ startInput i buf sessionId recorderId ch dropList = do
             let msgs = do
                     evt <- lst
                     return $ show evt ++ delim
-            appendFile filename $ concat msgs
+                s = concat msgs
+            case filename of
+                "-" -> putStr s
+                _ -> appendFile filename s
 
     slOpts = SL.defaultConfig
         { SL.identifier = pack $ "vcr"

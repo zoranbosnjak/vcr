@@ -9,8 +9,26 @@ import qualified Data.ByteString as BS
 import Data.Time
 import GHC.Generics
 import System.Clock
+import Test.QuickCheck
 import Text.Printf
 import Numeric (readHex)
+
+newtype Delimiter = Delimiter String deriving (Generic, Eq, Show)
+
+data Format
+    = FormatJSON
+    | FormatJSONPretty
+    | FormatBSON
+    | FormatTXT
+    deriving (Generic, Eq, Show)
+
+{- TODO:
+manual show (or other) instance, to be able to see
+all choices in option parse
+FormatJSON -> JSON
+FormatBSON -> BSON
+FormatTXT -> TXT
+-}
 
 newtype Hash = Hash String deriving (Generic, Eq)
 
@@ -18,27 +36,44 @@ newtype Chanel = Chanel String deriving (Generic, Eq)
 instance ToJSON Chanel
 instance FromJSON Chanel
 instance Show Chanel where show (Chanel s) = show s
+instance Arbitrary Chanel where
+    arbitrary = Chanel <$> arbitrary
 
 newtype SourceId = SourceId String deriving (Generic, Eq)
 instance ToJSON SourceId
 instance FromJSON SourceId
 instance Show SourceId where show (SourceId s) = show s
+instance Arbitrary SourceId where
+    arbitrary = SourceId <$> arbitrary
 
 newtype SessionId = SessionId String deriving (Generic, Eq)
 instance ToJSON SessionId
 instance FromJSON SessionId
 instance Show SessionId where show (SessionId s) = show s
+instance Arbitrary SessionId where
+    arbitrary = SessionId <$> arbitrary
 
 data Event = Event
     { eChanel   :: Chanel
     , eSourceId :: SourceId     -- id of the recorder
     , eUtcTime  :: UTCTime      -- capture utc time
-    , eMonotonicTime :: TimeSpec   -- capture monotonic time
-    , eArchive  :: Bool         -- do not auto delete this event
-    , eSessionId :: SessionId   -- monotonic time is valid only within
+    , eBootTime :: TimeSpec     -- capture boot (monotonic) time
+    , eSessionId :: SessionId   -- boot time is valid only within
                                 -- the same session ID
     , eValue    :: BS.ByteString   -- the event value
     } deriving (Generic, Eq)
+
+instance Arbitrary Event where
+    arbitrary = Event
+        <$> arbitrary
+        <*> arbitrary
+        <*> (UTCTime <$> day <*> diffT)
+        <*> (TimeSpec <$> arbitrary <*> arbitrary)
+        <*> arbitrary
+        <*> (BS.pack <$> arbitrary)
+      where
+        day = fromGregorian <$> arbitrary <*> arbitrary <*> arbitrary
+        diffT = secondsToDiffTime <$> arbitrary
 
 instance Show Event where
     show e = foldr1 (\a b -> a ++ " " ++ b) $
@@ -47,19 +82,17 @@ instance Show Event where
         , show $ eSourceId e
         , show $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S.%qZ" $
             eUtcTime e
-        , show $ toNanoSecs $ eMonotonicTime e
-        , show $ eArchive e
+        , show $ toNanoSecs $ eBootTime e
         , show $ eSessionId e
         , show $ hexlify $ eValue e
         ]
 
 instance ToJSON Event where
-    toJSON (Event ch src utcTime monoTime arc ses val) = object
+    toJSON (Event ch src utcTime bootTime ses val) = object
         [ "ch" .= ch
         , "src" .= src
         , "utc" .= utcTime
-        , "mono" .= toNanoSecs monoTime
-        , "archive" .= arc
+        , "boot" .= toNanoSecs bootTime
         , "session" .= ses
         , "value" .= hexlify val
         ]
@@ -69,8 +102,7 @@ instance FromJSON Event where
         v .: "ch" <*>
         v .: "src" <*>
         v .: "utc" <*>
-        fmap fromNanoSecs (v .: "mono") <*>
-        v .: "archive" <*>
+        fmap fromNanoSecs (v .: "boot") <*>
         v .: "session" <*>
         readStr (v .: "value")
       where
@@ -103,11 +135,11 @@ sizeOf = fromIntegral . BS.length . eValue
 hash :: Event -> Hash
 hash = undefined
 
--- get current time (monotonic and UTC)
+-- get current time (boot and UTC)
 now :: IO (UTCTime, TimeSpec)
 now = do
     -- TODO: check if possible to protect this section from being interrupted
     t1 <- getCurrentTime
-    t2 <- getTime Monotonic
+    t2 <- getTime Boottime
     return (t1, t2)
 

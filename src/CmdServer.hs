@@ -3,12 +3,17 @@
 
 module CmdServer (cmdServer) where
 
+cmdServer :: a
+cmdServer = undefined
+
+{-
+import Control.Concurrent
 import Control.Concurrent.Async
-import Control.Concurrent.STM
 import Control.Monad
 import Control.Monad.Trans
 import Control.Monad.Except
 import Data.Aeson
+import Data.List
 import Network.HTTP.Types
 --import Network.Wai
 import Options.Applicative
@@ -16,7 +21,6 @@ import Web.Scotty as W
 import System.Log.Logger (Priority(..))
 
 import Action
-import Buffer
 import Event
 import IO
 
@@ -32,6 +36,7 @@ cmdServer = info (helper <*> (runCmd <$> CmdServer.options))
 data Options = Options
     { optServe :: [Server]
     , optStore :: [Store]
+    , optDump :: [Dump]
     -- , optReplicas :: Maybe Int
     -- , optKeepDays :: Maybe Double
     } deriving (Eq, Show)
@@ -41,21 +46,32 @@ data Server
     deriving (Eq, Show)
 
 data Store
-    = StoreStdout
-    | StoreStderr
+    = StoreMemory Integer   -- store up to N events in memory
     -- | StoreSql Address KeepDays
     -- | StoreRemote Http
+    deriving (Eq, Show)
+
+data Dump
+    = DumpStdout
+    | DumpStderr
     deriving (Eq, Show)
 
 options :: Parser CmdServer.Options
 options = CmdServer.Options
     <$> some server
     <*> some store
+    <*> many dump
     {-
     <*> (optional $ option auto
         (short 'n' <> long "replicas" <> help "number of replicas"))
     <*> (optional $ option auto
         (long "keepDays" <> help "keep replicas N days"))
+    -- keep/drop days
+    -- keep/drop events
+    -- keep/drop bytes
+
+    -- keep* upoštevaj vse
+    -- drop* upoštevaj prvega
     -}
 
 server :: Parser Server
@@ -73,31 +89,38 @@ store = subparser $
     command "store" (info (helper <*> level2) (progDesc "store definition"))
   where
     level2 = subparser
-        ( command "stdout" (info (helper <*> (pure StoreStdout)) idm)
-       <> command "stderr" (info (helper <*> (pure StoreStderr)) idm)
+        ( command "memory" (info (helper <*> mem) idm)
+       -- <> command "sql" (info (helper <*> (pure ...)) idm)
+        )
+    mem = StoreMemory
+        <$> argument auto (metavar "EVENTS" <> help "max. number of events")
+
+dump :: Parser Dump
+dump = subparser $
+    command "dump" (info (helper <*> level2) (progDesc "store definition"))
+  where
+    level2 = subparser
+        ( command "stdout" (info (helper <*> (pure DumpStdout)) idm)
+       <> command "stderr" (info (helper <*> (pure DumpStderr)) idm)
         )
 
 runCmd :: CmdServer.Options -> Action ()
 runCmd opts = do
     logM "init" INFO $ show opts
 
-    -- TODO: check limits on buffer
-
-    buf <- liftIO $ atomically bufferNew
+    -- start store handlers
+    --liftIO $ print $ optStore opts
 
     -- start servers
     servers <- forM (optServe opts) $ \i -> liftIO $ async $ case i of
-        ServerHttp ip port -> serveHttp buf ip port
-
-    -- start store handlers
-    liftIO $ print $ optStore opts
+        ServerHttp ip port -> serveHttp ip port
 
     -- all threads shall remain running
     _ <- liftIO $ waitAnyCatchCancel $ servers -- ++ ...
     throw "process terminated"
 
-serveHttp :: Buffer -> Ip -> Int -> IO ()
-serveHttp _buf _ip port = scotty port $ do
+serveHttp :: Ip -> Int -> IO ()
+serveHttp _ip port = scotty port $ do
     let on uri method act = addroute method uri $ do
             -- this is required for testing
             addHeader "Access-Control-Allow-Origin" "*"
@@ -137,6 +160,13 @@ serveHttp _buf _ip port = scotty port $ do
 
     "/ping" `onGet` return (status200, W.text "pong")
 
+    "/delay/:d" `onGet` do
+        let threadDelaySec = threadDelay . round . (1000000*)
+
+        dt :: Double <- lift $ param "d"
+        liftIO $ threadDelaySec dt
+        return ok
+
     -- /events/* handling
     do
         "/events" `onHead` do
@@ -156,4 +186,47 @@ serveHttp _buf _ip port = scotty port $ do
 
         "/events" `onDelete` do
             undefined
+
+type RequestedReplicas = Int
+type ActualReplicas = Int
+type Success = Bool
+
+-- try to store events to a number of handlers
+-- This function returns actual number of replicas,
+-- that all given events are stored.
+-- distribute handlers randomly, where the seed is
+-- the chanel id of the event, so that the same chanel data
+-- tend to go to the same replica
+safeDeposit :: (Eq storeHandler) =>
+    [storeHandler] -> [Event] -> RequestedReplicas -> IO ActualReplicas
+safeDeposit handlers evts requested = process requested distinctChanels handlers
+  where
+    distinctChanels = nub $ map eChanel evts
+    process n [] _ = return n -- all done, no more chanels
+    process _ _ [] = return 0 -- no more active handlers
+    process n (chanel:xs) handlers' = do
+        let lst = filter (\e -> eChanel e == chanel) evts
+            handlers'' = permutate handlers' chanel
+        deadHandlers <- depositMany requested [] handlers'' lst
+        let handlers''' = [h | h<-handlers', h `notElem` deadHandlers]
+            nextN = min n $ length handlers'''
+        process nextN xs handlers'''
+
+    -- deposit events to n handlers, return list of dead handlers
+    depositMany n dhs hs lst
+        | n <= 0 || null hs = return dhs
+        | otherwise = do
+            let handler = head hs
+                rest = tail hs
+            ok <- deposit handler lst
+            case ok of
+                True -> depositMany (n-1) dhs hs lst
+                False -> depositMany n (handler:dhs) rest lst
+
+    permutate lst _seed = lst -- TODO
+
+-- deposit events to a single handler
+deposit :: storeHandler -> [Event] -> IO Success
+deposit _handler _lst = undefined
+-}
 

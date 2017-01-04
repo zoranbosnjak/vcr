@@ -6,7 +6,9 @@ import Control.Exception hiding (throw, assert)
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Concurrent.STM
+import Control.Monad (forM_)
 import Control.Monad.Trans
+import Data.ByteString.Char8 (pack)
 import Data.Maybe
 import qualified Data.UUID as U
 import Data.UUID.V4
@@ -17,6 +19,7 @@ import Network.Socket.ByteString as NB
 import Options.Applicative
 import System.Clock
 import System.Log.Logger (Priority(..))
+import qualified System.Posix.Syslog as SL
 
 import Action
 import Buffer
@@ -33,7 +36,7 @@ import IO
     - check ipv6 http output
 
     - ko je connection vzpostavljen,
-      naj se buffer prazni postopoma, ni nujno vse naenkrat
+      naj se buffer prazni postopoma, ne nujno vse naenkrat
 -}
 
 cmdRecorder :: ParserInfo (Action ())
@@ -43,11 +46,11 @@ cmdRecorder = info (helper <*> (runCmd <$> options))
 data Options = Options
     { optIdent  :: Maybe String
     , optChanel :: String
-    , optArch :: Bool
     , optInput :: Input
     , optOutput :: Output
     , optBufferSize :: Thrashold
     , optBatchSize :: Thrashold
+    , optDrop :: [Drop]
     -- retry http connect interval
     -- http response timeout
     } deriving (Show, Eq)
@@ -55,30 +58,20 @@ data Options = Options
 data Input
     = IUnicast Ip Port
     | IMulticast Ip Port LocalIp
+    -- IStdin Format Delimit
     deriving (Show, Eq)
 
 data Output
-    = OHttp Ip Port
-    | OStdout
+    = OStdout Format Delimiter
+    | OHttp Ip Port
     deriving (Show, Eq)
 
-buffer :: Parser Thrashold
-buffer = Thrashold
-    <$> optional (option auto
-        (long "maxEvents" <> help "maximum number of events before drop"))
-    <*> optional (option kiloMega
-        (long "maxBytes" <> help "maximum size in bytes before drop"))
-    <*> optional (option auto
-        (long "maxSeconds" <> help "maximum event age in seconds before drop"))
-
-batch :: Parser Thrashold
-batch = Thrashold
-    <$> optional (option auto
-        (long "batchEvents" <> help "wait for number of events before send"))
-    <*> optional (option auto
-        (long "batchBytes" <> help "wait for size in bytes before send"))
-    <*> optional (option auto
-        (long "batchSeconds" <> help "wait seconds before send"))
+data Drop
+    = DSyslog Format
+    | DFile FilePath Format Delimiter
+    -- | DStdout Format Delimit
+    -- | DStderr Format Delimit
+    deriving (Show, Eq)
 
 options :: Parser Options
 options = Options
@@ -86,11 +79,11 @@ options = Options
             (long "ident" <> metavar "IDENT" <> help "recorder identifier"))
     <*> strOption
             (long "chanel" <> metavar "CH" <> help "chanel identifier")
-    <*> switch (long "arch" <> help "set archive bit")
     <*> inputParse
     <*> outputParse
-    <*> buffer
-    <*> batch
+    <*> bufferParse
+    <*> batchParse
+    <*> many dropParse
 
 inputParse :: Parser Input
 inputParse = subparser $
@@ -114,11 +107,51 @@ outputParse = subparser $
   where
     level2 = subparser
         ( command "http" (info (helper <*> http) idm)
-       <> command "stdout" (info (pure OStdout) idm)
+       <> command "stdout" (info (helper <*> stdout) idm)
         )
     http = OHttp
         <$> argument str (metavar "IP" <> help "IP address")
         <*> argument str (metavar "PORT" <> help "port number")
+    -- TODO: parse stdout options
+    --delimit "\n"
+    --format JSON | TXT | BSON ... (use automatic choices from??)
+    stdout = pure $ OStdout FormatJSON (Delimiter "\n")
+
+bufferParse :: Parser Thrashold
+bufferParse = thrashold
+    <$> optional (option auto
+        (long "maxEvents" <> help "maximum number of events before drop"))
+    <*> optional (option kiloMega
+        (long "maxBytes" <> help "maximum size in bytes before drop"))
+    <*> optional (option auto
+        (long "maxSeconds" <> help "maximum event age in seconds before drop"))
+
+batchParse :: Parser Thrashold
+batchParse = thrashold
+    <$> optional (option auto
+        (long "batchEvents" <> help "wait for number of events before send"))
+    <*> optional (option auto
+        (long "batchBytes" <> help "wait for size in bytes before send"))
+    <*> optional (option auto
+        (long "batchSeconds" <> help "wait seconds before send"))
+
+dropParse :: Parser Drop
+dropParse = subparser $
+    command "drop" (info (helper <*> level2) (progDesc "how to drop"))
+    --format = json | txt | ...
+    --delimit = "\n" | "\0" | "<any string>"
+    --level NOTICE | INFO | ...
+  where
+    level2 = subparser
+        ( command "syslog" (info (helper <*> syslog) idm)
+       <> command "file" (info (helper <*> file) idm)
+        )
+    syslog = pure $ DSyslog FormatJSON
+    -- TODO, file options
+    file = DFile
+        <$> argument str (metavar "FILE" <> help "destination filename")
+        <*> pure FormatJSON
+        <*> pure (Delimiter "\n")
 
 runCmd :: Options -> Action ()
 runCmd opts = do
@@ -135,7 +168,8 @@ runCmd opts = do
         -- TODO... get hostname
         return $ fromMaybe "noident" $ optIdent opts
 
-    buf <- liftIO $ atomically bufferNew
+    buf <- liftIO $ atomically $
+        newBuffer (optBufferSize opts) (optBatchSize opts)
 
     input <- startInput
         (optInput opts)
@@ -143,8 +177,7 @@ runCmd opts = do
         (SessionId sessionId)
         (SourceId recorderId)
         (Chanel $ optChanel opts)
-        (optArch opts)
-        (optBufferSize opts)
+        (optDrop opts)
 
     tick <- liftIO (now >>= \(_,t) -> newTVarIO t)
     ticker <- liftIO $ async $ forever $ do
@@ -152,15 +185,15 @@ runCmd opts = do
         (_, t) <- now
         atomically $ writeTVar tick t
 
-    output <- startOutput (optOutput opts) buf (optBatchSize opts) tick
+    output <- startOutput (optOutput opts) buf tick
 
     -- all threads shall remain running
     _ <- liftIO $ waitAnyCatchCancel $ [input, ticker, output]
     throw "process terminated"
 
-startInput :: Input -> Buffer -> SessionId -> SourceId -> Chanel -> Bool
-    -> Thrashold -> Action (Async a)
-startInput i buf sessionId recorderId ch arch th = do
+startInput :: Input -> Buffer -> SessionId -> SourceId -> Chanel
+    -> [Drop] -> Action (Async a)
+startInput i buf sessionId recorderId ch dropList = do
     let tell prio msg = logM (show i) prio msg
     tell INFO "starting"
     let (ip,port,mclocal) = case i of
@@ -187,29 +220,47 @@ startInput i buf sessionId recorderId ch arch th = do
         (datagram, _addr) <- NB.recvFrom sock (2^(16::Int))
         ts <- now
         let evt = createEvent ts datagram
-        notAppended <- atomically $ bufferAppend th buf [evt]
-        runAction $ case notAppended of
+        notAppended <- atomically $ appendBuffer buf [evt]
+        _ <- runAction $ case notAppended of
             [] -> tell DEBUG $ show evt
             [x] -> tell NOTICE $ "error appending: " ++ show x
             _ -> tell ERROR $ "internal error: unexpected events"
+        forM_ dropList $ handleDrop notAppended
 
   where
     createEvent (t1,t2) datagram = Event
         { eChanel = ch
         , eSourceId = recorderId
         , eUtcTime = t1
-        , eMonotonicTime = t2
-        , eArchive = arch
+        , eBootTime = t2
         , eSessionId = sessionId
         , eValue = datagram
         }
 
-startOutput :: Output -> Buffer -> Thrashold -> TVar TimeSpec
+    handleDrop [] _ = return ()
+    handleDrop lst dst = case dst of
+        DSyslog _fmt -> SL.withSyslog slOpts $ \syslog -> do
+            forM_ lst $ \evt -> do
+                --TODO: format message
+                let msg = "["++show i++"] " ++ show evt
+                syslog SL.USER SL.Notice $ pack msg
+        DFile filename _fmt (Delimiter delim) -> do
+            -- TODO: format messages
+            let msgs = do
+                    evt <- lst
+                    return $ show evt ++ delim
+            appendFile filename $ concat msgs
+
+    slOpts = SL.defaultConfig
+        { SL.identifier = pack $ "vcr"
+        }
+
+startOutput :: Output -> Buffer -> TVar TimeSpec
     -> Action (Async a)
-startOutput o buf th tick = do
+startOutput o buf tick = do
     tell INFO "starting"
     liftIO $ async $ forever $ do
-        msgs <- liftIO $ atomically $ bufferRead th buf tick
+        msgs <- liftIO $ atomically $ readBuffer buf tick
         case o of
 
             -- send data over http
@@ -234,7 +285,8 @@ startOutput o buf th tick = do
                 process
 
             -- print to stdout
-            OStdout -> mapM_ print msgs
+            -- TODO: use format options
+            OStdout _fmt _delimit -> mapM_ print msgs
 
   where
     tell prio msg = logM (show o) prio msg

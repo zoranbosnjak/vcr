@@ -1,4 +1,14 @@
-module Buffer where
+module Buffer
+    ( Buffer
+    , buffer
+    , Thrashold (maxEvents, maxBytes, maxSeconds)
+    , thrashold
+    , newBuffer
+    , appendBuffer
+    , readBuffer
+    , kiloMega
+    , anyLimit
+    ) where
 
 import Control.Concurrent.STM
 import Control.Monad hiding (forever)
@@ -14,13 +24,33 @@ data Buffer = Buffer
     , bufCnt        :: TVar Integer
     , bufBytes      :: TVar Integer
     , bufOldest     :: TVar (Maybe TimeSpec)
+    , bufAppendTh   :: Thrashold
+    , bufReadTh     :: Thrashold
     }
+
+buffer :: TVar [Event] -> TVar Integer -> TVar Integer -> TVar (Maybe TimeSpec)
+    -> Thrashold -> Thrashold -> Buffer
+buffer = Buffer
 
 data Thrashold = Thrashold
     { maxEvents     :: Maybe Integer
     , maxBytes      :: Maybe Integer
     , maxSeconds    :: Maybe Double
     } deriving (Eq, Show)
+
+instance Monoid Thrashold where
+    mempty = Thrashold Nothing Nothing Nothing
+    Thrashold a1 b1 c1 `mappend` Thrashold a2 b2 c2 = Thrashold
+        (lower a1 a2)
+        (lower b1 b2)
+        (lower c1 c2)
+      where
+        lower Nothing x = x
+        lower x Nothing = x
+        lower (Just a) (Just b) = Just (min a b)
+
+thrashold :: (Maybe Integer) -> (Maybe Integer) -> (Maybe Double) -> Thrashold
+thrashold = Thrashold
 
 anyLimit :: Thrashold -> Bool
 anyLimit (Thrashold a b c) = isJust a || isJust b || isJust c
@@ -36,27 +66,28 @@ kiloMega = eitherReader $ \arg -> do
         [(r, "")] -> return (r * (1024^(b::Int)))
         _         -> Left $ "cannot parse value `" ++ arg ++ "'"
 
-bufferNew :: STM Buffer
-bufferNew = Buffer
+newBuffer :: Thrashold -> Thrashold -> STM Buffer
+newBuffer appendTh readTh = Buffer
     <$> newTVar []
     <*> newTVar 0
     <*> newTVar 0
     <*> newTVar Nothing
+    <*> pure appendTh
+    <*> pure readTh
 
 secondsSince :: TimeSpec -> TimeSpec -> Double
 secondsSince t1 t2 = (/ (10^(9::Int))) $ fromIntegral (t2' - t1') where
     t2' = toNanoSecs t2
     t1' = toNanoSecs t1
 
-bufferAppend :: Thrashold -> Buffer -> [Event] -> STM [Event]
-bufferAppend th buf evts = do
-
+appendBuffer :: Buffer -> [Event] -> STM [Event]
+appendBuffer buf evts = do
     cnt <- readTVar $ bufCnt buf
     bytes <- readTVar $ bufBytes buf
     oldest <- readTVar $ bufOldest buf
 
     let sizes = map sizeOf evts
-        times = map eMonotonicTime evts
+        times = map eBootTime evts
 
         counts  = [(cnt+1)..]
         mem     = drop 1 $ scanl' (+) bytes sizes
@@ -64,9 +95,10 @@ bufferAppend th buf evts = do
             Nothing -> repeat Nothing
             Just t0 -> map (Just . secondsSince t0) times
 
-        reached :: [Bool]
-        reached = zipWith3 (thOverflow th) counts mem ages
-        canTake = length $ takeWhile not reached
+        th = bufAppendTh buf
+        overLimit :: [Bool]
+        overLimit = zipWith3 (thOverflow False th) counts mem ages
+        canTake = length $ takeWhile not overLimit
         (a,b) = splitAt canTake evts
 
     -- append events
@@ -81,21 +113,21 @@ bufferAppend th buf evts = do
             True -> return ()
             False -> do
                 let x = last newContent
-                writeTVar (bufOldest buf) (Just $ eMonotonicTime x)
+                writeTVar (bufOldest buf) (Just $ eBootTime x)
 
     -- return not appended events
     return b
 
 -- | Read buffer content when ready to read.
-bufferRead :: Thrashold -> Buffer -> TVar TimeSpec -> STM [Event]
-bufferRead th buf tick = do
+readBuffer :: Buffer -> TVar TimeSpec -> STM [Event]
+readBuffer buf tick = do
     cnt <- readTVar $ bufCnt buf
     bytes <- readTVar $ bufBytes buf
     oldest <- readTVar $ bufOldest buf
     t <- readTVar tick
     let age = fmap (\o -> secondsSince o t) oldest
 
-    case thOverflow th cnt bytes age of
+    case thOverflow True (bufReadTh buf) cnt bytes age of
         False -> retry
         True -> do
             writeTVar (bufCnt buf) 0
@@ -103,8 +135,8 @@ bufferRead th buf tick = do
             writeTVar (bufOldest buf) Nothing
             swapTVar (bufData buf) []
 
-thOverflow :: Thrashold -> Integer -> Integer -> Maybe Double -> Bool
-thOverflow th cnt bytes age = or [chkSize, chkBytes, chkTime]
+thOverflow :: Bool -> Thrashold -> Integer -> Integer -> Maybe Double -> Bool
+thOverflow inclEq th cnt bytes age = or [chkSize, chkBytes, chkTime]
   where
     chkSize = cmp (maxEvents th) cnt
     chkBytes = cmp (maxBytes th) bytes
@@ -113,5 +145,7 @@ thOverflow th cnt bytes age = or [chkSize, chkBytes, chkTime]
         Just age' -> cmp (maxSeconds th) age'
 
     cmp Nothing _ = False
-    cmp (Just x) y = y >= x
+    cmp (Just x) y = case inclEq of
+        True -> y >= x
+        False -> y > x
 

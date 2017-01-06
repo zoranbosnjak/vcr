@@ -1,41 +1,45 @@
+----------------
+-- |
+-- Module:      Buffer
+--
+-- Buffer manipulations
+--
+
 module Buffer
     ( Buffer
-    , buffer
-    , Thrashold (maxEvents, maxBytes, maxSeconds)
+    , Thrashold (thLength, thBytes, thSeconds)
     , thrashold
+    , isBelow
+
+    -- buffer manipulation
     , newBuffer
     , appendBuffer
     , readBuffer
+
+    -- helpers
     , kiloMega
     , anyLimit
     ) where
 
 import Control.Concurrent.STM
-import Control.Monad hiding (forever)
-import Data.List
+import Data.Foldable
 import Data.Maybe
+import Data.Sequence as DS
 import Options.Applicative
 import System.Clock
 
 import Event
 
 data Buffer = Buffer
-    { bufData       :: TVar [Event]
-    , bufCnt        :: TVar Integer
-    , bufBytes      :: TVar Integer
-    , bufOldest     :: TVar (Maybe TimeSpec)
+    { bufData       :: TVar (Seq Event)
     , bufAppendTh   :: Thrashold
     , bufReadTh     :: Thrashold
     }
 
-buffer :: TVar [Event] -> TVar Integer -> TVar Integer -> TVar (Maybe TimeSpec)
-    -> Thrashold -> Thrashold -> Buffer
-buffer = Buffer
-
 data Thrashold = Thrashold
-    { maxEvents     :: Maybe Integer
-    , maxBytes      :: Maybe Integer
-    , maxSeconds    :: Maybe Double
+    { thLength      :: Maybe Int
+    , thBytes       :: Maybe Integer
+    , thSeconds     :: Maybe Double
     } deriving (Eq, Show)
 
 instance Monoid Thrashold where
@@ -49,12 +53,21 @@ instance Monoid Thrashold where
         lower x Nothing = x
         lower (Just a) (Just b) = Just (min a b)
 
-thrashold :: (Maybe Integer) -> (Maybe Integer) -> (Maybe Double) -> Thrashold
+-- | Make sure that th1 (readTh) will react before th2 (appendTh), equal is OK.
+isBelow :: Thrashold -> Thrashold -> Bool
+isBelow (Thrashold a1 b1 c1) (Thrashold a2 b2 c2) = and [a1<!a2, b1<!b2, c1<!c2]
+  where
+    Just a <! Just b = a <= b
+    _ <! Nothing = True
+    Nothing <! _ = False
+
+thrashold :: (Maybe Int) -> (Maybe Integer) -> (Maybe Double) -> Thrashold
 thrashold = Thrashold
 
 anyLimit :: Thrashold -> Bool
-anyLimit (Thrashold a b c) = isJust a || isJust b || isJust c
+anyLimit (Thrashold a b c) = or [isJust a, isJust b, isJust c]
 
+-- | Helper function to convert eg. 1k -> 1024
 kiloMega :: ReadM Integer
 kiloMega = eitherReader $ \arg -> do
     let (a,b) = case last arg of
@@ -66,86 +79,64 @@ kiloMega = eitherReader $ \arg -> do
         [(r, "")] -> return (r * (1024^(b::Int)))
         _         -> Left $ "cannot parse value `" ++ arg ++ "'"
 
+-- | Create new buffer.
 newBuffer :: Thrashold -> Thrashold -> STM Buffer
 newBuffer appendTh readTh = Buffer
-    <$> newTVar []
-    <*> newTVar 0
-    <*> newTVar 0
-    <*> newTVar Nothing
+    <$> newTVar mempty
     <*> pure appendTh
     <*> pure readTh
 
-secondsSince :: TimeSpec -> TimeSpec -> Double
-secondsSince t1 t2 = (/ (10^(9::Int))) $ fromIntegral (t2' - t1') where
-    t2' = toNanoSecs t2
-    t1' = toNanoSecs t1
-
-appendBuffer :: Buffer -> [Event] -> STM [Event]
-appendBuffer buf evts = do
-    cnt <- readTVar $ bufCnt buf
-    bytes <- readTVar $ bufBytes buf
-    oldest <- readTVar $ bufOldest buf
-
-    let sizes = map sizeOf evts
-        times = map eBootTime evts
-
-        counts  = [(cnt+1)..]
-        mem     = drop 1 $ scanl' (+) bytes sizes
-        ages    = case oldest of
-            Nothing -> repeat Nothing
-            Just t0 -> map (Just . secondsSince t0) times
-
-        th = bufAppendTh buf
-        overLimit :: [Bool]
-        overLimit = zipWith3 (thOverflow False th) counts mem ages
-        canTake = length $ takeWhile not overLimit
-        (a,b) = splitAt canTake evts
-
-    -- append events
+-- | Append new events to the buffer.
+-- We need to respect buffer append thrashold, so in case of
+-- overflow, some events will not be appended (but returned).
+appendBuffer :: TimeSpec -> Buffer -> [Event] -> STM [Event]
+appendBuffer ts buf evts = do
     content <- readTVar $ bufData buf
-    let newContent = concat [a,content]
-
+    let (newContent, leftover) = appendItems content evts
     writeTVar (bufData buf) newContent
-    modifyTVar (bufCnt buf) (+ (fromIntegral $ length a))
-    modifyTVar (bufBytes buf) (+ (foldl' (+) 0 (map sizeOf a)))
-    when (isNothing oldest) $ do
-        case null newContent of
-            True -> return ()
-            False -> do
-                let x = last newContent
-                writeTVar (bufOldest buf) (Just $ eBootTime x)
-
-    -- return not appended events
-    return b
+    return leftover
+  where
+    appendItems content [] = (content, [])
+    appendItems content lst@(x:xs) =
+        let newContent = content `mappend` singleton x
+        in case thCompare ts newContent (bufAppendTh buf) of
+            GT -> (content, lst)
+            _ -> appendItems newContent xs
 
 -- | Read buffer content when ready to read.
-readBuffer :: Buffer -> TVar TimeSpec -> STM [Event]
-readBuffer buf tick = do
-    cnt <- readTVar $ bufCnt buf
-    bytes <- readTVar $ bufBytes buf
-    oldest <- readTVar $ bufOldest buf
-    t <- readTVar tick
-    let age = fmap (\o -> secondsSince o t) oldest
-
-    case thOverflow True (bufReadTh buf) cnt bytes age of
-        False -> retry
-        True -> do
-            writeTVar (bufCnt buf) 0
-            writeTVar (bufBytes buf) 0
-            writeTVar (bufOldest buf) Nothing
-            swapTVar (bufData buf) []
-
-thOverflow :: Bool -> Thrashold -> Integer -> Integer -> Maybe Double -> Bool
-thOverflow inclEq th cnt bytes age = or [chkSize, chkBytes, chkTime]
+-- Read only as many events as allowed by the thrashold
+readBuffer :: TVar TimeSpec -> Buffer -> STM [Event]
+readBuffer tick buf = do
+    ts <- readTVar tick
+    content <- readTVar $ bufData buf
+    (contentReady, leftover) <- readItems ts DS.empty content
+    writeTVar (bufData buf) leftover
+    return $ toList contentReady
   where
-    chkSize = cmp (maxEvents th) cnt
-    chkBytes = cmp (maxBytes th) bytes
-    chkTime = case age of
-        Nothing -> False
-        Just age' -> cmp (maxSeconds th) age'
+    readItems ts acc content = case viewr content of
+        EmptyR -> retry
+        (rest :> aR) ->
+            let newAcc = aR <| acc
+            in case thCompare ts newAcc (bufReadTh buf) of
+                LT -> readItems ts newAcc rest
+                _ -> return (newAcc, rest)
 
-    cmp Nothing _ = False
-    cmp (Just x) y = case inclEq of
-        True -> y >= x
-        False -> y > x
+-- | Compare content of the buffer with the thrashold
+thCompare :: TimeSpec -> Seq Event -> Thrashold -> Ordering
+thCompare ts s th = maximum [thCompareLength, thCompareBytes, thCompareSeconds]
+  where
+    mCompare _ Nothing = LT
+    mCompare actual (Just limit) = compare actual limit
+
+    thCompareLength = mCompare (DS.length s) (thLength th)
+    thCompareBytes = mCompare (foldr (+) 0 (fmap sizeOf s)) (thBytes th)
+    thCompareSeconds = mCompare age (thSeconds th) where
+        oldest = viewr s
+        age = case oldest of
+            (_ :> aR) -> secondsSince (eBootTime aR) ts
+            _ -> 0
+        secondsSince :: TimeSpec -> TimeSpec -> Double
+        secondsSince t1 t2 = (/ (10^(9::Int))) $ fromIntegral (t2' - t1') where
+            t2' = toNanoSecs t2
+            t1' = toNanoSecs t1
 

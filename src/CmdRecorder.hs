@@ -17,7 +17,6 @@ import Network.Multicast
 import Network.Socket
 import Network.Socket.ByteString as NB
 import Options.Applicative
-import System.Clock
 import System.Log.Logger (Priority(..))
 import qualified System.Posix.Syslog as SL
 
@@ -41,7 +40,7 @@ import IO
 
 cmdRecorder :: ParserInfo (Action ())
 cmdRecorder = info (helper <*> (runCmd <$> options))
-    (progDesc "recorder from various sources")
+    (progDesc "event recorder")
 
 data Options = Options
     { optIdent  :: Maybe String
@@ -161,6 +160,9 @@ runCmd opts = do
     assert (anyLimit $ optBatchSize opts)
         "Some limit in batch size is required."
 
+    assert (optBatchSize opts `isBelow` optBufferSize opts)
+        "Buffer size too small for a given batch size."
+
     sessionId <- liftIO nextRandom >>= return . U.toString
 
     recorderId <- do
@@ -178,18 +180,13 @@ runCmd opts = do
         (Chanel $ optChanel opts)
         (optDrop opts)
 
-    tick <- liftIO (now >>= \(_,t) -> newTVarIO t)
-    ticker <- liftIO $ async $ forever $ do
-        threadDelaySec 1
-        (_, t) <- now
-        atomically $ writeTVar tick t
-
-    output <- startOutput (optOutput opts) buf tick
+    output <- startOutput (optOutput opts) buf
 
     -- all threads shall remain running
-    _ <- liftIO $ waitAnyCatchCancel $ [input, ticker, output]
+    _ <- liftIO $ waitAnyCatchCancel $ [input, output]
     throw "process terminated"
 
+-- | Copy messages from input to buffer (or call drop handler).
 startInput :: Input -> Buffer -> SessionId -> SourceId -> Chanel
     -> [Drop] -> Action (Async a)
 startInput i buf sessionId recorderId ch dropList = do
@@ -219,7 +216,7 @@ startInput i buf sessionId recorderId ch dropList = do
         (datagram, _addr) <- NB.recvFrom sock (2^(16::Int))
         ts <- now
         let evt = createEvent ts datagram
-        notAppended <- atomically $ appendBuffer buf [evt]
+        notAppended <- atomically $ appendBuffer (snd ts) buf [evt]
         _ <- runAction $ case notAppended of
             [] -> tell DEBUG $ show evt
             [x] -> tell NOTICE $ "error appending: " ++ show x
@@ -257,43 +254,50 @@ startInput i buf sessionId recorderId ch dropList = do
         { SL.identifier = pack $ "vcr"
         }
 
-startOutput :: Output -> Buffer -> TVar TimeSpec
-    -> Action (Async a)
-startOutput o buf tick = do
+-- | Copy messages from buffer to output.
+startOutput :: Output -> Buffer -> Action (Async ())
+startOutput o buf = do
     tell INFO "starting"
-    liftIO $ async $ forever $ do
-        msgs <- liftIO $ atomically $ readBuffer buf tick
-        case o of
-
-            -- send data over http
-            OHttp ip port -> do
-
-                request' <- parseRequest $
-                    "PUT http://"++ip++":"++port++"/events/json"
-                let request = setRequestBodyJSON msgs $ request'
-                    retryWith s = do
-                        tellIO NOTICE s
-                        threadDelaySec 3
-                        process
-                    process = do
-                        eResponse <- try (httpLBS request)
-                        case eResponse of
-                            Left (SomeException _e) ->
-                                retryWith "Unable to connect."
-                            Right resp -> do
-                                case getResponseStatusCode resp of
-                                    200 -> tellIO DEBUG "Request processed."
-                                    _ -> do retryWith $ show resp
-                process
-
-            -- print to stdout
-            -- TODO: use format options
-            OStdout _fmt _delimit -> mapM_ print msgs
+    tick <- liftIO (now >>= \(_,t) -> newTVarIO t)
+    liftIO $ async $ race_ (ticker tick) (sender tick)
 
   where
     tell prio msg = logM (show o) prio msg
     tellIO a b = (runAction $ tell a b) >>= \_ -> return ()
 
-threadDelaySec :: Double -> IO ()
-threadDelaySec = threadDelay . round . (1000000*)
+    threadDelaySec :: Double -> IO ()
+    threadDelaySec = threadDelay . round . (1000000*)
+
+    ticker tick = forever $ do
+        threadDelaySec 1
+        (_, t) <- now
+        atomically $ writeTVar tick t
+
+    sender tick = forever $ do
+        msgs <- liftIO $ atomically $ readBuffer tick buf
+        case o of
+            -- send data over http
+            OHttp ip port -> sendHttp ip port msgs
+
+            -- print to stdout
+            -- TODO: use format options
+            OStdout _fmt _delimit -> mapM_ print msgs
+
+    sendHttp ip port msgs = do
+        request <- parseRequest $ "PUT http://"++ip++":"++port++"/events/json"
+        let request' = setRequestBodyJSON msgs $ request
+            retryWith s = do
+                tellIO NOTICE s
+                threadDelaySec 3
+                process
+            process = do
+                eResponse <- try (httpLBS request')
+                case eResponse of
+                    Left (SomeException _e) ->
+                        retryWith "Unable to connect."
+                    Right resp -> do
+                        case getResponseStatusCode resp of
+                            200 -> tellIO DEBUG "Request processed."
+                            _ -> do retryWith $ show resp
+        process
 

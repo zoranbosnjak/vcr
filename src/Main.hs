@@ -15,8 +15,8 @@ import System.Log.Handler.Simple
 
 -- local imports
 import Action
-import CmdRecorder
-import CmdServer
+import CmdRecord
+import CmdServe
 
 data Options = Options
     { optDebug :: Maybe Priority
@@ -25,8 +25,8 @@ data Options = Options
 
 commands :: [(String, ParserInfo (Action ()))]
 commands =
-    [ ("recorder", cmdRecorder)
-    , ("server", cmdServer)
+    [ ("recorder", cmdRecord)
+    , ("server", cmdServe)
     ]
 
 options :: Parser Options

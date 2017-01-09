@@ -1,10 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module CmdServer (cmdServer) where
+module CmdServe (cmdServe) where
 
-cmdServer :: a
-cmdServer = undefined
+cmdServe :: a
+cmdServe = undefined
 
 {-
 import Control.Concurrent

@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module CmdRecorder (cmdRecorder) where
+module CmdRecord (cmdRecord) where
 
 import Control.Exception hiding (throw, assert)
 import Control.Concurrent
@@ -38,8 +38,8 @@ import IO
       naj se buffer prazni postopoma, ne nujno vse naenkrat
 -}
 
-cmdRecorder :: ParserInfo (Action ())
-cmdRecorder = info (helper <*> (runCmd <$> options))
+cmdRecord :: ParserInfo (Action ())
+cmdRecord = info (helper <*> (runCmd <$> options))
     (progDesc "event recorder")
 
 data Options = Options

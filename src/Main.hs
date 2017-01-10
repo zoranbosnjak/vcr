@@ -25,8 +25,8 @@ data Options = Options
 
 commands :: [(String, ParserInfo (Action ()))]
 commands =
-    [ ("recorder", cmdRecord)
-    , ("server", cmdServe)
+    [ ("record", cmdRecord)
+    , ("serve", cmdServe)
     ]
 
 options :: Parser Options

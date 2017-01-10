@@ -127,7 +127,7 @@ batchParse :: Parser Thrashold
 batchParse = thrashold
     <$> optional (option auto
         (long "batchEvents" <> help "wait for number of events before send"))
-    <*> optional (option auto
+    <*> optional (option kiloMega
         (long "batchBytes" <> help "wait for size in bytes before send"))
     <*> optional (option auto
         (long "batchSeconds" <> help "wait seconds before send"))

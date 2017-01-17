@@ -3,9 +3,11 @@
 
 module Event where
 
+import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Aeson
 import Data.Aeson.Types
 import qualified Data.ByteString as BS
+import Data.ByteString.Char8 (pack)
 import Data.Time
 import GHC.Generics
 import System.Clock
@@ -31,25 +33,26 @@ FormatTXT -> TXT
 -}
 
 newtype Hash = Hash String deriving (Generic, Eq)
+instance Show Hash where show (Hash s) = s
 
 newtype Chanel = Chanel String deriving (Generic, Eq)
 instance ToJSON Chanel
 instance FromJSON Chanel
-instance Show Chanel where show (Chanel s) = show s
+instance Show Chanel where show (Chanel s) = s
 instance Arbitrary Chanel where
     arbitrary = Chanel <$> arbitrary
 
 newtype SourceId = SourceId String deriving (Generic, Eq)
 instance ToJSON SourceId
 instance FromJSON SourceId
-instance Show SourceId where show (SourceId s) = show s
+instance Show SourceId where show (SourceId s) = s
 instance Arbitrary SourceId where
     arbitrary = SourceId <$> arbitrary
 
 newtype SessionId = SessionId String deriving (Generic, Eq)
 instance ToJSON SessionId
 instance FromJSON SessionId
-instance Show SessionId where show (SessionId s) = show s
+instance Show SessionId where show (SessionId s) = s
 instance Arbitrary SessionId where
     arbitrary = SessionId <$> arbitrary
 
@@ -76,15 +79,13 @@ instance Arbitrary Event where
         diffT = secondsToDiffTime <$> arbitrary
 
 instance Show Event where
-    show e = foldr1 (\a b -> a ++ " " ++ b) $
-        [ "Event"
-        , show $ eChanel e
+    show e = "Event " ++ show
+        [ show $ eChanel e
         , show $ eSourceId e
-        , show $ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S.%qZ" $
-            eUtcTime e
+        , formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S.%qZ" $ eUtcTime e
         , show $ toNanoSecs $ eBootTime e
         , show $ eSessionId e
-        , show $ hexlify $ eValue e
+        , hexlify $ eValue e
         ]
 
 instance ToJSON Event where
@@ -133,7 +134,17 @@ sizeOf = fromIntegral . BS.length . eValue
 
 -- hash event
 hash :: Event -> Hash
-hash = undefined
+hash e = Hash $
+    hexlify $ SHA256.finalize $ (flip SHA256.updates) parts $ SHA256.init
+  where
+    parts =
+        [ pack . show $ eChanel e
+        , pack . show $ eSourceId e
+        , pack . show $ eUtcTime e
+        , pack . show $ eBootTime e
+        , pack . show $ eSessionId e
+        , eValue e
+        ]
 
 -- get current time (boot and UTC)
 now :: IO (UTCTime, TimeSpec)

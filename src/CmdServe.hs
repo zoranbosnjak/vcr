@@ -3,8 +3,6 @@
 
 module CmdServe (cmdServe) where
 
--- TODO: propagate exception in handlers
-
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Monad
@@ -12,26 +10,33 @@ import Control.Monad.Trans
 import Control.Monad.Except
 import Data.Aeson
 import Data.List
-import Database.HDBC
+import Database.HDBC as DB
 import Database.HDBC.Sqlite3 (connectSqlite3)
 import Network.HTTP.Types
---import Network.Wai
+import Network.Wai.Handler.Warp
 import Options.Applicative
 import Web.Scotty as W
+import System.Clock
 import System.Log.Logger (Priority(..))
 
 import Action
 import Event
 import IO
 
+-- TODO: get all about Event from the module, eg. toNanosecs
+
 cmdServe :: ParserInfo (Action ())
 cmdServe = info (helper <*> (runCmd <$> CmdServe.options))
     (progDesc "server part of the recorder")
 
+type RequestedReplicas = Int
+type ActualReplicas = Int
+data ConnStatus = ConnAlive | ConnDead
+
 data Options = Options
     { optServe :: [Server]
     , optStore :: [Store]
-    , optReplicas :: Int
+    , optReplicas :: RequestedReplicas
     } deriving (Eq, Show)
 
 data Server
@@ -81,38 +86,77 @@ store = subparser $
 runCmd :: CmdServe.Options -> Action ()
 runCmd opts = do
     logM "init" INFO $ show opts
+    tid <- liftIO $ myThreadId
 
-    -- connect to databases
-    connections <- forM (optStore opts) $ \i -> case i of
-        StoreSQLite3 path -> liftIO $ connectSqlite3 path
-        StorePostgreSQL _s -> undefined
+    assert (optReplicas opts <= length (optStore opts))
+        "number of requested replicas must be <= available database connections"
 
-    mapM_ (lift . createTables) connections
+    -- connect to databases, (re)create tables
+    connections <- forM (optStore opts) $ \i -> do
+        conn <- case i of
+            StoreSQLite3 path -> liftIO $ connectSqlite3 path
+            StorePostgreSQL _s -> undefined
+        _ <- lift $ createTables conn
+        return conn
 
-{-
     -- start servers
     servers <- forM (optServe opts) $ \i -> liftIO $ async $ case i of
-        ServerHttp ip port -> serveHttp ip port
+        ServerHttp ip port ->
+            serveHttp tid ip port connections (optReplicas opts)
 
     -- all threads shall remain running
-    _ <- liftIO $ waitAnyCatchCancel $ servers -- ++ ...
+    _ <- liftIO $ waitAnyCatchCancel servers
     throw "process terminated"
--}
 
+-- TODO: runSql wrapper, check and return connection status
+
+-- | Create database tables.
+createTables :: (IConnection conn) => conn -> IO ConnStatus
 createTables conn = do
-    _ <- run conn (unlines
-        [ "CREATE TABLE IF NOT EXISTS test"
-        , "(id INTEGER NOT NULL, desc VARCHAR(80))"
+    _ <- DB.run conn (unwords
+        [ "CREATE TABLE IF NOT EXISTS events"
+        , "( hash VARCHAR(255) NOT NULL PRIMARY KEY ON CONFLICT REPLACE"
+        , ", ch VARCHAR(255)"
+        , ", srcId VARCHAR(255)"
+        , ", utcTime DATETIME"
+        , ", sesId VARCHAR(255)"
+        , ", monoTime BIGINT"
+        , ", value BLOB"
+        , ")"
         ]) []
     commit conn
+    return ConnAlive
 
-{-
-type RequestedReplicas = Int
-type ActualReplicas = Int
-type Success = Bool
+-- | Deposit events to a database.
+deposit :: (IConnection conn) => conn -> [Event] -> IO ConnStatus
+deposit conn events = do
+    mapM_ saveEvent events
+    commit conn
+    return ConnAlive
+  where
+    saveEvent e = DB.run conn "INSERT INTO events VALUES (?,?,?,?,?,?,?)"
+        [ toSql $ show $ hash e
+        , toSql $ show $ eChanel e
+        , toSql $ show $ eSourceId e
+        , toSql $ eUtcTime e
+        , toSql $ show $ eSessionId e
+        , toSql $ toNanoSecs $ eBootTime e
+        , toSql $ eValue e
+        ]
 
-serveHttp :: Ip -> Int -> IO ()
-serveHttp _ip port = scotty port $ do
+scOpts :: ThreadId -> Int -> W.Options
+scOpts _parent port =
+    let change = (setPort port) -- TODO: . (setOnException quit)
+        {-
+        quit req e = do
+            _ <- runAction $ logM "web" ERROR $ show e
+            killThread parent
+        -}
+    in W.Options { verbose = 0 , settings = change defaultSettings }
+
+serveHttp :: (IConnection c) =>
+    ThreadId -> Ip -> RequestedReplicas -> [c] -> Int -> IO ()
+serveHttp parent _ip port conns replicas = scottyOpts (scOpts parent port) $ do
     let on uri method act = addroute method uri $ do
             -- this is required for testing
             addHeader "Access-Control-Allow-Origin" "*"
@@ -135,6 +179,7 @@ serveHttp _ip port = scotty port $ do
             _ <- lift $ runAction $ logM "web" level msg
             obj
 
+        -- run action or throw error
         act .! e = do
             mval <- lift act
             case mval of
@@ -150,8 +195,10 @@ serveHttp _ip port = scotty port $ do
         noDecode = (status400, W.text "unable to decode body")
         --noResource = (status404, W.text "not found")
 
+    -- quick response check
     "/ping" `onGet` return (status200, W.text "pong")
 
+    -- simulate processing delay
     "/delay/:d" `onGet` do
         let threadDelaySec = threadDelay . round . (1000000*)
 
@@ -168,9 +215,12 @@ serveHttp _ip port = scotty port $ do
             undefined
 
         "/events/json" `onPut` do
-            val :: [Event] <- (fmap decode body) .! noDecode
-            liftIO $ print val
-            return ok
+            events :: [Event] <- (fmap decode body) .! noDecode
+            n <- liftIO $ safeDeposit conns replicas events
+            case n >= replicas of
+                True -> return ok
+                False -> return (status503,
+                    W.text "unable to store to all requested replicas")
 
         "/events/bson" `onPut` undefined
         "/events/txt"  `onPut` undefined
@@ -179,42 +229,46 @@ serveHttp _ip port = scotty port $ do
         "/events" `onDelete` do
             undefined
 
--- try to store events to a number of handlers
+-- try to store events to a number of connections
 -- This function returns actual number of replicas,
 -- that all given events are stored.
--- distribute handlers randomly, where the seed is
+-- distribute connections randomly, where the seed is
 -- the chanel id of the event, so that the same chanel data
 -- tend to go to the same replica
-safeDeposit :: (Eq storeHandler) =>
-    [storeHandler] -> [Event] -> RequestedReplicas -> IO ActualReplicas
-safeDeposit handlers evts requested = process requested distinctChanels handlers
+--
+-- TODO: run in parallel (async), starting at "requested" instances,
+--  then try one more replica when detected a failure on one connection.
+--
+safeDeposit :: (IConnection conn) =>
+    [conn] -> RequestedReplicas -> [Event] -> IO ActualReplicas
+safeDeposit conns requested evts =
+    process requested distinctChanels enumeratedConnections
   where
-    distinctChanels = nub $ map eChanel evts
-    process n [] _ = return n -- all done, no more chanels
-    process _ _ [] = return 0 -- no more active handlers
-    process n (chanel:xs) handlers' = do
-        let lst = filter (\e -> eChanel e == chanel) evts
-            handlers'' = permutate handlers' chanel
-        deadHandlers <- depositMany requested [] handlers'' lst
-        let handlers''' = [h | h<-handlers', h `notElem` deadHandlers]
-            nextN = min n $ length handlers'''
-        process nextN xs handlers'''
 
-    -- deposit events to n handlers, return list of dead handlers
-    depositMany n dhs hs lst
-        | n <= 0 || null hs = return dhs
-        | otherwise = do
-            let handler = head hs
-                rest = tail hs
-            ok <- deposit handler lst
-            case ok of
-                True -> depositMany (n-1) dhs hs lst
-                False -> depositMany n (handler:dhs) rest lst
+    distinctChanels = nub $ map eChanel evts
+
+    enumeratedConnections = zip [(1::Int)..] conns
 
     permutate lst _seed = lst -- TODO
 
--- deposit events to a single handler
-deposit :: storeHandler -> [Event] -> IO Success
-deposit _handler _lst = undefined
--}
+    -- process all chanels
+    process n [] _ = return n -- all done, no more chanels
+    process _ _ [] = return 0 -- not able, no more active connections
+    process n (chanel:xs) conns' = do
+        let lst = [e | e <- evts, eChanel e == chanel]
+            conns'' = permutate conns' chanel
+        deadConns <- depositMany requested [] conns'' lst
+        let nextConns = [(i,c) | (i,c) <- conns'', i `notElem` deadConns]
+            nextN = min n $ length nextConns
+        process nextN xs nextConns
+
+    -- deposit events to n connections, return list of dead connections
+    depositMany n failed conns' lst
+        | n <= 0 || null conns' = return failed
+        | otherwise = do
+            let ((ix,conn),rest) = (head conns', tail conns')
+            st <- deposit conn lst
+            case st of
+                ConnAlive -> depositMany (n-1) failed conns' lst
+                ConnDead -> depositMany n (ix:failed) rest lst
 

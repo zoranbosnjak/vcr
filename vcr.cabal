@@ -50,5 +50,8 @@ executable vcr
         wai >=3.2 && <3.3,
         http-conduit >=2.1 && <2.2,
         hsyslog == 4,
+        HDBC >=2.4 && <2.5,
+        HDBC-sqlite3 >=2.3 && <2.4,
+        HDBC-postgresql >=2.3 && <2.4,
         base == 4.9.*
 

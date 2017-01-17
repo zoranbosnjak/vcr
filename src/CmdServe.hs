@@ -3,10 +3,8 @@
 
 module CmdServe (cmdServe) where
 
-cmdServe :: a
-cmdServe = undefined
+-- TODO: propagate exception in handlers
 
-{-
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Monad
@@ -14,6 +12,8 @@ import Control.Monad.Trans
 import Control.Monad.Except
 import Data.Aeson
 import Data.List
+import Database.HDBC
+import Database.HDBC.Sqlite3 (connectSqlite3)
 import Network.HTTP.Types
 --import Network.Wai
 import Options.Applicative
@@ -24,21 +24,14 @@ import Action
 import Event
 import IO
 
-{- TODO:
-    - propagate exception in handlers
-
--}
-
-cmdServer :: ParserInfo (Action ())
-cmdServer = info (helper <*> (runCmd <$> CmdServer.options))
+cmdServe :: ParserInfo (Action ())
+cmdServe = info (helper <*> (runCmd <$> CmdServe.options))
     (progDesc "server part of the recorder")
 
 data Options = Options
     { optServe :: [Server]
     , optStore :: [Store]
-    , optDump :: [Dump]
-    -- , optReplicas :: Maybe Int
-    -- , optKeepDays :: Maybe Double
+    , optReplicas :: Int
     } deriving (Eq, Show)
 
 data Server
@@ -46,37 +39,25 @@ data Server
     deriving (Eq, Show)
 
 data Store
-    = StoreMemory Integer   -- store up to N events in memory
-    -- | StoreSql Address KeepDays
-    -- | StoreRemote Http
+    = StoreSQLite3 FilePath
+    | StorePostgreSQL String
+    -- | StoreRemote Http   -- permanent store to a remote server (cascade)
+    -- = StoreMemory Integer   -- store up to N events in memory (for test)
+    -- | StoreSql Address KeepDays -- permanent store
     deriving (Eq, Show)
 
-data Dump
-    = DumpStdout
-    | DumpStderr
-    deriving (Eq, Show)
-
-options :: Parser CmdServer.Options
-options = CmdServer.Options
+options :: Parser CmdServe.Options
+options = CmdServe.Options
     <$> some server
     <*> some store
-    <*> many dump
-    {-
-    <*> (optional $ option auto
-        (short 'n' <> long "replicas" <> help "number of replicas"))
-    <*> (optional $ option auto
-        (long "keepDays" <> help "keep replicas N days"))
-    -- keep/drop days
-    -- keep/drop events
-    -- keep/drop bytes
-
-    -- keep* upoštevaj vse
-    -- drop* upoštevaj prvega
-    -}
+    <*> option auto
+        (short 'n' <> long "replicas"
+            <> help "requested number of replicas before acknowledge write"
+            <> value 1)
 
 server :: Parser Server
 server = subparser $
-    command "serve" (info (helper <*> level2) (progDesc "server definition"))
+    command "server" (info (helper <*> level2) (progDesc "server definition"))
   where
     level2 = subparser $
         command "http" (info (helper <*> http) idm)
@@ -89,28 +70,26 @@ store = subparser $
     command "store" (info (helper <*> level2) (progDesc "store definition"))
   where
     level2 = subparser
-        ( command "memory" (info (helper <*> mem) idm)
-       -- <> command "sql" (info (helper <*> (pure ...)) idm)
+        ( command "sqlite3" (info (helper <*> sqlite3) idm)
+       <> command "postgres" (info (helper <*> postgres) idm)
         )
-    mem = StoreMemory
-        <$> argument auto (metavar "EVENTS" <> help "max. number of events")
+    sqlite3 = StoreSQLite3
+        <$> argument str (metavar "PATH" <> help "File path.")
+    postgres = StorePostgreSQL
+        <$> argument str (metavar "STRING" <> help "Connection string.")
 
-dump :: Parser Dump
-dump = subparser $
-    command "dump" (info (helper <*> level2) (progDesc "store definition"))
-  where
-    level2 = subparser
-        ( command "stdout" (info (helper <*> (pure DumpStdout)) idm)
-       <> command "stderr" (info (helper <*> (pure DumpStderr)) idm)
-        )
-
-runCmd :: CmdServer.Options -> Action ()
+runCmd :: CmdServe.Options -> Action ()
 runCmd opts = do
     logM "init" INFO $ show opts
 
-    -- start store handlers
-    --liftIO $ print $ optStore opts
+    -- connect to databases
+    connections <- forM (optStore opts) $ \i -> case i of
+        StoreSQLite3 path -> liftIO $ connectSqlite3 path
+        StorePostgreSQL _s -> undefined
 
+    mapM_ (lift . createTables) connections
+
+{-
     -- start servers
     servers <- forM (optServe opts) $ \i -> liftIO $ async $ case i of
         ServerHttp ip port -> serveHttp ip port
@@ -118,6 +97,19 @@ runCmd opts = do
     -- all threads shall remain running
     _ <- liftIO $ waitAnyCatchCancel $ servers -- ++ ...
     throw "process terminated"
+-}
+
+createTables conn = do
+    _ <- run conn (unlines
+        [ "CREATE TABLE IF NOT EXISTS test"
+        , "(id INTEGER NOT NULL, desc VARCHAR(80))"
+        ]) []
+    commit conn
+
+{-
+type RequestedReplicas = Int
+type ActualReplicas = Int
+type Success = Bool
 
 serveHttp :: Ip -> Int -> IO ()
 serveHttp _ip port = scotty port $ do
@@ -186,10 +178,6 @@ serveHttp _ip port = scotty port $ do
 
         "/events" `onDelete` do
             undefined
-
-type RequestedReplicas = Int
-type ActualReplicas = Int
-type Success = Bool
 
 -- try to store events to a number of handlers
 -- This function returns actual number of replicas,

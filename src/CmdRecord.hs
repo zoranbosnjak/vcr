@@ -284,7 +284,8 @@ startOutput o buf = do
             OStdout _fmt _delimit -> mapM_ print msgs
 
     sendHttp ip port msgs = do
-        request <- parseRequest $ "PUT http://"++ip++":"++port++"/events/json"
+        -- TODO: add proper content type
+        request <- parseRequest $ "PUT http://"++ip++":"++port++"/events"
         let request' = setRequestBodyJSON msgs $ request
             retryWith s = do
                 tellIO NOTICE s

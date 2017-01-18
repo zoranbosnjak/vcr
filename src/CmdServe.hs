@@ -206,28 +206,25 @@ serveHttp parent _ip port conns replicas = scottyOpts (scOpts parent port) $ do
         liftIO $ threadDelaySec dt
         return ok
 
-    -- /events/* handling
-    do
-        "/events" `onHead` do
-            undefined
+    -- /events methods
 
-        "/events" `onGet` do
-            undefined
+    "/events" `onHead` do
+        undefined
 
-        "/events/json" `onPut` do
-            events :: [Event] <- (fmap decode body) .! noDecode
-            n <- liftIO $ safeDeposit conns replicas events
-            case n >= replicas of
-                True -> return ok
-                False -> return (status503,
-                    W.text "unable to store to all requested replicas")
+    "/events" `onGet` do
+        undefined
 
-        "/events/bson" `onPut` undefined
-        "/events/txt"  `onPut` undefined
-        "/events/yaml"  `onPut` undefined
+    -- TODO: handle different content types
+    "/events" `onPut` do
+        events :: [Event] <- (fmap decode body) .! noDecode
+        n <- liftIO $ safeDeposit conns replicas events
+        case n >= replicas of
+            True -> return ok
+            False -> return (status503,
+                W.text "unable to store to all requested replicas")
 
-        "/events" `onDelete` do
-            undefined
+    "/events" `onDelete` do
+        undefined
 
 -- try to store events to a number of connections
 -- This function returns actual number of replicas,

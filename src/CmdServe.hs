@@ -10,6 +10,7 @@ import Control.Monad.Trans
 import Control.Monad.Except
 import Data.Aeson
 import Data.List
+import Data.Monoid
 import Database.HDBC as DB
 import Database.HDBC.Sqlite3 (connectSqlite3)
 import Network.HTTP.Types

@@ -6,6 +6,7 @@ module Main where
 
 -- standard imports
 import Control.Monad.Trans.Except
+import Data.Monoid
 import Options.Applicative
 import System.IO
 import System.Exit

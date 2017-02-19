@@ -10,6 +10,7 @@ import Control.Monad (forM_)
 import Control.Monad.Trans
 import Data.ByteString.Char8 (pack)
 import Data.Maybe
+import Data.Monoid
 import qualified Data.UUID as U
 import Data.UUID.V4
 import Network.HTTP.Simple

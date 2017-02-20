@@ -5,9 +5,12 @@ module Event where
 
 import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Aeson
+import qualified Data.Aeson.Encode.Pretty as AP
 import Data.Aeson.Types
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
 import Data.ByteString.Char8 (pack)
+--import Data.Text.Format
 import Data.Time
 import GHC.Generics
 import System.Clock
@@ -15,22 +18,20 @@ import Test.QuickCheck
 import Text.Printf
 import Numeric (readHex)
 
-newtype Delimiter = Delimiter String deriving (Generic, Eq, Show)
-
-data Format
-    = FormatJSON
-    | FormatJSONPretty
-    | FormatBSON
-    | FormatTXT
+data JSONFormat = JSONCompact | JSONPretty Int
     deriving (Generic, Eq, Show)
 
-{- TODO:
-manual show (or other) instance, to be able to see
-all choices in option parse
-FormatJSON -> JSON
-FormatBSON -> BSON
-FormatTXT -> TXT
--}
+data EncodeFormat
+    = EncShow
+    | EncJSON JSONFormat
+    {-  TODO: support other formats
+    | EncText Format
+    | EncBSON
+    | EncYAML Indent
+    | EncMessagePack    -- Use COBS encoding algorithm for this binary format
+    | EncXML
+    -}
+    deriving (Generic, Eq, Show)
 
 newtype Hash = Hash String deriving (Generic, Eq)
 instance Show Hash where show (Hash s) = s
@@ -153,4 +154,24 @@ now = do
     t1 <- getCurrentTime
     t2 <- getTime Boottime
     return (t1, t2)
+
+-- encode/decode event(s)
+
+delimit :: EncodeFormat -> String
+delimit EncShow = "\n"
+delimit (EncJSON _) = "\n"
+
+encodeEvent :: EncodeFormat -> Event -> BS.ByteString
+encodeEvent EncShow evt = pack $ show evt
+encodeEvent (EncJSON JSONCompact) evt = BSL.toStrict $ encode evt
+encodeEvent (EncJSON (JSONPretty i)) evt = BSL.toStrict $ AP.encodePretty'
+    (AP.defConfig {AP.confCompare = compare, AP.confIndent = AP.Spaces i}) evt
+
+encodeEvents :: EncodeFormat -> [Event] -> BS.ByteString
+encodeEvents fmt lst = foldr mappend BS.empty
+    [encodeEvent fmt e `mappend` pack (delimit fmt) | e <- lst]
+
+-- TODO
+--decodeEvent :: EncodeFormat -> BS.ByteString -> Maybe Event
+--decodeEvents :: EncodeFormat -> BS.ByteString -> Maybe [Event]
 

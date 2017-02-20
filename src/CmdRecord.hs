@@ -8,7 +8,7 @@ import Control.Concurrent.Async
 import Control.Concurrent.STM
 import Control.Monad (forM_)
 import Control.Monad.Trans
-import Data.ByteString.Char8 (pack)
+import Data.ByteString.Char8 (pack, unpack)
 import Data.Maybe
 import Data.Monoid
 import qualified Data.UUID as U
@@ -27,14 +27,8 @@ import Event
 import IO
 
 {- TODO:
-    - Stdin, delimit char or format
-    - TCP server input
-    - TCP client input
     - check UDP IPv6 unicast/multicast "[ipv6]" instead of "ip"
-
-    - Stdout, delimit or format
     - check ipv6 http output
-
     - ko je connection vzpostavljen,
       naj se buffer prazni postopoma, ne nujno vse naenkrat
 -}
@@ -58,17 +52,19 @@ data Options = Options
 data Input
     = IUnicast Ip Port
     | IMulticast Ip Port LocalIp
-    -- IStdin Format Delimit
+    -- IStdin Format...
+    -- TCPServer Ip Port Format...
+    -- TCPClient Ip Port Format
     deriving (Show, Eq)
 
 data Output
-    = OStdout Format Delimiter
+    = OStdout EncodeFormat
     | OHttp Ip Port
     deriving (Show, Eq)
 
 data Drop
-    = DSyslog Format
-    | DFile FilePath Format Delimiter
+    = DSyslog SL.Priority EncodeFormat
+    | DFile FilePath EncodeFormat
     deriving (Show, Eq)
 
 options :: Parser Options
@@ -104,16 +100,16 @@ outputParse = subparser $
     command "output" (info (helper <*> level2) (progDesc "output definition"))
   where
     level2 = subparser
-        ( command "http" (info (helper <*> http) idm)
-       <> command "stdout" (info (helper <*> stdout) idm)
+        ( command "stdout" (info (helper <*> stdout) idm)
+       <> command "http" (info (helper <*> http) idm)
         )
+    stdout = OStdout <$> formatParse
     http = OHttp
         <$> argument str (metavar "IP" <> help "IP address")
         <*> argument str (metavar "PORT" <> help "port number")
-    -- TODO: parse stdout options
-    --delimit "\n"
-    --format JSON | TXT | BSON ... (use automatic choices from??)
-    stdout = pure $ OStdout FormatJSON (Delimiter "\n")
+
+formatParse :: Parser EncodeFormat
+formatParse = pure EncShow -- TODO: decode all formating
 
 bufferParse :: Parser Thrashold
 bufferParse = thrashold
@@ -136,21 +132,19 @@ batchParse = thrashold
 dropParse :: Parser Drop
 dropParse = subparser $
     command "drop" (info (helper <*> level2) (progDesc "how to drop"))
-    --format = json | txt | ...
-    --delimit = "\n" | "\0" | "<any string>"
-    --level NOTICE | INFO | ...
   where
     level2 = subparser
         ( command "syslog" (info (helper <*> syslog) idm)
        <> command "file" (info (helper <*> file) idm)
         )
-    syslog = pure $ DSyslog FormatJSON
-    -- TODO, file options
+
+    syslog = DSyslog <$> pure SL.Notice <*> formatParse  -- TODO
+    --level NOTICE | INFO | ...
+
     file = DFile
         <$> argument str (metavar "FILE"
             <> help "destination filename, '-' for stdout")
-        <*> pure FormatJSON
-        <*> pure (Delimiter "\n")
+        <*> formatParse
 
 runCmd :: Options -> Action ()
 runCmd opts = do
@@ -236,23 +230,19 @@ startInput i buf sessionId recorderId ch dropList = do
 
     handleDrop [] _ = return ()
     handleDrop lst dst = case dst of
-        DSyslog _fmt -> SL.withSyslog slOpts $ \syslog -> do
+        DSyslog prio fmt -> SL.withSyslog slOpts $ \syslog -> do
             forM_ lst $ \evt -> do
-                --TODO: format message
-                let msg = "["++show i++"] " ++ show evt
-                syslog SL.USER SL.Notice $ pack msg
-        DFile filename _fmt (Delimiter delim) -> do
-            -- TODO: format messages
-            let msgs = do
-                    evt <- lst
-                    return $ show evt ++ delim
-                s = concat msgs
-            case filename of
+                let e = encodeEvent fmt evt
+                    msg = "["++show i++"] " ++ unpack e
+                syslog SL.USER prio $ pack msg
+        DFile filename fmt ->
+            let s = unpack $ encodeEvents fmt lst
+            in case filename of
                 "-" -> putStr s
                 _ -> appendFile filename s
 
     slOpts = SL.defaultConfig
-        { SL.identifier = pack $ "vcr"
+        { SL.identifier = pack $ "vcr" -- TODO: use real program name
         }
 
 -- | Copy messages from buffer to output.
@@ -275,19 +265,18 @@ startOutput o buf = do
         atomically $ writeTVar tick t
 
     sender tick = forever $ do
-        msgs <- liftIO $ atomically $ readBuffer tick buf
+        evts <- liftIO $ atomically $ readBuffer tick buf
         case o of
             -- send data over http
-            OHttp ip port -> sendHttp ip port msgs
+            OHttp ip port -> sendHttp ip port evts
 
             -- print to stdout
-            -- TODO: use format options
-            OStdout _fmt _delimit -> mapM_ print msgs
+            OStdout fmt -> putStr $ unpack $ encodeEvents fmt evts
 
-    sendHttp ip port msgs = do
+    sendHttp ip port evts = do
         -- TODO: add proper content type
         request <- parseRequest $ "PUT http://"++ip++":"++port++"/events"
-        let request' = setRequestBodyJSON msgs $ request
+        let request' = setRequestBodyJSON evts $ request
             retryWith s = do
                 tellIO NOTICE s
                 threadDelaySec 3

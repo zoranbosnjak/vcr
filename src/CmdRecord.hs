@@ -8,6 +8,7 @@ import Control.Concurrent.Async
 import Control.Concurrent.STM
 import Control.Monad (forM_)
 import Control.Monad.Trans
+import qualified Data.ByteString as BS
 import Data.ByteString.Char8 (pack, unpack)
 import Data.Maybe
 import Data.Monoid
@@ -19,6 +20,7 @@ import Network.Socket
 import Network.Socket.ByteString as NB
 import Options.Applicative
 import System.Log.Logger (Priority(..))
+import qualified System.IO
 import qualified System.Posix.Syslog as SL
 
 import Action
@@ -58,7 +60,7 @@ data Input
     deriving (Show, Eq)
 
 data Output
-    = OStdout EncodeFormat
+    = OFile FilePath EncodeFormat
     | OHttp Ip Port
     deriving (Show, Eq)
 
@@ -100,10 +102,13 @@ outputParse = subparser $
     command "output" (info (helper <*> level2) (progDesc "output definition"))
   where
     level2 = subparser
-        ( command "stdout" (info (helper <*> stdout) idm)
+        ( command "file" (info (helper <*> file) idm)
        <> command "http" (info (helper <*> http) idm)
         )
-    stdout = OStdout <$> formatParse
+    file = OFile
+        <$> argument str (metavar "FILE"
+            <> help "destination filename, '-' for stdout")
+        <*> formatParse
     http = OHttp
         <$> argument str (metavar "IP" <> help "IP address")
         <*> argument str (metavar "PORT" <> help "port number")
@@ -236,10 +241,10 @@ startInput i buf sessionId recorderId ch dropList = do
                     msg = "["++show i++"] " ++ unpack e
                 syslog SL.USER prio $ pack msg
         DFile filename fmt ->
-            let s = unpack $ encodeEvents fmt lst
+            let s = encodeEvents fmt lst
             in case filename of
-                "-" -> putStr s
-                _ -> appendFile filename s
+                "-" -> BS.hPut System.IO.stdout s
+                _ -> BS.appendFile filename s
 
     slOpts = SL.defaultConfig
         { SL.identifier = pack $ "vcr" -- TODO: use real program name
@@ -267,11 +272,15 @@ startOutput o buf = do
     sender tick = forever $ do
         evts <- liftIO $ atomically $ readBuffer tick buf
         case o of
+            -- send to file
+            OFile filename fmt ->
+                let s = encodeEvents fmt evts
+                in case filename of
+                    "-" -> BS.hPut System.IO.stdout s
+                    _ -> BS.appendFile filename s
+
             -- send data over http
             OHttp ip port -> sendHttp ip port evts
-
-            -- print to stdout
-            OStdout fmt -> putStr $ unpack $ encodeEvents fmt evts
 
     sendHttp ip port evts = do
         -- TODO: add proper content type

@@ -128,7 +128,7 @@ instance Arbitrary Event where
             <$> fmap getPositive arbitrary
             <*> choose (1,12)
             <*> choose (1,31)
-        diffT = picosecondsToDiffTime <$> choose (0,24*3600*(10^(12::Int)))
+        diffT = picosecondsToDiffTime <$> choose (0, (24*3600*(10^(12::Int))-1))
 
 instance ToJSON Event where
     toJSON (Event ch src utcTime bootTime ses val) = object

@@ -5,6 +5,7 @@ import qualified Data.Aeson
 import qualified Data.Binary
 import qualified Data.ByteString as BS
 import Data.Maybe (isJust)
+import Data.Time.Clock
 import Test.Framework (Test, testGroup)
 import Test.Framework.Providers.QuickCheck2 (testProperty)
 import Test.Framework.Providers.HUnit (testCase)
@@ -20,9 +21,13 @@ import Test.Framework.Providers.API
 import Test.HUnit (Assertion, assertEqual)
 import Test.QuickCheck
     ( Gen, Property, forAll, resize, arbitrary, Positive(Positive)
-    , suchThat)
+    , suchThat, (===))
 
 import Event
+
+-- run Property tests N times
+runTimes :: Int
+runTimes = 10000
 
 nTimes :: Test -> Int -> Test
 nTimes t n = plusTestOptions opts t where
@@ -42,23 +47,26 @@ largeByteString n = BS.pack <$> resize n arbitrary
 testEvent :: Test
 testEvent = testGroup "Event"
     [ testGroup "hexlify"
-        [ testProperty "hexlify" propHexlify            `nTimes` 10000
+        [ testProperty "hexlify" propHexlify            `nTimes` runTimes
         ]
     , testGroup "JSON"
-        [ testProperty "json" propJSON                  `nTimes` 10000
+        [ testProperty "json" propJSON                  `nTimes` runTimes
         ]
     , testGroup "BIN"
-        [ testProperty "bin" propBIN                    `nTimes` 10000
+        [ testProperty "bin" propBIN                    `nTimes` runTimes
         ]
     , testGroup "COBS"
         [ testCase "examples" cobsExamples
-        , testProperty "nonzero" propCobsEncodeNonZero  `nTimes` 10000
-        , testProperty "length" propCobsEncodeLength    `nTimes` 10000
-        , testProperty "inverse" propCobs               `nTimes` 10000
+        , testProperty "nonzero" propCobsEncodeNonZero  `nTimes` runTimes
+        , testProperty "length" propCobsEncodeLength    `nTimes` runTimes
+        , testProperty "inverse" propCobs               `nTimes` runTimes
         ]
     , testGroup "encode/decode"
-        [ testProperty "single" propEncodeDecode        `nTimes` 10000
-        , testProperty "multiple" propEncodeDecodeMulti `nTimes` 10000
+        [ testProperty "single" propEncodeDecode        `nTimes` runTimes
+        , testProperty "multiple" propEncodeDecodeMulti `nTimes` runTimes
+        ]
+    , testGroup "leap second"
+        [ testProperty "encode/decode" propLeapEncodeDecode `nTimes` runTimes
         ]
     ]
 
@@ -131,4 +139,13 @@ propEncodeDecode fmt e = decodeEvent fmt (encodeEvent fmt e) == Just e
 propEncodeDecodeMulti :: EncodeFormat -> [Event]-> Bool
 propEncodeDecodeMulti fmt lst =
     decodeEvents fmt (encodeEvents fmt lst) == Just lst
+
+-- | test leap seconds
+propLeapEncodeDecode :: EncodeFormat -> Event -> Property
+propLeapEncodeDecode fmt e' = prop where
+    e = e' {eUtcTime = t}
+    t = UTCTime
+            (utctDay $ eUtcTime e')
+            (picosecondsToDiffTime (24*3600*(10^(12::Int))-1))
+    prop = decodeEvent fmt (encodeEvent fmt e) === Just e
 

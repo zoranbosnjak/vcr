@@ -1,27 +1,32 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Event where
 
 import qualified Crypto.Hash.SHA256 as SHA256
+import Control.Monad (guard)
 import Data.Aeson (encode, decode)
 import qualified Data.Aeson.Encode.Pretty as AP
 import Data.Aeson.Types
     ( ToJSON, FromJSON, toJSON, parseJSON, Value(Object)
     , (.:), (.=), typeMismatch, object)
+import qualified Data.Binary as Bin
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import Data.ByteString.Char8 (pack, unpack)
 import Data.Time
-    ( UTCTime(UTCTime), getCurrentTime, fromGregorian, secondsToDiffTime)
-import Data.Word (Word8)
+    ( UTCTime(UTCTime), getCurrentTime, fromGregorian, picosecondsToDiffTime
+    , utctDay, utctDayTime, toGregorian, diffTimeToPicoseconds
+    , picosecondsToDiffTime)
 import GHC.Generics (Generic)
+import Numeric (readHex)
 import System.Clock
-    ( TimeSpec(TimeSpec), Clock(Boottime), getTime, toNanoSecs, fromNanoSecs)
-import Test.QuickCheck (Arbitrary, arbitrary, choose, oneof, getPositive)
+    ( TimeSpec(TimeSpec), Clock(Boottime), getTime, toNanoSecs, fromNanoSecs
+    , sec, nsec)
+import Test.QuickCheck (Arbitrary, arbitrary, getPositive, choose, oneof)
 import Text.Printf (printf)
 import Text.Read (readMaybe)
-import Numeric (readHex)
 
 -- | JSON format variants
 data JSONFormat
@@ -35,15 +40,16 @@ instance Arbitrary JSONFormat where
         , JSONPretty <$> choose (1,8)
         ]
 
--- | File encoding formats
+-- | File encoding formats (use COBS encoding for binary formats)
 data EncodeFormat
     = EncShow
     | EncJSON JSONFormat
+    | EncBin
     {-  TODO: support other formats
     | EncText Format
     | EncBSON
     | EncYAML Indent
-    | EncMessagePack    -- Use COBS encoding algorithm for this binary format
+    | EncMessagePack
     | EncXML
     -}
     deriving (Generic, Eq, Show)
@@ -52,27 +58,48 @@ instance Arbitrary EncodeFormat where
     arbitrary = oneof
         [ pure EncShow
         , EncJSON <$> arbitrary
+        , pure EncBin
         ]
 
 newtype Hash = Hash String deriving (Generic, Eq, Show, Read)
 
 newtype Chanel = Chanel String deriving (Generic, Eq, Show, Read)
+instance Bin.Binary Chanel
 instance ToJSON Chanel
 instance FromJSON Chanel
 instance Arbitrary Chanel where
     arbitrary = Chanel <$> arbitrary
 
 newtype SourceId = SourceId String deriving (Generic, Eq, Show, Read)
+instance Bin.Binary SourceId
 instance ToJSON SourceId
 instance FromJSON SourceId
 instance Arbitrary SourceId where
     arbitrary = SourceId <$> arbitrary
 
 newtype SessionId = SessionId String deriving (Generic, Eq, Show, Read)
+instance Bin.Binary SessionId
 instance ToJSON SessionId
 instance FromJSON SessionId
 instance Arbitrary SessionId where
     arbitrary = SessionId <$> arbitrary
+
+instance Bin.Binary UTCTime where
+    put t = do
+        Bin.put $ toGregorian $ utctDay t
+        Bin.put $ diffTimeToPicoseconds $ utctDayTime t
+
+    get = do
+        (a,b,c) <- Bin.get
+        ps <- Bin.get
+        return $ UTCTime (fromGregorian a b c) (picosecondsToDiffTime ps)
+
+instance Bin.Binary TimeSpec where
+    put t = do
+        Bin.put $ sec t
+        Bin.put $ nsec t
+
+    get = TimeSpec <$> Bin.get <*> Bin.get
 
 data Event = Event
     { eChanel   :: Chanel
@@ -83,6 +110,8 @@ data Event = Event
                                 -- the same session ID
     , eValue    :: BS.ByteString   -- the event value
     } deriving (Generic, Eq, Show, Read)
+
+instance Bin.Binary Event
 
 instance Arbitrary Event where
     arbitrary = Event
@@ -99,7 +128,7 @@ instance Arbitrary Event where
             <$> fmap getPositive arbitrary
             <*> choose (1,12)
             <*> choose (1,31)
-        diffT = secondsToDiffTime <$> choose (0, 86401)
+        diffT = picosecondsToDiffTime <$> choose (0,24*3600*(10^(12::Int)))
 
 instance ToJSON Event where
     toJSON (Event ch src utcTime bootTime ses val) = object
@@ -144,10 +173,46 @@ unhexlify s = do
         [(a,"")] -> Just a
         _ -> Nothing
 
--- | hexlify and unhexlify shall be inverse operations
-propHexlify :: [Word8] -> Bool
-propHexlify lst = unhexlify (hexlify bs) == Just bs where
-    bs = BS.pack lst
+-- | COBS encode single binary string
+cobsEncode :: BS.ByteString -> BS.ByteString
+cobsEncode s = BS.concat $ encodeSegments s where
+    encodeSegments x = BS.singleton prefix : chunk : rest where
+        (a,b) = BS.span (/= 0) x
+        chunk = BS.take 254 a
+        n = BS.length chunk
+        prefix = fromIntegral $ succ n
+        c = BS.drop n a `BS.append` b
+        rest = case BS.null c of
+            True -> []
+            False -> case prefix of
+                255 -> encodeSegments c
+                _ -> encodeSegments $ BS.drop 1 c
+
+-- | COBS decode single binary string.
+cobsDecode :: BS.ByteString -> Maybe BS.ByteString
+cobsDecode s = do
+    (a,b) <- decodeSegment s
+    case BS.null b of
+        True -> return a
+        False -> do
+            rest <- cobsDecode b
+            return $ a `BS.append` rest
+  where
+    decodeSegment :: BS.ByteString -> Maybe (BS.ByteString, BS.ByteString)
+    decodeSegment x = do
+        (a,b) <- BS.uncons x
+        guard $ a > 0
+        let n = pred $ fromIntegral a
+            (c,d) = BS.splitAt n b
+        guard $ BS.length c == n
+        guard $ BS.findIndex (== 0) c == Nothing
+        case BS.null d of
+            True -> return (c, d)
+            False -> case a of
+                255 -> do
+                    (e,f) <- decodeSegment d
+                    return (c `BS.append` e, f)
+                _ -> return (c `BS.append` BS.singleton 0, d)
 
 -- | Calculate size of event as size of it's eValue.
 sizeOf :: Event -> Integer
@@ -175,6 +240,7 @@ now = (,) <$> getCurrentTime <*> getTime Boottime
 delimit :: EncodeFormat -> String
 delimit EncShow = "\n"
 delimit (EncJSON _) = "\n"
+delimit EncBin = "\0"
 
 -- | Encode single event.
 encodeEvent :: EncodeFormat -> Event -> BS.ByteString
@@ -182,6 +248,7 @@ encodeEvent EncShow evt = pack $ show evt
 encodeEvent (EncJSON JSONCompact) evt = BSL.toStrict $ encode evt
 encodeEvent (EncJSON (JSONPretty i)) evt = BSL.toStrict $ AP.encodePretty'
     (AP.defConfig {AP.confCompare = compare, AP.confIndent = AP.Spaces i}) evt
+encodeEvent EncBin evt = cobsEncode $ BSL.toStrict $ Bin.encode evt
 
 -- | Encode multiple events.
 encodeEvents :: EncodeFormat -> [Event] -> BS.ByteString
@@ -190,8 +257,14 @@ encodeEvents fmt lst = foldr mappend BS.empty
 
 -- | Try to decode single event.
 decodeEvent :: EncodeFormat -> BS.ByteString -> Maybe Event
-decodeEvent EncShow = readMaybe . unpack
-decodeEvent (EncJSON _) = decode . BSL.fromStrict
+decodeEvent EncShow s = readMaybe $ unpack s
+decodeEvent (EncJSON _) s = decode $ BSL.fromStrict s
+decodeEvent EncBin s = do
+    s' <- cobsDecode s
+    let result = Bin.decodeOrFail $ BSL.fromStrict s'
+    case result of
+        Left _ -> Nothing
+        Right (_,_,val) -> Just val
 
 -- | Try to decode multiple events.
 decodeEvents :: EncodeFormat -> BS.ByteString -> Maybe [Event]
@@ -217,13 +290,4 @@ decodeEvents fmt s
             firstOf ((Nothing,_):rest) = firstOf rest
             firstOf ((Just a,b):_) = Just (a,b)
         firstOf [(decodeEvent fmt a,b) | (a,b) <- probes]
-
--- | encodeEvent and decodeEvent shall be inverse operations.
-propEncodeDecode :: EncodeFormat -> Event -> Bool
-propEncodeDecode fmt e = decodeEvent fmt (encodeEvent fmt e) == Just e
-
--- | encodeEvents and decodeEvents shall be inverse operations.
-propEncodeDecodeMulti :: EncodeFormat -> [Event]-> Bool
-propEncodeDecodeMulti fmt lst =
-    decodeEvents fmt (encodeEvents fmt lst) == Just lst
 

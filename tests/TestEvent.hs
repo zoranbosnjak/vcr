@@ -9,36 +9,12 @@ import Data.Time.Clock
 import Test.Framework (Test, testGroup)
 import Test.Framework.Providers.QuickCheck2 (testProperty)
 import Test.Framework.Providers.HUnit (testCase)
-import Test.Framework.Providers.API
-    ( TestOptions'(TestOptions)
-    , plusTestOptions
-    , topt_seed, topt_maximum_generated_tests
-    , topt_maximum_unsuitable_generated_tests
-    , topt_maximum_test_size
-    , topt_maximum_test_depth
-    , topt_timeout
-    )
 import Test.HUnit (Assertion, assertEqual)
 import Test.QuickCheck
     ( Gen, Property, forAll, resize, arbitrary, Positive(Positive)
     , suchThat, (===))
 
 import Event
-
--- run Property tests N times
-runTimes :: Int
-runTimes = 10000
-
-nTimes :: Test -> Int -> Test
-nTimes t n = plusTestOptions opts t where
-    opts = TestOptions
-        { topt_seed = Nothing
-        , topt_maximum_generated_tests = Just n
-        , topt_maximum_unsuitable_generated_tests = Just (n * 1000)
-        , topt_maximum_test_size = Nothing
-        , topt_maximum_test_depth = Nothing
-        , topt_timeout = Nothing
-        }
 
 -- large bytestring generator
 largeByteString :: Int -> Gen BS.ByteString
@@ -47,26 +23,26 @@ largeByteString n = BS.pack <$> resize n arbitrary
 testEvent :: Test
 testEvent = testGroup "Event"
     [ testGroup "hexlify"
-        [ testProperty "hexlify" propHexlify            `nTimes` runTimes
+        [ testProperty "hexlify" propHexlify
         ]
     , testGroup "JSON"
-        [ testProperty "json" propJSON                  `nTimes` runTimes
+        [ testProperty "json" propJSON
         ]
     , testGroup "BIN"
-        [ testProperty "bin" propBIN                    `nTimes` runTimes
+        [ testProperty "bin" propBIN
         ]
     , testGroup "COBS"
         [ testCase "examples" cobsExamples
-        , testProperty "nonzero" propCobsEncodeNonZero  `nTimes` runTimes
-        , testProperty "length" propCobsEncodeLength    `nTimes` runTimes
-        , testProperty "inverse" propCobs               `nTimes` runTimes
+        , testProperty "nonzero" propCobsEncodeNonZero
+        , testProperty "length" propCobsEncodeLength
+        , testProperty "inverse" propCobs
         ]
     , testGroup "encode/decode"
-        [ testProperty "single" propEncodeDecode        `nTimes` runTimes
-        , testProperty "multiple" propEncodeDecodeMulti `nTimes` runTimes
+        [ testProperty "single" propEncodeDecode
+        , testProperty "multiple" propEncodeDecodeMulti
         ]
     , testGroup "leap second"
-        [ testProperty "encode/decode" propLeapEncodeDecode `nTimes` runTimes
+        [ testProperty "encode/decode" propLeapEncodeDecode
         ]
     ]
 

@@ -19,8 +19,9 @@ import Action
 import CmdRecord
 import CmdServe
 --import CmdHousekeep
---import CmdArchive
+import CmdArchive
 --import CmdReplay
+--import CmdSave
 
 data Options = Options
     { optDebug :: Maybe Priority
@@ -32,7 +33,7 @@ commands =
     [ ("record",    cmdRecord)
     , ("serve",     cmdServe)
     --, ("housekeep", cmdHousekeep)
-    --, ("archive",   cmdArchive)
+    , ("archive",   cmdArchive)
     --, ("replay",    cmdReplay)
     ]
 

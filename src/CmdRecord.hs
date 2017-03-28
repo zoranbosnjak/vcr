@@ -41,7 +41,7 @@ cmdRecord = info (helper <*> (runCmd <$> options))
 
 data Options = Options
     { optIdent  :: Maybe String
-    , optChanel :: String
+    , optChannel :: String
     , optInput :: Input
     , optOutput :: Output
     , optBufferSize :: Thrashold
@@ -74,7 +74,7 @@ options = Options
     <$> (optional $ strOption
             (long "ident" <> metavar "IDENT" <> help "recorder identifier"))
     <*> strOption
-            (long "chanel" <> metavar "CH" <> help "chanel identifier")
+            (long "channel" <> metavar "CH" <> help "channel identifier")
     <*> inputParse
     <*> outputParse
     <*> bufferParse
@@ -177,7 +177,7 @@ runCmd opts = do
         buf
         (SessionId sessionId)
         (SourceId recorderId)
-        (Chanel $ optChanel opts)
+        (Channel $ optChannel opts)
         (optDrop opts)
 
     output <- startOutput (optOutput opts) buf
@@ -187,7 +187,7 @@ runCmd opts = do
     throw "process terminated"
 
 -- | Copy messages from input to buffer (or call drop handler).
-startInput :: Input -> Buffer -> SessionId -> SourceId -> Chanel
+startInput :: Input -> Buffer -> SessionId -> SourceId -> Channel
     -> [Drop] -> Action (Async a)
 startInput i buf sessionId recorderId ch dropList = do
     let tell prio msg = logM (show i) prio msg
@@ -225,7 +225,7 @@ startInput i buf sessionId recorderId ch dropList = do
 
   where
     createEvent (t1,t2) datagram = Event
-        { eChanel = ch
+        { eChannel = ch
         , eSourceId = recorderId
         , eUtcTime = t1
         , eBootTime = t2

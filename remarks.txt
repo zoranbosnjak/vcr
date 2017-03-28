@@ -79,14 +79,14 @@ Modules/commands
         - maintain replicas
 
     join:
-        - join same recording from multiple servers (same chanel)
+        - join same recording from multiple servers (same channel)
           into the same track, to save space
 
     archive:
         - GUI or command line
         - dump and restore
         - set permanent archives (do not delete these time intervals)
-            name1: (startUtc, endUtc, AllChanel | Chanels [<ch>,...])
+            name1: (startUtc, endUtc, AllChannel | Channels [<ch>,...])
             name2: ...
             (this goes to database)
         - backup
@@ -94,7 +94,7 @@ Modules/commands
     replay:
         - GUI or command line
         - is able to use dump file or http (server)
-        - chanel selection for replay
+        - channel selection for replay
         - replay sessions (saved on disk, maybe saved to database??)
         - possibility to attach filters on replay (eg. restamp inside asterix)
         - rate of replay

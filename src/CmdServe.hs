@@ -137,7 +137,7 @@ deposit conn events = do
   where
     saveEvent e = DB.run conn "INSERT INTO events VALUES (?,?,?,?,?,?,?)"
         [ toSql $ show $ hash e
-        , toSql $ show $ eChanel e
+        , toSql $ show $ eChannel e
         , toSql $ show $ eSourceId e
         , toSql $ eUtcTime e
         , toSql $ show $ eSessionId e
@@ -231,7 +231,7 @@ serveHttp parent _ip port conns replicas = scottyOpts (scOpts parent port) $ do
 -- This function returns actual number of replicas,
 -- that all given events are stored.
 -- distribute connections randomly, where the seed is
--- the chanel id of the event, so that the same chanel data
+-- the channel id of the event, so that the same channel data
 -- tend to go to the same replica
 --
 -- TODO: run in parallel (async), starting at "requested" instances,
@@ -240,21 +240,21 @@ serveHttp parent _ip port conns replicas = scottyOpts (scOpts parent port) $ do
 safeDeposit :: (IConnection conn) =>
     [conn] -> RequestedReplicas -> [Event] -> IO ActualReplicas
 safeDeposit conns requested evts =
-    process requested distinctChanels enumeratedConnections
+    process requested distinctChannels enumeratedConnections
   where
 
-    distinctChanels = nub $ map eChanel evts
+    distinctChannels = nub $ map eChannel evts
 
     enumeratedConnections = zip [(1::Int)..] conns
 
     permutate lst _seed = lst -- TODO
 
-    -- process all chanels
-    process n [] _ = return n -- all done, no more chanels
+    -- process all channels
+    process n [] _ = return n -- all done, no more channels
     process _ _ [] = return 0 -- not able, no more active connections
-    process n (chanel:xs) conns' = do
-        let lst = [e | e <- evts, eChanel e == chanel]
-            conns'' = permutate conns' chanel
+    process n (channel:xs) conns' = do
+        let lst = [e | e <- evts, eChannel e == channel]
+            conns'' = permutate conns' channel
         deadConns <- depositMany requested [] conns'' lst
         let nextConns = [(i,c) | (i,c) <- conns'', i `notElem` deadConns]
             nextN = min n $ length nextConns

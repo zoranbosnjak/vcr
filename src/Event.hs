@@ -45,13 +45,6 @@ data EncodeFormat
     = EncShow
     | EncJSON JSONFormat
     | EncBin
-    {-  TODO: support other formats
-    | EncText Format
-    | EncBSON
-    | EncYAML Indent
-    | EncMessagePack
-    | EncXML
-    -}
     deriving (Generic, Eq, Show)
 
 instance Arbitrary EncodeFormat where
@@ -63,12 +56,12 @@ instance Arbitrary EncodeFormat where
 
 newtype Hash = Hash String deriving (Generic, Eq, Show, Read)
 
-newtype Chanel = Chanel String deriving (Generic, Eq, Show, Read)
-instance Bin.Binary Chanel
-instance ToJSON Chanel
-instance FromJSON Chanel
-instance Arbitrary Chanel where
-    arbitrary = Chanel <$> arbitrary
+newtype Channel = Channel String deriving (Generic, Eq, Show, Read)
+instance Bin.Binary Channel
+instance ToJSON Channel
+instance FromJSON Channel
+instance Arbitrary Channel where
+    arbitrary = Channel <$> arbitrary
 
 newtype SourceId = SourceId String deriving (Generic, Eq, Show, Read)
 instance Bin.Binary SourceId
@@ -102,7 +95,7 @@ instance Bin.Binary TimeSpec where
     get = TimeSpec <$> Bin.get <*> Bin.get
 
 data Event = Event
-    { eChanel   :: Chanel
+    { eChannel  :: Channel
     , eSourceId :: SourceId     -- id of the recorder
     , eUtcTime  :: UTCTime      -- capture utc time
     , eBootTime :: TimeSpec     -- capture boot (monotonic) time
@@ -132,22 +125,22 @@ instance Arbitrary Event where
 
 instance ToJSON Event where
     toJSON (Event ch src utcTime bootTime ses val) = object
-        [ "ch" .= ch
-        , "src" .= src
-        , "utc" .= utcTime
-        , "boot" .= toNanoSecs bootTime
-        , "session" .= ses
-        , "value" .= hexlify val
+        [ "channel"     .= ch
+        , "recorder"    .= src
+        , "utcTime"     .= utcTime
+        , "monoTime"    .= toNanoSecs bootTime
+        , "session"     .= ses
+        , "data"        .= hexlify val
         ]
 
 instance FromJSON Event where
     parseJSON (Object v) = Event <$>
-        v .: "ch" <*>
-        v .: "src" <*>
-        v .: "utc" <*>
-        fmap fromNanoSecs (v .: "boot") <*>
+        v .: "channel" <*>
+        v .: "recorder" <*>
+        v .: "utcTime" <*>
+        fmap fromNanoSecs (v .: "monoTime") <*>
         v .: "session" <*>
-        readStr (v .: "value")
+        readStr (v .: "data")
       where
         readStr px = do
             s <- px
@@ -224,7 +217,7 @@ hash e = Hash $
     hexlify $ SHA256.finalize $ (flip SHA256.updates) parts $ SHA256.init
   where
     parts =
-        [ pack . show $ eChanel e
+        [ pack . show $ eChannel e
         , pack . show $ eSourceId e
         , pack . show $ eUtcTime e
         , pack . show $ eBootTime e

@@ -228,7 +228,7 @@ startInput i buf sessionId recorderId ch dropList = do
         { eChannel = ch
         , eSourceId = recorderId
         , eUtcTime = t1
-        , eBootTime = t2
+        , eMonoTime = t2
         , eSessionId = sessionId
         , eValue = datagram
         }

@@ -141,7 +141,7 @@ deposit conn events = do
         , toSql $ show $ eSourceId e
         , toSql $ eUtcTime e
         , toSql $ show $ eSessionId e
-        , toSql $ toNanoSecs $ eBootTime e
+        , toSql $ toNanoSecs $ eMonoTime e
         , toSql $ eValue e
         ]
 

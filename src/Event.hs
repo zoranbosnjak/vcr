@@ -98,8 +98,8 @@ data Event = Event
     { eChannel  :: Channel
     , eSourceId :: SourceId     -- id of the recorder
     , eUtcTime  :: UTCTime      -- capture utc time
-    , eBootTime :: TimeSpec     -- capture boot (monotonic) time
-    , eSessionId :: SessionId   -- boot time is valid only within
+    , eMonoTime :: TimeSpec     -- capture monotonic (boot) time
+    , eSessionId :: SessionId   -- monotonic time is valid only within
                                 -- the same session ID
     , eValue    :: BS.ByteString   -- the event value
     } deriving (Generic, Eq, Show, Read)
@@ -124,11 +124,11 @@ instance Arbitrary Event where
         diffT = picosecondsToDiffTime <$> choose (0, (24*3600*(10^(12::Int))-1))
 
 instance ToJSON Event where
-    toJSON (Event ch src utcTime bootTime ses val) = object
+    toJSON (Event ch src utcTime monoTime ses val) = object
         [ "channel"     .= ch
         , "recorder"    .= src
         , "utcTime"     .= utcTime
-        , "monoTime"    .= toNanoSecs bootTime
+        , "monoTime"    .= toNanoSecs monoTime
         , "session"     .= ses
         , "data"        .= hexlify val
         ]
@@ -220,7 +220,7 @@ hash e = Hash $
         [ pack . show $ eChannel e
         , pack . show $ eSourceId e
         , pack . show $ eUtcTime e
-        , pack . show $ eBootTime e
+        , pack . show $ eMonoTime e
         , pack . show $ eSessionId e
         , eValue e
         ]

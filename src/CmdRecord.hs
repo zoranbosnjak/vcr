@@ -212,24 +212,28 @@ startInput i buf sessionId recorderId ch dropList = do
         bind sock (addrAddress serveraddr)
         return sock
 
-    liftIO $ async $ forever $ do
-        (datagram, _addr) <- NB.recvFrom sock (2^(16::Int))
-        ts <- now
-        let evt = createEvent ts datagram
-        notAppended <- atomically $ appendBuffer (snd ts) buf [evt]
-        _ <- runAction $ case notAppended of
-            [] -> tell DEBUG $ show evt
-            [x] -> tell NOTICE $ "error appending: " ++ show x
-            _ -> tell ERROR $ "internal error: unexpected events"
-        forM_ dropList $ handleDrop notAppended
+    let loop seqNum = do
+            (datagram, _addr) <- NB.recvFrom sock (2^(16::Int))
+            ts <- now
+            let evt = createEvent ts seqNum datagram
+            notAppended <- atomically $ appendBuffer (snd ts) buf [evt]
+            _ <- runAction $ case notAppended of
+                [] -> tell DEBUG $ show evt
+                [x] -> tell NOTICE $ "error appending: " ++ show x
+                _ -> tell ERROR $ "internal error: unexpected events"
+            forM_ dropList $ handleDrop notAppended
+            loop $ nextSequenceNum seqNum
+
+    liftIO $ async $ loop minBound
 
   where
-    createEvent (t1,t2) datagram = Event
+    createEvent (t1,t2) seqNum datagram = Event
         { eChannel = ch
         , eSourceId = recorderId
         , eUtcTime = t1
         , eMonoTime = t2
         , eSessionId = sessionId
+        , eSequence = seqNum
         , eValue = datagram
         }
 

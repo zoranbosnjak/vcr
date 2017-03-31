@@ -26,6 +26,12 @@ import IO
 
 -- TODO: get all about Event from the module, eg. toNanosecs
 
+{-
+    - serve instanca tudi rabi session ID
+    - rabi odgovoriti/poročati na zahtevek za trenutno
+      konfiguracijo oz. njen hash
+-}
+
 cmdServe :: ParserInfo (Action ())
 cmdServe = info (helper <*> (runCmd <$> CmdServe.options))
     (progDesc "server part of the recorder")

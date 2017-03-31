@@ -248,16 +248,17 @@ sizeOf = fromIntegral . BS.length . eValue
 
 -- hash event
 hash :: Event -> Hash
-hash e = Hash $
+hash (Event ch src utc mono ses seqNum val) = Hash $
     hexlify $ SHA256.finalize $ (flip SHA256.updates) parts $ SHA256.init
   where
     parts =
-        [ pack . show $ eChannel e
-        , pack . show $ eSourceId e
-        , pack . show $ eUtcTime e
-        , pack . show $ eMonoTime e
-        , pack . show $ eSessionId e
-        , eValue e
+        [ pack . show $ ch
+        , pack . show $ src
+        , pack . show $ utc
+        , pack . show $ mono
+        , pack . show $ ses
+        , pack . show $ seqNum
+        , val
         ]
 
 -- | Get current time (UTC,boot).

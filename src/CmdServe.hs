@@ -26,6 +26,12 @@ import IO
 
 -- TODO: get all about Event from the module, eg. toNanosecs
 
+{-
+    - serve instanca tudi rabi session ID
+    - rabi odgovoriti/poročati na zahtevek za trenutno
+      konfiguracijo oz. njen hash
+-}
+
 cmdServe :: ParserInfo (Action ())
 cmdServe = info (helper <*> (runCmd <$> CmdServe.options))
     (progDesc "server part of the recorder")
@@ -141,7 +147,7 @@ deposit conn events = do
         , toSql $ show $ eSourceId e
         , toSql $ eUtcTime e
         , toSql $ show $ eSessionId e
-        , toSql $ toNanoSecs $ eBootTime e
+        , toSql $ toNanoSecs $ eMonoTime e
         , toSql $ eValue e
         ]
 

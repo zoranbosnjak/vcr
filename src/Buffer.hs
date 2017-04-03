@@ -133,7 +133,7 @@ thCompare ts s th = maximum [thCompareLength, thCompareBytes, thCompareSeconds]
     thCompareSeconds = mCompare age (thSeconds th) where
         oldest = viewr s
         age = case oldest of
-            (_ :> aR) -> secondsSince (eBootTime aR) ts
+            (_ :> aR) -> secondsSince (eMonoTime aR) ts
             _ -> 0
         secondsSince :: TimeSpec -> TimeSpec -> Double
         secondsSince t1 t2 = (/ (10^(9::Int))) $ fromIntegral (t2' - t1') where

@@ -94,13 +94,45 @@ instance Bin.Binary TimeSpec where
 
     get = TimeSpec <$> Bin.get <*> Bin.get
 
+-- | Sequence number that wraps around.
+newtype SequenceNum = SequenceNum Int deriving (Generic, Eq, Show, Read)
+instance Bin.Binary SequenceNum
+instance ToJSON SequenceNum
+instance FromJSON SequenceNum
+instance Arbitrary SequenceNum where
+    arbitrary = sequenceNum <$> choose (a,b) where
+        SequenceNum a = minBound
+        SequenceNum b = maxBound
+
+instance Bounded SequenceNum where
+    minBound = SequenceNum 0
+    maxBound = SequenceNum (0x10000-1)
+
+sequenceNum :: (Integral i) => i -> SequenceNum
+sequenceNum i
+    | i < fromIntegral a = error "value too small"
+    | i > fromIntegral b = error "value too large"
+    | otherwise = SequenceNum $ fromIntegral i
+  where
+    SequenceNum a = minBound
+    SequenceNum b = maxBound
+
+-- | Increment sequence number, respect maxBound.
+nextSequenceNum :: SequenceNum -> SequenceNum
+nextSequenceNum (SequenceNum sn)
+    | sn == b = minBound
+    | otherwise = sequenceNum $ succ sn
+  where
+    SequenceNum b = maxBound
+
 data Event = Event
     { eChannel  :: Channel
     , eSourceId :: SourceId     -- id of the recorder
     , eUtcTime  :: UTCTime      -- capture utc time
-    , eBootTime :: TimeSpec     -- capture boot (monotonic) time
-    , eSessionId :: SessionId   -- boot time is valid only within
+    , eMonoTime :: TimeSpec     -- capture monotonic (boot) time
+    , eSessionId :: SessionId   -- monotonic time is valid only within
                                 -- the same session ID
+    , eSequence :: SequenceNum  -- incrementing sequence number
     , eValue    :: BS.ByteString   -- the event value
     } deriving (Generic, Eq, Show, Read)
 
@@ -115,6 +147,7 @@ instance Arbitrary Event where
             <$> fmap getPositive arbitrary
             <*> choose (0, 999999999))
         <*> arbitrary
+        <*> arbitrary
         <*> (BS.pack <$> arbitrary)
       where
         day = fromGregorian
@@ -124,23 +157,25 @@ instance Arbitrary Event where
         diffT = picosecondsToDiffTime <$> choose (0, (24*3600*(10^(12::Int))-1))
 
 instance ToJSON Event where
-    toJSON (Event ch src utcTime bootTime ses val) = object
+    toJSON (Event ch src utcTime monoTime ses seqNum val) = object
         [ "channel"     .= ch
         , "recorder"    .= src
         , "utcTime"     .= utcTime
-        , "monoTime"    .= toNanoSecs bootTime
+        , "monoTime"    .= toNanoSecs monoTime
         , "session"     .= ses
+        , "sequence"    .= seqNum
         , "data"        .= hexlify val
         ]
 
 instance FromJSON Event where
-    parseJSON (Object v) = Event <$>
-        v .: "channel" <*>
-        v .: "recorder" <*>
-        v .: "utcTime" <*>
-        fmap fromNanoSecs (v .: "monoTime") <*>
-        v .: "session" <*>
-        readStr (v .: "data")
+    parseJSON (Object v) = Event
+        <$> v .: "channel"
+        <*> v .: "recorder"
+        <*> v .: "utcTime"
+        <*> fmap fromNanoSecs (v .: "monoTime")
+        <*> v .: "session"
+        <*> v .: "sequence"
+        <*> readStr (v .: "data")
       where
         readStr px = do
             s <- px
@@ -213,16 +248,17 @@ sizeOf = fromIntegral . BS.length . eValue
 
 -- hash event
 hash :: Event -> Hash
-hash e = Hash $
+hash (Event ch src utc mono ses seqNum val) = Hash $
     hexlify $ SHA256.finalize $ (flip SHA256.updates) parts $ SHA256.init
   where
     parts =
-        [ pack . show $ eChannel e
-        , pack . show $ eSourceId e
-        , pack . show $ eUtcTime e
-        , pack . show $ eBootTime e
-        , pack . show $ eSessionId e
-        , eValue e
+        [ pack . show $ ch
+        , pack . show $ src
+        , pack . show $ utc
+        , pack . show $ mono
+        , pack . show $ ses
+        , pack . show $ seqNum
+        , val
         ]
 
 -- | Get current time (UTC,boot).

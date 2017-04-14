@@ -1,7 +1,21 @@
-{-# LANGUAGE OverloadedStrings #-}
+------------------
+-- |
+-- Module: CmdRecord
+--
+-- 'record' command implementation
+--
+
+-- {-# LANGUAGE OverloadedStrings #-}
 
 module CmdRecord (cmdRecord) where
 
+-- standard imports
+import Data.Monoid ((<>))
+import Options.Applicative ((<**>), (<|>))
+import qualified Options.Applicative as Opt
+import System.Log.Logger (Priority(INFO))
+
+{-
 import Control.Exception hiding (throw, assert)
 import Control.Concurrent
 import Control.Concurrent.Async
@@ -19,51 +33,126 @@ import Network.Multicast
 import Network.Socket
 import Network.Socket.ByteString as NB
 import Options.Applicative
-import System.Log.Logger (Priority(..))
 import qualified System.IO
 import qualified System.Posix.Syslog as SL
+-}
 
-import Action
+-- local imports
+import Common (logM)
+import qualified Common as C
+import qualified Encodings as Enc
+{-
 import Buffer
 import Event
-import IO
+-}
 
 {- TODO:
     - check UDP IPv6 unicast/multicast "[ipv6]" instead of "ip"
     - check ipv6 http output
     - ko je connection vzpostavljen,
       naj se buffer prazni postopoma, ne nujno vse naenkrat
+
+    - record naj zna snemati več kanalov na enkrat
+
+    - record naj zna sprejeti listo serverjev,
+      če do enega ne more dostopati, gre na drugega...
+    -- input: IStdin Format...
+    -- input: TCPServer Ip Port Format...
+    -- input: TCPClient Ip Port Format...
 -}
 
+{-
 cmdRecord :: ParserInfo (Action ())
 cmdRecord = info (helper <*> (runCmd <$> options))
     (progDesc "event recorder")
+-}
 
+cmdRecord :: Opt.ParserInfo (C.VcrOptions -> IO ())
+cmdRecord = Opt.info ((runCmd <$> options) <**> Opt.helper)
+    (Opt.progDesc "Event recorder.")
+
+-- | Speciffic command options.
 data Options = Options
-    { optIdent  :: Maybe String
+    { optIdent :: Maybe String
     , optChannel :: String
     , optInput :: Input
-    , optOutput :: Output
+    --, optOutput :: Output
+    {-
     , optBufferSize :: Thrashold
     , optBatchSize :: Thrashold
     , optDrop :: [Drop]
     -- retry http connect interval
     -- http response timeout
+    -}
     } deriving (Show, Eq)
 
+-- | Command option parser
+options :: Opt.Parser Options
+options = Options
+    <$> (Opt.optional $ Opt.strOption
+            ( Opt.long "ident"
+           <> Opt.metavar "IDENT"
+           <> Opt.help "Recorder identifier"
+            )
+        )
+    <*> Opt.strOption
+            ( Opt.short 'c'
+           <> Opt.long "channel"
+           <> Opt.metavar "CH"
+           <> Opt.help "Channel identifier"
+            )
+    <*> (stdInput <|> udpInput)
+
+    -- <*> parseOutput
+
+-- | Input options.
 data Input
-    = IUnicast Ip Port
-    | IMulticast Ip Port LocalIp
-    -- IStdin Format...
-    -- TCPServer Ip Port Format...
-    -- TCPClient Ip Port Format
+    = IStdin
+    | IUdp [C.Udp]
     deriving (Show, Eq)
 
+stdInput :: Opt.Parser Input
+stdInput = Opt.flag' IStdin (Opt.long "stdin" <> Opt.help "Read from stdin")
+
+udpInput :: Opt.Parser Input
+udpInput = IUdp <$> Opt.some (C.udpAs 'i' "input")
+
+{-
+udpInput :: Opt.Parser Input
+udpInput = IUdp <$> Opt.some (Opt.option (Opt.maybeReader readMaybe)
+        ( Opt.short 'i'
+       <> Opt.long "input"
+       <> Opt.metavar "ARG"
+       <> Opt.help (C.showOpt C.udpOptions)
+        )
+    )
+-}
+
+{-
+-- | Output options: to a file or to set of http servers
 data Output
-    = OFile FilePath EncodeFormat
-    | OHttp Ip Port
+    = OFile C.FileStore
+    | OHttp [C.URI]
     deriving (Show, Eq)
 
+-- | Parse output options.
+parseOutput :: Opt.Parser Output
+parseOutput =
+    ( OFile <$> Opt.option Opt.auto
+        (Opt.long "file"
+       <> Opt.help "TODO..."
+        )
+    )
+   <|>
+    ( OHttp <$> Opt.strOption
+        ( Opt.long "http"
+       <> Opt.metavar "URI"
+       <> Opt.help "Address of the server"
+        )
+    )
+-}
+
+{-
 data Drop
     = DSyslog SL.Priority EncodeFormat
     | DFile FilePath EncodeFormat
@@ -80,22 +169,6 @@ options = Options
     <*> bufferParse
     <*> batchParse
     <*> many dropParse
-
-inputParse :: Parser Input
-inputParse = subparser $
-    command "input" (info (helper <*> level2) (progDesc "input definition"))
-  where
-    level2 = subparser
-        ( command "unicast" (info (helper <*> unicast) idm)
-       <> command "multicast" (info multicast idm)
-        )
-    unicast = IUnicast
-        <$> argument str (metavar "IP" <> help "IP address")
-        <*> argument str (metavar "PORT" <> help "UDP port number")
-    multicast = IMulticast
-        <$> argument str (metavar "IP" <> help "IP address")
-        <*> argument str (metavar "PORT" <> help "UDP port number")
-        <*> argument str (metavar "LOCAL" <> help "local IP address")
 
 outputParse :: Parser Output
 outputParse = subparser $
@@ -150,7 +223,15 @@ dropParse = subparser $
         <$> argument str (metavar "FILE"
             <> help "destination filename, '-' for stdout")
         <*> formatParse
+-}
 
+-- | Run actual command.
+runCmd :: Options -> C.VcrOptions -> IO ()
+runCmd opts vcrOpts = do
+    logM INFO $
+        "command 'record', opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
+
+{-
 runCmd :: Options -> Action ()
 runCmd opts = do
     logM "init" INFO $ show opts
@@ -304,4 +385,4 @@ startOutput o buf = do
                             200 -> tellIO DEBUG "Request processed."
                             _ -> do retryWith $ show resp
         process
-
+-}

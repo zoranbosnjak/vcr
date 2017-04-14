@@ -28,31 +28,8 @@ import Test.QuickCheck (Arbitrary, arbitrary, getPositive, choose, oneof)
 import Text.Printf (printf)
 import Text.Read (readMaybe)
 
--- | JSON format variants
-data JSONFormat
-    = JSONCompact       -- one line
-    | JSONPretty Int    -- multiple lines with specified indent size
-    deriving (Generic, Eq, Show)
-
-instance Arbitrary JSONFormat where
-    arbitrary = oneof
-        [ pure JSONCompact
-        , JSONPretty <$> choose (1,8)
-        ]
-
--- | File encoding formats (use COBS encoding for binary formats)
-data EncodeFormat
-    = EncShow
-    | EncJSON JSONFormat
-    | EncBin
-    deriving (Generic, Eq, Show)
-
-instance Arbitrary EncodeFormat where
-    arbitrary = oneof
-        [ pure EncShow
-        , EncJSON <$> arbitrary
-        , pure EncBin
-        ]
+-- local imports
+import qualified Encodings as Enc
 
 newtype Hash = Hash String deriving (Generic, Eq, Show, Read)
 
@@ -164,7 +141,7 @@ instance ToJSON Event where
         , "monoTime"    .= toNanoSecs monoTime
         , "session"     .= ses
         , "sequence"    .= seqNum
-        , "data"        .= hexlify val
+        , "data"        .= Enc.hexlify val
         ]
 
 instance FromJSON Event where
@@ -179,68 +156,9 @@ instance FromJSON Event where
       where
         readStr px = do
             s <- px
-            maybe (fail "unable to parse") pure (unhexlify s)
+            maybe (fail "unable to parse") pure (Enc.unhexlify s)
 
     parseJSON invalid    = typeMismatch "Event" invalid
-
--- | Convert bytestring to hex representation.
-hexlify :: BS.ByteString -> String
-hexlify = foldr (++) "" . map (printf "%02X") . BS.unpack
-
--- | Convert hex representation back to a bytestring.
-unhexlify :: String -> Maybe BS.ByteString
-unhexlify s = do
-    nums <- getPairs [] s >>= sequence . map getNum
-    return $ BS.pack $ reverse nums
-  where
-    getPairs acc [] = Just acc
-    getPairs _ (_:[]) = Nothing
-    getPairs acc (a:b:xs) = getPairs ([a,b]:acc) xs
-
-    getNum x = case readHex x of
-        [(a,"")] -> Just a
-        _ -> Nothing
-
--- | COBS encode single binary string
-cobsEncode :: BS.ByteString -> BS.ByteString
-cobsEncode s = BS.concat $ encodeSegments s where
-    encodeSegments x = BS.singleton prefix : chunk : rest where
-        (a,b) = BS.span (/= 0) x
-        chunk = BS.take 254 a
-        n = BS.length chunk
-        prefix = fromIntegral $ succ n
-        c = BS.drop n a `BS.append` b
-        rest = case BS.null c of
-            True -> []
-            False -> case prefix of
-                255 -> encodeSegments c
-                _ -> encodeSegments $ BS.drop 1 c
-
--- | COBS decode single binary string.
-cobsDecode :: BS.ByteString -> Maybe BS.ByteString
-cobsDecode s = do
-    (a,b) <- decodeSegment s
-    case BS.null b of
-        True -> return a
-        False -> do
-            rest <- cobsDecode b
-            return $ a `BS.append` rest
-  where
-    decodeSegment :: BS.ByteString -> Maybe (BS.ByteString, BS.ByteString)
-    decodeSegment x = do
-        (a,b) <- BS.uncons x
-        guard $ a > 0
-        let n = pred $ fromIntegral a
-            (c,d) = BS.splitAt n b
-        guard $ BS.length c == n
-        guard $ BS.findIndex (== 0) c == Nothing
-        case BS.null d of
-            True -> return (c, d)
-            False -> case a of
-                255 -> do
-                    (e,f) <- decodeSegment d
-                    return (c `BS.append` e, f)
-                _ -> return (c `BS.append` BS.singleton 0, d)
 
 -- | Calculate size of event as size of it's eValue.
 sizeOf :: Event -> Integer
@@ -249,7 +167,7 @@ sizeOf = fromIntegral . BS.length . eValue
 -- hash event
 hash :: Event -> Hash
 hash (Event ch src utc mono ses seqNum val) = Hash $
-    hexlify $ SHA256.finalize $ (flip SHA256.updates) parts $ SHA256.init
+    Enc.hexlify $ SHA256.finalize $ (flip SHA256.updates) parts $ SHA256.init
   where
     parts =
         [ pack . show $ ch
@@ -265,38 +183,33 @@ hash (Event ch src utc mono ses seqNum val) = Hash $
 now :: IO (UTCTime, TimeSpec)
 now = (,) <$> getCurrentTime <*> getTime Boottime
 
--- | Event delimiter for different encoding formats.
-delimit :: EncodeFormat -> String
-delimit EncShow = "\n"
-delimit (EncJSON _) = "\n"
-delimit EncBin = "\0"
-
 -- | Encode single event.
-encodeEvent :: EncodeFormat -> Event -> BS.ByteString
-encodeEvent EncShow evt = pack $ show evt
-encodeEvent (EncJSON JSONCompact) evt = BSL.toStrict $ encode evt
-encodeEvent (EncJSON (JSONPretty i)) evt = BSL.toStrict $ AP.encodePretty'
+encodeEvent :: Enc.EncodeFormat -> Event -> BS.ByteString
+encodeEvent Enc.EncShow evt = pack $ show evt
+encodeEvent (Enc.EncJSON Enc.JSONCompact) evt = BSL.toStrict $ encode evt
+encodeEvent (Enc.EncJSON (Enc.JSONPretty i)) evt =
+    BSL.toStrict $ AP.encodePretty'
     (AP.defConfig {AP.confCompare = compare, AP.confIndent = AP.Spaces i}) evt
-encodeEvent EncBin evt = cobsEncode $ BSL.toStrict $ Bin.encode evt
+encodeEvent Enc.EncBin evt = Enc.cobsEncode $ BSL.toStrict $ Bin.encode evt
 
 -- | Encode multiple events.
-encodeEvents :: EncodeFormat -> [Event] -> BS.ByteString
+encodeEvents :: Enc.EncodeFormat -> [Event] -> BS.ByteString
 encodeEvents fmt lst = foldr mappend BS.empty
-    [encodeEvent fmt e `mappend` pack (delimit fmt) | e <- lst]
+    [encodeEvent fmt e `mappend` pack (Enc.delimit fmt) | e <- lst]
 
 -- | Try to decode single event.
-decodeEvent :: EncodeFormat -> BS.ByteString -> Maybe Event
-decodeEvent EncShow s = readMaybe $ unpack s
-decodeEvent (EncJSON _) s = decode $ BSL.fromStrict s
-decodeEvent EncBin s = do
-    s' <- cobsDecode s
+decodeEvent :: Enc.EncodeFormat -> BS.ByteString -> Maybe Event
+decodeEvent Enc.EncShow s = readMaybe $ unpack s
+decodeEvent (Enc.EncJSON _) s = decode $ BSL.fromStrict s
+decodeEvent Enc.EncBin s = do
+    s' <- Enc.cobsDecode s
     let result = Bin.decodeOrFail $ BSL.fromStrict s'
     case result of
         Left _ -> Nothing
         Right (_,_,val) -> Just val
 
 -- | Try to decode multiple events.
-decodeEvents :: EncodeFormat -> BS.ByteString -> Maybe [Event]
+decodeEvents :: Enc.EncodeFormat -> BS.ByteString -> Maybe [Event]
 decodeEvents fmt s
     | BS.null s = Just []
     | otherwise = do
@@ -304,7 +217,7 @@ decodeEvents fmt s
         rest <- decodeEvents fmt s'
         return $ e:rest
   where
-    delim = pack $ delimit fmt
+    delim = pack $ Enc.delimit fmt
 
     getProbes probe x = (probe,x) : case BS.null x of
         True -> []

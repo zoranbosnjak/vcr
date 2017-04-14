@@ -15,6 +15,7 @@ import Test.QuickCheck
     , suchThat, (===))
 
 import Event
+import Encodings
 
 -- large bytestring generator
 largeByteString :: Int -> Gen BS.ByteString

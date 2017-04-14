@@ -5,62 +5,69 @@
 module Main where
 
 -- standard imports
-import Control.Monad.Trans.Except
-import Data.Monoid
-import Options.Applicative
-import System.IO
-import System.Exit
-import System.Log.Logger (Priority(..))
-import System.Log.Logger hiding (logM)
-import System.Log.Handler.Simple
+import Control.Exception (catch, SomeException)
+import Options.Applicative ((<**>))
+import qualified Options.Applicative as Opt
+import System.Log.Logger (Priority(DEBUG, INFO))
+import qualified System.Log.Logger as Log
+import System.Log.Handler.Simple (verboseStreamHandler)
+import System.IO (stdout, stderr, hPutStrLn)
+import System.Exit (exitWith, ExitCode(ExitFailure, ExitSuccess))
 
 -- local imports
-import Action
-import CmdRecord
-import CmdServe
---import CmdHousekeep
-import CmdArchive
---import CmdReplay
---import CmdSave
+import qualified Common as C
+import CmdRecord (cmdRecord)
+--import CmdArchive (cmdArchive)
+--import CmdServe (cmdServe)
+--import CmdHousekeep ...
+--import CmdReplay ...
 
-data Options = Options
-    { optDebug :: Maybe Priority
-    , optAction :: Action ()
-    }
-
-commands :: [(String, ParserInfo (Action ()))]
+-- | Available commands.
+commands :: [(String, Opt.ParserInfo (C.VcrOptions -> IO ()))]
 commands =
     [ ("record",    cmdRecord)
-    , ("serve",     cmdServe)
+    --, ("archive",   cmdArchive)
+    --, ("serve",     cmdServe)
     --, ("housekeep", cmdHousekeep)
-    , ("archive",   cmdArchive)
     --, ("replay",    cmdReplay)
     ]
 
-options :: Parser Options
+-- | Toplevel command line options.
+data Options = Options
+    { optGlobal :: C.VcrOptions
+    , optCommand :: C.VcrOptions -> IO ()
+    }
+
+-- | Toplevel command line parser.
+options :: Opt.Parser Options
 options = Options
-    <$> optional (option auto (long "debug" <> help "enable debugging"))
-    <*> subparser ( mconcat [command a b | (a,b) <- commands])
+    <$> C.vcrOptions
+    <*> Opt.subparser (mconcat [Opt.command a b | (a,b) <- commands])
 
 main :: IO ()
 main = do
-    opt <- execParser (info (helper <*> options) idm)
+    -- parse options
+    opt <- Opt.execParser (Opt.info (options <**> Opt.helper) Opt.idm)
 
     -- update logger
-    case optDebug opt of
+    case C.vcrOptVerbose (optGlobal opt) of
         Nothing -> return ()
         Just level -> do
-            updateGlobalLogger rootLoggerName (setLevel DEBUG . removeHandler)
+            Log.updateGlobalLogger Log.rootLoggerName
+                (Log.setLevel DEBUG . Log.removeHandler)
             hConsole <- verboseStreamHandler stdout level
-            updateGlobalLogger rootLoggerName (addHandler hConsole)
+            Log.updateGlobalLogger Log.rootLoggerName (Log.addHandler hConsole)
 
     -- run command
-    res <- runExceptT $ optAction opt
-    case res of
-        Left (Error e) -> do
-            hPutStrLn stderr "error(s):"
-            hPutStrLn stderr e
-            exitWith $ ExitFailure 1
-        Right _ -> do
-            exitWith ExitSuccess
+    C.logM INFO "startup"
+    (optCommand opt $ optGlobal opt) `catch` onError
+    exitWith ExitSuccess
+
+  where
+
+    onError :: SomeException -> IO ()
+    onError e = do
+        hPutStrLn stderr "VCR error"
+        hPutStrLn stderr $ show e
+        exitWith $ ExitFailure 1
 

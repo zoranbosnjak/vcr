@@ -20,6 +20,7 @@ library
     hs-source-dirs:     src
     exposed-modules:
         Event
+        Encodings
     build-depends:
         base >=4.9 && <4.10
         , clock >=0.7 && <0.8

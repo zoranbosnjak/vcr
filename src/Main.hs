@@ -13,6 +13,7 @@ import qualified System.Log.Logger as Log
 import System.Log.Handler.Simple (verboseStreamHandler)
 import System.IO (stdout, stderr, hPutStrLn)
 import System.Exit (exitWith, ExitCode(ExitFailure, ExitSuccess))
+import qualified System.Environment
 
 -- local imports
 import qualified Common as C
@@ -59,7 +60,9 @@ main = do
             Log.updateGlobalLogger Log.rootLoggerName (Log.addHandler hConsole)
 
     -- run command
-    C.logM INFO "startup"
+    pName <- System.Environment.getProgName
+    pArgs <- System.Environment.getArgs
+    C.logM INFO $ "startup " ++ show pName ++ " " ++ show pArgs
     (optCommand opt $ optGlobal opt) `catch` onError
     exitWith ExitSuccess
 
@@ -67,7 +70,7 @@ main = do
 
     onError :: SomeException -> IO ()
     onError e = do
-        hPutStrLn stderr "VCR error"
+        hPutStrLn stderr "VCR error:"
         hPutStrLn stderr $ show e
         exitWith $ ExitFailure 1
 

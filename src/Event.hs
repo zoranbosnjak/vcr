@@ -5,7 +5,6 @@
 module Event where
 
 import qualified Crypto.Hash.SHA256 as SHA256
-import Control.Monad (guard)
 import Data.Aeson (encode, decode)
 import qualified Data.Aeson.Encode.Pretty as AP
 import Data.Aeson.Types
@@ -15,17 +14,17 @@ import qualified Data.Binary as Bin
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import Data.ByteString.Char8 (pack, unpack)
+import Data.Monoid ((<>))
 import Data.Time
     ( UTCTime(UTCTime), getCurrentTime, fromGregorian, picosecondsToDiffTime
     , utctDay, utctDayTime, toGregorian, diffTimeToPicoseconds
     , picosecondsToDiffTime)
 import GHC.Generics (Generic)
-import Numeric (readHex)
+import qualified Options.Applicative as Opt
 import System.Clock
     ( TimeSpec(TimeSpec), Clock(Boottime), getTime, toNanoSecs, fromNanoSecs
     , sec, nsec)
-import Test.QuickCheck (Arbitrary, arbitrary, getPositive, choose, oneof)
-import Text.Printf (printf)
+import Test.QuickCheck (Arbitrary, arbitrary, getPositive, choose)
 import Text.Read (readMaybe)
 
 -- local imports
@@ -40,6 +39,13 @@ instance FromJSON Channel
 instance Arbitrary Channel where
     arbitrary = Channel <$> arbitrary
 
+channelOptions :: Opt.Parser Channel
+channelOptions = Channel <$> Opt.strOption
+    ( Opt.long "channel"
+   <> Opt.metavar "CH"
+   <> Opt.help "Channel identifier"
+    )
+
 newtype SourceId = SourceId String deriving (Generic, Eq, Show, Read)
 instance Bin.Binary SourceId
 instance ToJSON SourceId
@@ -47,12 +53,22 @@ instance FromJSON SourceId
 instance Arbitrary SourceId where
     arbitrary = SourceId <$> arbitrary
 
+sourceIdOptions :: Opt.Parser SourceId
+sourceIdOptions = SourceId <$> Opt.strOption
+    ( Opt.long "ident"
+   <> Opt.metavar "IDENT"
+   <> Opt.help "Recorder identifier"
+    )
+
 newtype SessionId = SessionId String deriving (Generic, Eq, Show, Read)
 instance Bin.Binary SessionId
 instance ToJSON SessionId
 instance FromJSON SessionId
 instance Arbitrary SessionId where
     arbitrary = SessionId <$> arbitrary
+
+sessionId :: String -> SessionId
+sessionId = SessionId
 
 instance Bin.Binary UTCTime where
     put t = do
@@ -185,7 +201,7 @@ now = (,) <$> getCurrentTime <*> getTime Boottime
 
 -- | Encode single event.
 encodeEvent :: Enc.EncodeFormat -> Event -> BS.ByteString
-encodeEvent Enc.EncShow evt = pack $ show evt
+encodeEvent Enc.EncText evt = pack $ show evt
 encodeEvent (Enc.EncJSON Enc.JSONCompact) evt = BSL.toStrict $ encode evt
 encodeEvent (Enc.EncJSON (Enc.JSONPretty i)) evt =
     BSL.toStrict $ AP.encodePretty'
@@ -199,7 +215,7 @@ encodeEvents fmt lst = foldr mappend BS.empty
 
 -- | Try to decode single event.
 decodeEvent :: Enc.EncodeFormat -> BS.ByteString -> Maybe Event
-decodeEvent Enc.EncShow s = readMaybe $ unpack s
+decodeEvent Enc.EncText s = readMaybe $ unpack s
 decodeEvent (Enc.EncJSON _) s = decode $ BSL.fromStrict s
 decodeEvent Enc.EncBin s = do
     s' <- Enc.cobsDecode s

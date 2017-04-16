@@ -31,6 +31,7 @@ library
         , binary >=0.8 && <0.9
         , time == 1.6.*
         , QuickCheck >=2.8 && <2.10
+        , optparse-applicative >=0.12 && <0.14
 
 executable vcr
     default-language:   Haskell2010

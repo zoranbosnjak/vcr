@@ -2,15 +2,12 @@
 -- |
 -- Module: CmdRecord
 --
--- 'record' command implementation
+-- 'record' command
 --
-
--- {-# LANGUAGE OverloadedStrings #-}
 
 module CmdRecord (cmdRecord) where
 
 -- standard imports
-import Data.Monoid ((<>))
 import Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
 import System.Log.Logger (Priority(INFO))
@@ -26,25 +23,23 @@ import qualified Data.ByteString as BS
 import Data.ByteString.Char8 (pack, unpack)
 import Data.Maybe
 import Data.Monoid
-import qualified Data.UUID as U
-import Data.UUID.V4
+-}
+import qualified Data.UUID
+import Data.UUID.V4 (nextRandom)
+{-
 import Network.HTTP.Simple
 import Network.Multicast
 import Network.Socket
 import Network.Socket.ByteString as NB
 import Options.Applicative
 import qualified System.IO
-import qualified System.Posix.Syslog as SL
 -}
 
 -- local imports
-import Common (logM)
+import qualified Buffer
+import Common (logM, check)
 import qualified Common as C
-import qualified Encodings as Enc
-{-
-import Buffer
-import Event
--}
+import qualified Event
 
 {- TODO:
     - check UDP IPv6 unicast/multicast "[ipv6]" instead of "ip"
@@ -52,178 +47,98 @@ import Event
     - ko je connection vzpostavljen,
       naj se buffer prazni postopoma, ne nujno vse naenkrat
 
-    - record naj zna snemati več kanalov na enkrat
-
     - record naj zna sprejeti listo serverjev,
       če do enega ne more dostopati, gre na drugega...
-    -- input: IStdin Format...
     -- input: TCPServer Ip Port Format...
     -- input: TCPClient Ip Port Format...
 -}
 
-{-
-cmdRecord :: ParserInfo (Action ())
-cmdRecord = info (helper <*> (runCmd <$> options))
-    (progDesc "event recorder")
--}
-
 cmdRecord :: Opt.ParserInfo (C.VcrOptions -> IO ())
 cmdRecord = Opt.info ((runCmd <$> options) <**> Opt.helper)
-    (Opt.progDesc "Event recorder.")
+    (Opt.progDesc "Event recorder")
 
 -- | Speciffic command options.
 data Options = Options
-    { optIdent :: Maybe String
-    , optChannel :: String
-    , optInput :: Input
-    --, optOutput :: Output
-    {-
-    , optBufferSize :: Thrashold
-    , optBatchSize :: Thrashold
-    , optDrop :: [Drop]
-    -- retry http connect interval
-    -- http response timeout
-    -}
-    } deriving (Show, Eq)
-
--- | Command option parser
-options :: Opt.Parser Options
-options = Options
-    <$> (Opt.optional $ Opt.strOption
-            ( Opt.long "ident"
-           <> Opt.metavar "IDENT"
-           <> Opt.help "Recorder identifier"
-            )
-        )
-    <*> Opt.strOption
-            ( Opt.short 'c'
-           <> Opt.long "channel"
-           <> Opt.metavar "CH"
-           <> Opt.help "Channel identifier"
-            )
-    <*> (stdInput <|> udpInput)
-
-    -- <*> parseOutput
+    { optIdent      :: Maybe Event.SourceId
+    , optInput      :: Input
+    , optOutput     :: Output
+    , optOverflow   :: Overflow
+    , optBatchSize  :: Buffer.Thrashold
+    , optBufferSize :: Buffer.Thrashold
+    } deriving (Eq, Show)
 
 -- | Input options.
 data Input
-    = IStdin
-    | IUdp [C.Udp]
-    deriving (Show, Eq)
+    = IStdin Event.Channel
+    | IUdp [(C.UdpIn, Event.Channel)]
+    deriving (Eq, Show)
 
-stdInput :: Opt.Parser Input
-stdInput = Opt.flag' IStdin (Opt.long "stdin" <> Opt.help "Read from stdin")
-
-udpInput :: Opt.Parser Input
-udpInput = IUdp <$> Opt.some (C.udpAs 'i' "input")
-
-{-
-udpInput :: Opt.Parser Input
-udpInput = IUdp <$> Opt.some (Opt.option (Opt.maybeReader readMaybe)
-        ( Opt.short 'i'
-       <> Opt.long "input"
-       <> Opt.metavar "ARG"
-       <> Opt.help (C.showOpt C.udpOptions)
-        )
-    )
--}
-
-{-
--- | Output options: to a file or to set of http servers
+-- | Output options.
 data Output
     = OFile C.FileStore
-    | OHttp [C.URI]
-    deriving (Show, Eq)
+    | OServer C.ConnectTimeout C.RetryTimeout [C.Server]
+    deriving (Eq, Show)
 
--- | Parse output options.
-parseOutput :: Opt.Parser Output
-parseOutput =
-    ( OFile <$> Opt.option Opt.auto
-        (Opt.long "file"
-       <> Opt.help "TODO..."
-        )
-    )
-   <|>
-    ( OHttp <$> Opt.strOption
-        ( Opt.long "http"
-       <> Opt.metavar "URI"
-       <> Opt.help "Address of the server"
-        )
-    )
--}
+-- | Overflow handler (what to do in case of buffer overflow).
+data Overflow
+    = OverflowDrop
+    | OverflowFile C.FileStore
+    deriving (Eq, Show)
 
-{-
-data Drop
-    = DSyslog SL.Priority EncodeFormat
-    | DFile FilePath EncodeFormat
-    deriving (Show, Eq)
-
-options :: Parser Options
+-- | Command option parser.
+options :: Opt.Parser Options
 options = Options
-    <$> (optional $ strOption
-            (long "ident" <> metavar "IDENT" <> help "recorder identifier"))
-    <*> strOption
-            (long "channel" <> metavar "CH" <> help "channel identifier")
-    <*> inputParse
-    <*> outputParse
-    <*> bufferParse
-    <*> batchParse
-    <*> many dropParse
+    <$> Opt.optional Event.sourceIdOptions
+    <*> (stdinOptions <|> udpInputOptions)
+    <*> (storeFileOptions <|> storeServerOptions)
+    <*> (overflowDrop <|> overflowFile)
+    <*> Buffer.thrasholdOptions "batch"
+    <*> Buffer.thrasholdOptions "drop"
 
-outputParse :: Parser Output
-outputParse = subparser $
-    command "output" (info (helper <*> level2) (progDesc "output definition"))
+stdinOptions :: Opt.Parser Input
+stdinOptions = C.subparserCmd "stdin ..." $ Opt.command "stdin" $ Opt.info
+    (opts <**> Opt.helper)
+    (Opt.progDesc "Read data from stdin")
   where
-    level2 = subparser
-        ( command "file" (info (helper <*> file) idm)
-       <> command "http" (info (helper <*> http) idm)
-        )
-    file = OFile
-        <$> argument str (metavar "FILE"
-            <> help "destination filename, '-' for stdout")
-        <*> formatParse
-    http = OHttp
-        <$> argument str (metavar "IP" <> help "IP address")
-        <*> argument str (metavar "PORT" <> help "port number")
+    opts = IStdin <$> Event.channelOptions
 
-formatParse :: Parser EncodeFormat
-formatParse = pure EncShow -- TODO: decode all formating
+udpInputOptions :: Opt.Parser Input
+udpInputOptions = IUdp <$> Opt.some udp where
+    udp = C.subparserCmd "udp ..." $ Opt.command "udp" $ Opt.info
+        (opts <**> Opt.helper)
+        (Opt.progDesc "Read data from UDP")
+    opts = (,) <$> C.udpInOptions <*> Event.channelOptions
 
-bufferParse :: Parser Thrashold
-bufferParse = thrashold
-    <$> optional (option auto
-        (long "maxEvents" <> help "maximum number of events before drop"))
-    <*> optional (option kiloMega
-        (long "maxBytes" <> help "maximum size in bytes before drop"))
-    <*> optional (option auto
-        (long "maxSeconds" <> help "maximum event age in seconds before drop"))
-
-batchParse :: Parser Thrashold
-batchParse = thrashold
-    <$> optional (option auto
-        (long "batchEvents" <> help "wait for number of events before send"))
-    <*> optional (option kiloMega
-        (long "batchBytes" <> help "wait for size in bytes before send"))
-    <*> optional (option auto
-        (long "batchSeconds" <> help "wait seconds before send"))
-
-dropParse :: Parser Drop
-dropParse = subparser $
-    command "drop" (info (helper <*> level2) (progDesc "how to drop"))
+storeFileOptions :: Opt.Parser Output
+storeFileOptions = C.subparserCmd "file ..." $ Opt.command "file" $ Opt.info
+    (opts <**> Opt.helper)
+    (Opt.progDesc "Store data to a file")
   where
-    level2 = subparser
-        ( command "syslog" (info (helper <*> syslog) idm)
-       <> command "file" (info (helper <*> file) idm)
-        )
+    opts = OFile <$> C.fileStoreOptions
 
-    syslog = DSyslog <$> pure SL.Notice <*> formatParse  -- TODO
-    --level NOTICE | INFO | ...
+storeServerOptions :: Opt.Parser Output
+storeServerOptions = OServer
+    <$> C.connectTimeoutOptions
+    <*> C.retryTimeoutOptions
+    <*> Opt.some srv
+  where
+    srv = C.subparserCmd "server ..." $ Opt.command "server" $ Opt.info
+        (C.serverOptions <**> Opt.helper)
+        (Opt.progDesc "Store data to the server(s)")
 
-    file = DFile
-        <$> argument str (metavar "FILE"
-            <> help "destination filename, '-' for stdout")
-        <*> formatParse
--}
+overflowDrop :: Opt.Parser Overflow
+overflowDrop = C.subparserCmd "drop" $ Opt.command "drop" $ Opt.info
+    (opts <**> Opt.helper)
+    (Opt.progDesc "Drop data on buffer overflow")
+  where
+    opts = pure OverflowDrop
+
+overflowFile :: Opt.Parser Overflow
+overflowFile = C.subparserCmd "dropFile ..." $ Opt.command "dropFile" $ Opt.info
+    (opts <**> Opt.helper)
+    (Opt.progDesc "In case of buffer overflow, save data to a file")
+  where
+    opts = OverflowFile <$> C.fileStoreOptions
 
 -- | Run actual command.
 runCmd :: Options -> C.VcrOptions -> IO ()
@@ -231,20 +146,19 @@ runCmd opts vcrOpts = do
     logM INFO $
         "command 'record', opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
 
-{-
-runCmd :: Options -> Action ()
-runCmd opts = do
-    logM "init" INFO $ show opts
-    assert (anyLimit $ optBufferSize opts)
-        "Some limit in buffer size is required."
+    check (Buffer.anyLimit $ optBatchSize opts)
+        "Some limit on batch size is required."
 
-    assert (anyLimit $ optBatchSize opts)
-        "Some limit in batch size is required."
+    check (Buffer.anyLimit $ optBufferSize opts)
+        "Some limit on buffer size is required."
 
-    assert (optBatchSize opts `isBelow` optBufferSize opts)
+    check (optBatchSize opts `Buffer.isBelow` optBufferSize opts)
         "Buffer size too small for a given batch size."
 
-    sessionId <- liftIO nextRandom >>= return . U.toString
+    sessionId <- Event.sessionId . Data.UUID.toString <$> nextRandom
+    logM INFO $ "session ID: " ++ show sessionId
+
+    {-
 
     recorderId <- do
         -- TODO... get hostname
@@ -364,7 +278,7 @@ startOutput o buf = do
                     "-" -> BS.hPut System.IO.stdout s
                     _ -> BS.appendFile filename s
 
-            -- send data over http
+            -- send data to the server
             OHttp ip port -> sendHttp ip port evts
 
     sendHttp ip port evts = do

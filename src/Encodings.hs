@@ -13,9 +13,12 @@ module Encodings
 {-)-} where
 
 import Control.Monad (guard)
+import Data.Monoid ((<>))
 import qualified Data.ByteString as BS
 import GHC.Generics (Generic)
 import Numeric (readHex)
+import Options.Applicative ((<|>))
+import qualified Options.Applicative as Opt
 import qualified Test.QuickCheck as QC
 import Text.Printf (printf)
 
@@ -33,23 +36,36 @@ instance QC.Arbitrary JSONFormat where
 
 -- | File encoding formats.
 data EncodeFormat
-    = EncShow
-    | EncJSON JSONFormat
+    = EncText
     | EncBin
+    | EncJSON JSONFormat
     deriving (Generic, Eq, Show)
 
 instance QC.Arbitrary EncodeFormat where
     arbitrary = QC.oneof
-        [ pure EncShow
-        , EncJSON <$> QC.arbitrary
+        [ pure EncText
         , pure EncBin
+        , EncJSON <$> QC.arbitrary
         ]
+
+encodeFormatOptions :: Opt.Parser EncodeFormat
+encodeFormatOptions =
+    ( Opt.flag' EncText (Opt.long "text" <> Opt.help "\"text\" file encoding")
+  <|> Opt.flag' EncBin (Opt.long "bin" <> Opt.help "\"binary\" file encoding")
+  <|> Opt.flag' (EncJSON JSONCompact)
+        (Opt.long "jsonCompact" <> Opt.help "Compact \"json\" file encoding")
+  <|> (EncJSON <$> JSONPretty <$> Opt.option Opt.auto
+        ( Opt.long "jsonPretty"
+       <> Opt.metavar "N"
+       <> Opt.help "Pretty \"json\" file encoding (N indent spaces)")
+        )
+    )
 
 -- | Event delimiter for different encoding formats.
 delimit :: EncodeFormat -> String
-delimit EncShow = "\n"
-delimit (EncJSON _) = "\n"
+delimit EncText = "\n"
 delimit EncBin = "\0"
+delimit (EncJSON _) = "\n"
 
 -- | Convert bytestring to hex representation.
 hexlify :: BS.ByteString -> String

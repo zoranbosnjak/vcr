@@ -1,73 +1,84 @@
+------------------
+-- |
+-- Module: CmdArchive
+--
+-- 'archive' command
+--
+
 module CmdArchive (cmdArchive) where
 
-import Options.Applicative
-import Data.Monoid
+-- standard imports
+--import Data.Time (UTCTime(UTCTime))
+import Options.Applicative ((<**>), (<|>))
+import qualified Options.Applicative as Opt
+import System.Log.Logger (Priority(INFO))
 
-import Action
+-- local imports
+--import qualified Buffer
+import Common (logM)
+import qualified Common as C
+import qualified Event
 
-{-
+cmdArchive :: Opt.ParserInfo (C.VcrOptions -> IO ())
+cmdArchive = Opt.info ((runCmd <$> options) <**> Opt.helper)
+    (Opt.progDesc "Event archiver")
 
-TODO: At the moment, the dbase is specified using a simple string.
-Once the dbase is implemented, this should change to allow proper
-dbase specification.
+-- | Speciffic command options.
+data Options = Options
+    { optInput          :: Input
+    , optOutput         :: Output
+    , optChannelFilter  :: [Event.Channel]
+    , optSourceIdFilter :: [Event.SourceId]
+    -- TODO: , optStartTime      :: Maybe UTCTime
+    -- TODO: , optStopTime       :: Maybe UTCTime
+    -- TODO: , read/write batch size
+    } deriving (Eq, Show)
 
--}
-
-cmdArchive :: ParserInfo (Action ())
-cmdArchive =
-    info (helper <*> (runCmd <$> optionParser))
-         (progDesc "Event archiver")
-
-optionParser :: Parser Options
-optionParser =
-    (pure Options)
-    <*> (subparser (command "input"
-           (info (helper <*> inputParser)
-                 (progDesc "Input definition"))))
-    <*> (subparser (command "output"
-           (info (helper <*> outputParser)
-                 (progDesc "Onput definition"))))
-
-data Options
-    = Options
-      { optInput :: Input
-      , optOutput :: Output
-      }
-
+-- | Input options.
 data Input
-    = InputFile String
-    | InputDBase String
+    = IFile C.FileStore
+    | IServer C.Server
+    deriving (Eq, Show)
 
-inputParser :: Parser Input
-inputParser =
-    (subparser.foldl1 (<>))
-    [command "file"
-       (info (helper <*> (InputFile
-          <$> argument str (metavar "FILE" <> help "Input file name")))
-       (progDesc "Input file specification"))
-    ,command "dbase"
-       (info (helper <*> (InputDBase
-          <$> argument str (metavar "DBASE" <> help "Input dbase name")))
-       (progDesc "Input dbase specification"))]
-
+-- | Output options.
 data Output
-    = OutputFile String
-    | OutputDBase String
+    = OFile C.FileStore
+    | OServer C.Server
+    deriving (Eq, Show)
 
-outputParser :: Parser Output
-outputParser =
-    (subparser.foldl1 (<>))
-    [command "file"
-       (info (helper <*> (OutputFile
-          <$> argument str (metavar "FILE" <> help "Output file name")))
-       (progDesc "Output file specification"))
-    ,command "dbase"
-       (info (helper <*> (OutputDBase
-          <$> argument str (metavar "DBASE" <> help "Output dbase name")))
-       (progDesc "Output dbase specification"))]
+-- | Command option parser.
+options :: Opt.Parser Options
+options = Options
+    <$> input
+    <*> output
+    <*> Opt.many Event.channelOptions
+    <*> Opt.many Event.sourceIdOptions
+    -- <*> Opt.optional (C.timeOptions "start")
+    -- <*> Opt.optional (C.timeOptions "stop")
 
-runCmd :: Options -> Action ()
-runCmd opts = do
-    nop
+input :: Opt.Parser Input
+input = C.subparserCmd "input ..." $ Opt.command "input" $ Opt.info
+    (opts <**> Opt.helper)
+    (Opt.progDesc "Data source")
+  where
+    opts = file <|> server
+    file = Opt.flag' () (Opt.long "file") *> (IFile <$> C.fileStoreOptions)
+    server = Opt.flag' () (Opt.long "server") *> (IServer <$> C.serverOptions)
 
-{- EOF -}
+output :: Opt.Parser Output
+output = C.subparserCmd "output ..." $ Opt.command "output" $ Opt.info
+    (opts <**> Opt.helper)
+    (Opt.progDesc "Data destination")
+  where
+    opts = file <|> server
+    file = Opt.flag' () (Opt.long "file") *> (OFile <$> C.fileStoreOptions)
+    server = Opt.flag' () (Opt.long "server") *> (OServer <$> C.serverOptions)
+
+-- | Run command.
+runCmd :: Options -> C.VcrOptions -> IO ()
+runCmd opts vcrOpts = do
+    logM INFO $
+        "archive, opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
+
+    putStrLn "GO ARCHIVE!"
+

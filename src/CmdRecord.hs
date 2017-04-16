@@ -140,7 +140,7 @@ overflowFile = C.subparserCmd "dropFile ..." $ Opt.command "dropFile" $ Opt.info
   where
     opts = OverflowFile <$> C.fileStoreOptions
 
--- | Run actual command.
+-- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
 runCmd opts vcrOpts = do
     logM INFO $

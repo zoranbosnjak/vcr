@@ -13,6 +13,7 @@ module Common
 import Control.Exception (throwIO, Exception)
 import Control.Monad (unless)
 import Data.Monoid ((<>))
+import Data.Time (UTCTime)
 import Data.Typeable (Typeable)
 import qualified Options.Applicative as Opt
 import qualified Options.Applicative.Builder.Internal as Opt.Int
@@ -121,6 +122,10 @@ logM = Log.logM "vcr"
 showOpt :: [String] -> String
 showOpt [] = ""
 showOpt lst = foldr1 (\a b -> a ++ " | " ++ b) (show <$> lst)
+
+-- | Options for start/stop time.
+timeOptions :: String -> Opt.Parser UTCTime
+timeOptions _s = undefined
 
 -- | This is a copy of 'subparser' function with the addition
 -- of one more argument instead of fixed "COMMAND" string.

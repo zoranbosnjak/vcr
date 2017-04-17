@@ -40,6 +40,9 @@ import qualified Buffer
 import Common (logM, check)
 import qualified Common as C
 import qualified Event
+import qualified Server as Srv
+import qualified Udp
+import qualified File
 
 {- TODO:
     - check UDP IPv6 unicast/multicast "[ipv6]" instead of "ip"
@@ -70,19 +73,19 @@ data Options = Options
 -- | Input options.
 data Input
     = IStdin Event.Channel
-    | IUdp [(C.UdpIn, Event.Channel)]
+    | IUdp [(Udp.UdpIn, Event.Channel)]
     deriving (Eq, Show)
 
 -- | Output options.
 data Output
-    = OFile C.FileStore
-    | OServer C.ConnectTimeout C.RetryTimeout [C.Server]
+    = OFile File.FileStore
+    | OServer Srv.ConnectTimeout Srv.RetryTimeout [Srv.Server]
     deriving (Eq, Show)
 
 -- | Overflow handler (what to do in case of buffer overflow).
 data Overflow
     = OverflowDrop
-    | OverflowFile C.FileStore
+    | OverflowFile File.FileStore
     deriving (Eq, Show)
 
 -- | Command option parser.
@@ -107,23 +110,23 @@ udpInputOptions = IUdp <$> Opt.some udp where
     udp = C.subparserCmd "udp ..." $ Opt.command "udp" $ Opt.info
         (opts <**> Opt.helper)
         (Opt.progDesc "Read data from UDP")
-    opts = (,) <$> C.udpInOptions <*> Event.channelOptions
+    opts = (,) <$> Udp.udpInOptions <*> Event.channelOptions
 
 storeFileOptions :: Opt.Parser Output
 storeFileOptions = C.subparserCmd "file ..." $ Opt.command "file" $ Opt.info
     (opts <**> Opt.helper)
     (Opt.progDesc "Store data to a file")
   where
-    opts = OFile <$> C.fileStoreOptions
+    opts = OFile <$> File.fileStoreOptions
 
 storeServerOptions :: Opt.Parser Output
 storeServerOptions = OServer
-    <$> C.connectTimeoutOptions
-    <*> C.retryTimeoutOptions
+    <$> Srv.connectTimeoutOptions
+    <*> Srv.retryTimeoutOptions
     <*> Opt.some srv
   where
     srv = C.subparserCmd "server ..." $ Opt.command "server" $ Opt.info
-        (C.serverOptions <**> Opt.helper)
+        (Srv.serverOptions <**> Opt.helper)
         (Opt.progDesc "Store data to the server(s)")
 
 overflowDrop :: Opt.Parser Overflow
@@ -138,7 +141,7 @@ overflowFile = C.subparserCmd "dropFile ..." $ Opt.command "dropFile" $ Opt.info
     (opts <**> Opt.helper)
     (Opt.progDesc "In case of buffer overflow, save data to a file")
   where
-    opts = OverflowFile <$> C.fileStoreOptions
+    opts = OverflowFile <$> File.fileStoreOptions
 
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
@@ -158,6 +161,12 @@ runCmd opts vcrOpts = do
     sessionId <- Event.sessionId . Data.UUID.toString <$> nextRandom
     logM INFO $ "session ID: " ++ show sessionId
 
+    print
+        ( optIdent opts
+        , optInput opts
+        , optOutput opts
+        , optOverflow opts
+        )
     {-
 
     recorderId <- do

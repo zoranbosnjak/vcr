@@ -18,6 +18,8 @@ import System.Log.Logger (Priority(INFO))
 import Common (logM)
 import qualified Common as C
 import qualified Event
+import qualified Server as Srv
+import qualified File
 
 cmdArchive :: Opt.ParserInfo (C.VcrOptions -> IO ())
 cmdArchive = Opt.info ((runCmd <$> options) <**> Opt.helper)
@@ -36,14 +38,14 @@ data Options = Options
 
 -- | Input options.
 data Input
-    = IFile C.FileStore
-    | IServer C.Server
+    = IFile File.FileStore
+    | IServer Srv.Server
     deriving (Eq, Show)
 
 -- | Output options.
 data Output
-    = OFile C.FileStore
-    | OServer C.Server
+    = OFile File.FileStore
+    | OServer Srv.Server
     deriving (Eq, Show)
 
 -- | Command option parser.
@@ -62,8 +64,8 @@ input = C.subparserCmd "input ..." $ Opt.command "input" $ Opt.info
     (Opt.progDesc "Data source")
   where
     opts = file <|> server
-    file = Opt.flag' () (Opt.long "file") *> (IFile <$> C.fileStoreOptions)
-    server = Opt.flag' () (Opt.long "server") *> (IServer <$> C.serverOptions)
+    file = Opt.flag' () (Opt.long "file") *> (IFile <$> File.fileStoreOptions)
+    server = Opt.flag' () (Opt.long "server") *> (IServer <$> Srv.serverOptions)
 
 output :: Opt.Parser Output
 output = C.subparserCmd "output ..." $ Opt.command "output" $ Opt.info
@@ -71,8 +73,8 @@ output = C.subparserCmd "output ..." $ Opt.command "output" $ Opt.info
     (Opt.progDesc "Data destination")
   where
     opts = file <|> server
-    file = Opt.flag' () (Opt.long "file") *> (OFile <$> C.fileStoreOptions)
-    server = Opt.flag' () (Opt.long "server") *> (OServer <$> C.serverOptions)
+    file = Opt.flag' () (Opt.long "file") *> (OFile <$> File.fileStoreOptions)
+    server = Opt.flag' () (Opt.long "server") *> (OServer <$> Srv.serverOptions)
 
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
@@ -81,4 +83,10 @@ runCmd opts vcrOpts = do
         "archive, opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
 
     putStrLn "GO ARCHIVE!"
+    print
+        ( optInput opts
+        , optOutput opts
+        , optChannelFilter opts
+        , optSourceIdFilter opts
+        )
 

@@ -6,9 +6,9 @@
 --
 
 module File
--- (
--- TODO: add explicit exports of this module
-{-)-} where
+( FileStore
+, fileStoreOptions
+) where
 
 import Data.Monoid ((<>))
 import qualified Options.Applicative as Opt

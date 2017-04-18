@@ -6,9 +6,13 @@
 --
 
 module Common
--- (
--- TODO: add explicit exports of this module
-{-)-} where
+( logM
+, VcrOptions(..)
+, vcrOptions
+, timeOptions
+, subparserCmd
+, check
+) where
 
 import Control.Exception (throwIO, Exception)
 import Control.Monad (unless)
@@ -19,6 +23,10 @@ import qualified Options.Applicative as Opt
 import qualified Options.Applicative.Builder.Internal as Opt.Int
 import Options.Applicative.Types (OptReader(CmdReader))
 import qualified System.Log.Logger as Log
+
+-- | Log a message.
+logM :: Log.Priority -> String -> IO ()
+logM = Log.logM "vcr"
 
 -- | General VCR command line options.
 data VcrOptions = VcrOptions
@@ -36,10 +44,6 @@ vcrOptions = VcrOptions
         ))
   where
     levels = [minBound..maxBound] :: [Log.Priority]
-
--- | Log a message.
-logM :: Log.Priority -> String -> IO ()
-logM = Log.logM "vcr"
 
 -- | Options for start/stop time.
 timeOptions :: String -> Opt.Parser UTCTime

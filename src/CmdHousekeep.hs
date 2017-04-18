@@ -1,7 +1,11 @@
+------------------
+-- |
+-- Module: CmdHousekeep
+--
+-- 'housekeep' command
+--
 
-
-{-
-housekeep module
+{- TODO:
     - cleanup old events
     - maintain replicas
 -}

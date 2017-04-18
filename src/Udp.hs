@@ -6,9 +6,10 @@
 --
 
 module Udp
--- (
--- TODO: add explicit exports of this module
-{-)-} where
+( Ip, Port, LocalIp, TTL
+, UdpIn, udpInOptions
+, UdpOut, udpOutOptions
+) where
 
 import Data.Monoid ((<>))
 import qualified Options.Applicative as Opt

@@ -38,7 +38,7 @@ cmdReplay= Opt.info ((runCmd <$> options) <**> Opt.helper)
 data Options = Options
     { optInput      :: Input
     , optOutput     :: Output
-    , optBatchSize  :: Buffer.Thrashold
+    , optBatchSize  :: Buffer.Threshold
     } deriving (Eq, Show)
 
 -- | Input options.
@@ -58,7 +58,7 @@ options :: Opt.Parser Options
 options = Options
     <$> (readFileOptions <|> readServerOptions)
     <*> (stdoutOptions <|> udpOutputOptions)
-    <*> Buffer.thrasholdOptions "batch"
+    <*> Buffer.thresholdOptions "batch"
   where
     readFileOptions = undefined
     readServerOptions = undefined

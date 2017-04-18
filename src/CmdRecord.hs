@@ -66,8 +66,8 @@ data Options = Options
     , optInput      :: Input
     , optOutput     :: Output
     , optOnOverflow :: OnOverflow
-    , optLimitSend  :: Buffer.Thrashold
-    , optLimitDrop  :: Buffer.Thrashold
+    , optLimitSend  :: Buffer.Threshold
+    , optLimitDrop  :: Buffer.Threshold
     } deriving (Eq, Show)
 
 -- | Input options.
@@ -95,8 +95,8 @@ options = Options
     <*> (stdinOptions <|> udpInputOptions)
     <*> (storeFileOptions <|> storeServerOptions)
     <*> (onOverflowDrop <|> onOverflowFile)
-    <*> Buffer.thrasholdOptions "send"
-    <*> Buffer.thrasholdOptions "drop"
+    <*> Buffer.thresholdOptions "send"
+    <*> Buffer.thresholdOptions "drop"
 
 stdinOptions :: Opt.Parser Input
 stdinOptions = C.subparserCmd "stdin ..." $ Opt.command "stdin" $ Opt.info

@@ -6,9 +6,9 @@
 --
 
 module Server
--- (
--- TODO: add explicit exports of this module
-{-)-} where
+( ServerConnection(..)
+, serverConnectionOptions
+) where
 
 -- standard imports
 import Data.Monoid ((<>))

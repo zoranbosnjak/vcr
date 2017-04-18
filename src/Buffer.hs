@@ -7,8 +7,8 @@
 
 module Buffer
 ( Buffer
-, Thrashold (thLength, thBytes, thSeconds)
-, thrashold, thrasholdOptions
+, Threshold (thLength, thBytes, thSeconds)
+, threshold, thresholdOptions
 , isBelow
 
 -- buffer manipulation
@@ -31,21 +31,23 @@ import System.Clock (TimeSpec, toNanoSecs)
 
 import qualified Event
 
+-- | Buffer (sequence of data) with thresholds.
 data Buffer = Buffer
     { bufData       :: STM.TVar (DS.Seq Event.Event)
-    , bufAppendTh   :: Thrashold
-    , bufReadTh     :: Thrashold
+    , bufAppendTh   :: Threshold
+    , bufReadTh     :: Threshold
     }
 
-data Thrashold = Thrashold
+-- | Threshold, limit by different properties.
+data Threshold = Threshold
     { thLength      :: Maybe Int
     , thBytes       :: Maybe Integer
     , thSeconds     :: Maybe Double
     } deriving (Eq, Show)
 
-instance Monoid Thrashold where
-    mempty = Thrashold Nothing Nothing Nothing
-    Thrashold a1 b1 c1 `mappend` Thrashold a2 b2 c2 = Thrashold
+instance Monoid Threshold where
+    mempty = Threshold Nothing Nothing Nothing
+    Threshold a1 b1 c1 `mappend` Threshold a2 b2 c2 = Threshold
         (lower a1 a2)
         (lower b1 b2)
         (lower c1 c2)
@@ -54,8 +56,8 @@ instance Monoid Thrashold where
         lower x Nothing = x
         lower (Just a) (Just b) = Just (min a b)
 
-thrasholdOptions :: String -> Opt.Parser Thrashold
-thrasholdOptions s = thrashold
+thresholdOptions :: String -> Opt.Parser Threshold
+thresholdOptions s = threshold
     <$> Opt.optional (Opt.option Opt.auto
         ( Opt.long (s++"Events")
        <> Opt.help "number of events")
@@ -70,18 +72,19 @@ thrasholdOptions s = thrashold
         )
 
 -- | Make sure that th1 (readTh) will react before th2 (appendTh), equal is OK.
-isBelow :: Thrashold -> Thrashold -> Bool
-isBelow (Thrashold a1 b1 c1) (Thrashold a2 b2 c2) = and [a1<!a2, b1<!b2, c1<!c2]
+isBelow :: Threshold -> Threshold -> Bool
+isBelow (Threshold a1 b1 c1) (Threshold a2 b2 c2) = and [a1<!a2, b1<!b2, c1<!c2]
   where
     Just a <! Just b = a <= b
     _ <! Nothing = True
     Nothing <! _ = False
 
-thrashold :: (Maybe Int) -> (Maybe Integer) -> (Maybe Double) -> Thrashold
-thrashold = Thrashold
+threshold :: (Maybe Int) -> (Maybe Integer) -> (Maybe Double) -> Threshold
+threshold = Threshold
 
-anyLimit :: Thrashold -> Bool
-anyLimit (Thrashold a b c) = or [isJust a, isJust b, isJust c]
+-- | Check if any limit has been reached.
+anyLimit :: Threshold -> Bool
+anyLimit (Threshold a b c) = or [isJust a, isJust b, isJust c]
 
 -- | Helper function to convert eg. 1k -> 1024
 kiloMega :: Opt.ReadM Integer
@@ -96,14 +99,14 @@ kiloMega = Opt.eitherReader $ \arg -> do
         _         -> Left $ "cannot parse value `" ++ arg ++ "'"
 
 -- | Create new buffer.
-newBuffer :: Thrashold -> Thrashold -> STM.STM Buffer
+newBuffer :: Threshold -> Threshold -> STM.STM Buffer
 newBuffer appendTh readTh = Buffer
     <$> STM.newTVar mempty
     <*> pure appendTh
     <*> pure readTh
 
 -- | Append new events to the buffer.
--- We need to respect buffer append thrashold, so in case of
+-- We need to respect buffer append threshold, so in case of
 -- overflow, some events will not be appended (but returned).
 appendBuffer :: TimeSpec -> Buffer -> [Event.Event] -> STM.STM [Event.Event]
 appendBuffer ts buf evts = do
@@ -120,7 +123,7 @@ appendBuffer ts buf evts = do
             _ -> appendItems newContent xs
 
 -- | Read buffer content when ready to read.
--- Read only as many events as allowed by the thrashold
+-- Read only as many events as allowed by the threshold
 readBuffer :: STM.TVar TimeSpec -> Buffer -> STM.STM [Event.Event]
 readBuffer tick buf = do
     ts <- STM.readTVar tick
@@ -137,8 +140,8 @@ readBuffer tick buf = do
                 LT -> readItems ts newAcc rest
                 _ -> return (newAcc, rest)
 
--- | Compare content of the buffer with the thrashold
-thCompare :: TimeSpec -> DS.Seq Event.Event -> Thrashold -> Ordering
+-- | Compare content of the buffer with the threshold
+thCompare :: TimeSpec -> DS.Seq Event.Event -> Threshold -> Ordering
 thCompare ts s th = maximum [thCompareLength, thCompareBytes, thCompareSeconds]
   where
     mCompare _ Nothing = LT

@@ -8,9 +8,13 @@
 {-# LANGUAGE DeriveGeneric #-}
 
 module Encodings
--- (
--- TODO: add explicit exports of this module
-{-)-} where
+( EncodeFormat(..)
+, JSONFormat(..)
+, encodeFormatOptions
+, delimit
+, hexlify, unhexlify
+, cobsEncode, cobsDecode
+) where
 
 import Control.Monad (guard)
 import Data.Monoid ((<>))

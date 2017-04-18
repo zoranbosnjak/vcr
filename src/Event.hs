@@ -1,8 +1,28 @@
+------------------
+-- |
+-- Module: Event
+--
+-- Event description and functions.
+--
+
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
-module Event where
+module Event
+( Event(..)
+, Hash
+, Channel, channelOptions
+, SourceId, sourceIdOptions
+, sessionId
+, sequenceNum
+, nextSequenceNum
+, sizeOf
+, hash
+, now
+, encodeEvent, decodeEvent
+, encodeEvents, decodeEvents
+) where
 
 import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Aeson (encode, decode)

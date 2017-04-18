@@ -44,7 +44,7 @@ data Options = Options
 -- | Input options.
 data Input
     = IFile File.FileStore
-    | IServer [Srv.Server]
+    | IServer Srv.ServerConnection
     deriving (Eq, Show)
 
 -- | Output options.

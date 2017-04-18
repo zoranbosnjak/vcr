@@ -33,19 +33,19 @@ data Options = Options
     , optSourceIdFilter :: [Event.SourceId]
     -- TODO: , optStartTime      :: Maybe UTCTime
     -- TODO: , optStopTime       :: Maybe UTCTime
-    -- TODO: , read/write batch size
+    -- TODO: , read/write batch size and speed
     } deriving (Eq, Show)
 
 -- | Input options.
 data Input
     = IFile File.FileStore
-    | IServer Srv.Server
+    | IServer Srv.ServerConnection
     deriving (Eq, Show)
 
 -- | Output options.
 data Output
     = OFile File.FileStore
-    | OServer Srv.Server
+    | OServer Srv.ServerConnection
     deriving (Eq, Show)
 
 -- | Command option parser.
@@ -57,6 +57,7 @@ options = Options
     <*> Opt.many Event.sourceIdOptions
     -- <*> Opt.optional (C.timeOptions "start")
     -- <*> Opt.optional (C.timeOptions "stop")
+    -- some more options...
 
 input :: Opt.Parser Input
 input = C.subparserCmd "input ..." $ Opt.command "input" $ Opt.info
@@ -65,7 +66,8 @@ input = C.subparserCmd "input ..." $ Opt.command "input" $ Opt.info
   where
     opts = file <|> server
     file = Opt.flag' () (Opt.long "file") *> (IFile <$> File.fileStoreOptions)
-    server = Opt.flag' () (Opt.long "server") *> (IServer <$> Srv.serverOptions)
+    server = Opt.flag' () (Opt.long "server")
+        *> (IServer <$> Srv.serverConnectionOptions)
 
 output :: Opt.Parser Output
 output = C.subparserCmd "output ..." $ Opt.command "output" $ Opt.info
@@ -74,7 +76,8 @@ output = C.subparserCmd "output ..." $ Opt.command "output" $ Opt.info
   where
     opts = file <|> server
     file = Opt.flag' () (Opt.long "file") *> (OFile <$> File.fileStoreOptions)
-    server = Opt.flag' () (Opt.long "server") *> (OServer <$> Srv.serverOptions)
+    server = Opt.flag' () (Opt.long "server")
+        *> (OServer <$> Srv.serverConnectionOptions)
 
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()

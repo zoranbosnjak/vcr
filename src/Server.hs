@@ -20,15 +20,28 @@ type URI = String
 type ConnectTimeout = Double
 type RetryTimeout = Double
 
--- | Server.
+-- | Server connection pool.
+data ServerConnection = ServerConnection
+    { serverPool      :: [Server]
+    , connectTimeout  :: ConnectTimeout
+    , retryTimeout    :: RetryTimeout
+    } deriving (Eq, Show)
+
+-- | Single Server.
 data Server = Server URI deriving (Eq, Show)
+
+serverConnectionOptions :: Opt.Parser ServerConnection
+serverConnectionOptions = ServerConnection
+    <$> Opt.some serverOptions
+    <*> connectTimeoutOptions
+    <*> retryTimeoutOptions
 
 serverOptions :: Opt.Parser Server
 serverOptions = Server
     <$> Opt.strOption
         (Opt.long "uri"
        <> Opt.metavar "URI"
-       <> Opt.help "URI address"
+       <> Opt.help "Server URI address"
         )
 
 connectTimeoutOptions :: Opt.Parser ConnectTimeout

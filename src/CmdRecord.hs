@@ -65,9 +65,9 @@ data Options = Options
     { optIdent      :: Maybe Event.SourceId
     , optInput      :: Input
     , optOutput     :: Output
-    , optOverflow   :: Overflow
-    , optBatchSize  :: Buffer.Thrashold
-    , optBufferSize :: Buffer.Thrashold
+    , optOnOverflow :: OnOverflow
+    , optLimitSend  :: Buffer.Thrashold
+    , optLimitDrop  :: Buffer.Thrashold
     } deriving (Eq, Show)
 
 -- | Input options.
@@ -79,13 +79,13 @@ data Input
 -- | Output options.
 data Output
     = OFile File.FileStore
-    | OServer Srv.ConnectTimeout Srv.RetryTimeout [Srv.Server]
+    | OServer Srv.ServerConnection
     deriving (Eq, Show)
 
 -- | Overflow handler (what to do in case of buffer overflow).
-data Overflow
-    = OverflowDrop
-    | OverflowFile File.FileStore
+data OnOverflow
+    = OnOverflowDrop
+    | OnOverflowFile File.FileStore
     deriving (Eq, Show)
 
 -- | Command option parser.
@@ -94,8 +94,8 @@ options = Options
     <$> Opt.optional Event.sourceIdOptions
     <*> (stdinOptions <|> udpInputOptions)
     <*> (storeFileOptions <|> storeServerOptions)
-    <*> (overflowDrop <|> overflowFile)
-    <*> Buffer.thrasholdOptions "batch"
+    <*> (onOverflowDrop <|> onOverflowFile)
+    <*> Buffer.thrasholdOptions "send"
     <*> Buffer.thrasholdOptions "drop"
 
 stdinOptions :: Opt.Parser Input
@@ -120,28 +120,24 @@ storeFileOptions = C.subparserCmd "file ..." $ Opt.command "file" $ Opt.info
     opts = OFile <$> File.fileStoreOptions
 
 storeServerOptions :: Opt.Parser Output
-storeServerOptions = OServer
-    <$> Srv.connectTimeoutOptions
-    <*> Srv.retryTimeoutOptions
-    <*> Opt.some srv
-  where
-    srv = C.subparserCmd "server ..." $ Opt.command "server" $ Opt.info
-        (Srv.serverOptions <**> Opt.helper)
-        (Opt.progDesc "Store data to the server(s)")
+storeServerOptions = OServer <$> srvCmd where
+    srvCmd = C.subparserCmd "server ..." $ Opt.command "server" $ Opt.info
+        (Srv.serverConnectionOptions <**> Opt.helper)
+        (Opt.progDesc "Store data to server(s)")
 
-overflowDrop :: Opt.Parser Overflow
-overflowDrop = C.subparserCmd "drop" $ Opt.command "drop" $ Opt.info
+onOverflowDrop :: Opt.Parser OnOverflow
+onOverflowDrop = C.subparserCmd "drop" $ Opt.command "drop" $ Opt.info
     (opts <**> Opt.helper)
     (Opt.progDesc "Drop data on buffer overflow")
   where
-    opts = pure OverflowDrop
+    opts = pure OnOverflowDrop
 
-overflowFile :: Opt.Parser Overflow
-overflowFile = C.subparserCmd "dropFile ..." $ Opt.command "dropFile" $ Opt.info
-    (opts <**> Opt.helper)
-    (Opt.progDesc "In case of buffer overflow, save data to a file")
+onOverflowFile :: Opt.Parser OnOverflow
+onOverflowFile = C.subparserCmd "dropFile ..." $ Opt.command "dropFile" $
+    Opt.info (opts <**> Opt.helper)
+        (Opt.progDesc "In case of buffer overflow, save data to a file")
   where
-    opts = OverflowFile <$> File.fileStoreOptions
+    opts = OnOverflowFile <$> File.fileStoreOptions
 
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
@@ -149,13 +145,13 @@ runCmd opts vcrOpts = do
     logM INFO $
         "command 'record', opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
 
-    check (Buffer.anyLimit $ optBatchSize opts)
+    check (Buffer.anyLimit $ optLimitSend opts)
         "Some limit on batch size is required."
 
-    check (Buffer.anyLimit $ optBufferSize opts)
+    check (Buffer.anyLimit $ optLimitDrop opts)
         "Some limit on buffer size is required."
 
-    check (optBatchSize opts `Buffer.isBelow` optBufferSize opts)
+    check (optLimitSend opts `Buffer.isBelow` optLimitDrop opts)
         "Buffer size too small for a given batch size."
 
     sessionId <- Event.sessionId . Data.UUID.toString <$> nextRandom
@@ -165,7 +161,7 @@ runCmd opts vcrOpts = do
         ( optIdent opts
         , optInput opts
         , optOutput opts
-        , optOverflow opts
+        , optOnOverflow opts
         )
     {-
 
@@ -174,7 +170,7 @@ runCmd opts vcrOpts = do
         return $ fromMaybe "noident" $ optIdent opts
 
     buf <- liftIO $ atomically $
-        newBuffer (optBufferSize opts) (optBatchSize opts)
+        newBuffer (optBufferSize opts) (optLimitSend opts)
 
     input <- startInput
         (optInput opts)

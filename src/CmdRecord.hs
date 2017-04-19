@@ -8,37 +8,27 @@
 module CmdRecord (cmdRecord) where
 
 -- standard imports
-import Options.Applicative ((<**>), (<|>))
-import qualified Options.Applicative as Opt
-import System.Log.Logger (Priority(INFO))
-
-{-
-import Control.Exception hiding (throw, assert)
-import Control.Concurrent
-import Control.Concurrent.Async
-import Control.Concurrent.STM
-import Control.Monad (forM_)
-import Control.Monad.Trans
+import Control.Concurrent (threadDelay)
+import qualified Control.Concurrent.Async as Async
+import qualified Control.Concurrent.STM as STM
+import Control.Monad (forM_, forM, forever)
 import qualified Data.ByteString as BS
 import Data.ByteString.Char8 (pack, unpack)
-import Data.Maybe
-import Data.Monoid
--}
+import Data.Maybe (fromMaybe)
 import qualified Data.UUID
 import Data.UUID.V4 (nextRandom)
-{-
-import Network.HTTP.Simple
-import Network.Multicast
-import Network.Socket
-import Network.Socket.ByteString as NB
-import Options.Applicative
-import qualified System.IO
--}
+import Network.BSD (getHostName)
+import Options.Applicative ((<**>), (<|>))
+import qualified Options.Applicative as Opt
+import System.Environment (getProgName)
+import System.Log.Logger (Priority(INFO, DEBUG, NOTICE))
+import qualified System.Posix.Syslog as SL
 
 -- local imports
 import qualified Buffer
 import Common (logM, check)
 import qualified Common as C
+import qualified Encodings as Enc
 import qualified Event
 import qualified Server as Srv
 import qualified Udp
@@ -49,9 +39,6 @@ import qualified File
     - check ipv6 http output
     - ko je connection vzpostavljen,
       naj se buffer prazni postopoma, ne nujno vse naenkrat
-
-    - record naj zna sprejeti listo serverjev,
-      če do enega ne more dostopati, gre na drugega...
     -- input: TCPServer Ip Port Format...
     -- input: TCPClient Ip Port Format...
 -}
@@ -86,6 +73,7 @@ data Output
 data OnOverflow
     = OnOverflowDrop
     | OnOverflowFile File.FileStore
+    | OnOverflowSyslog SL.Priority
     deriving (Eq, Show)
 
 -- | Command option parser.
@@ -94,7 +82,7 @@ options = Options
     <$> Opt.optional Event.sourceIdOptions
     <*> (stdinOptions <|> udpInputOptions)
     <*> (storeFileOptions <|> storeServerOptions)
-    <*> (onOverflowDrop <|> onOverflowFile)
+    <*> (onOverflowDrop <|> onOverflowFile <|> onOverflowSyslog)
     <*> Buffer.thresholdOptions "send"
     <*> Buffer.thresholdOptions "drop"
 
@@ -128,7 +116,7 @@ storeServerOptions = OServer <$> srvCmd where
 onOverflowDrop :: Opt.Parser OnOverflow
 onOverflowDrop = C.subparserCmd "drop" $ Opt.command "drop" $ Opt.info
     (opts <**> Opt.helper)
-    (Opt.progDesc "Drop data on buffer overflow")
+    (Opt.progDesc "In case of buffer overflow, drop data")
   where
     opts = pure OnOverflowDrop
 
@@ -139,6 +127,13 @@ onOverflowFile = C.subparserCmd "dropFile ..." $ Opt.command "dropFile" $
   where
     opts = OnOverflowFile <$> File.fileStoreOptions
 
+onOverflowSyslog :: Opt.Parser OnOverflow
+onOverflowSyslog = C.subparserCmd "dropSyslog" $ Opt.command "dropSyslog" $
+    Opt.info (opts <**> Opt.helper)
+        (Opt.progDesc "In case of buffer overflow, send data to syslog")
+  where
+    opts = OnOverflowSyslog <$> C.syslogOptions
+
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
 runCmd opts vcrOpts = do
@@ -146,162 +141,136 @@ runCmd opts vcrOpts = do
         "command 'record', opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
 
     check (Buffer.anyLimit $ optLimitSend opts)
-        "Some limit on batch size is required."
+        "Some limit on send size is required."
 
     check (Buffer.anyLimit $ optLimitDrop opts)
-        "Some limit on buffer size is required."
+        "Some limit on drop size is required."
 
     check (optLimitSend opts `Buffer.isBelow` optLimitDrop opts)
-        "Buffer size too small for a given batch size."
-
-    sessionId <- Event.sessionId . Data.UUID.toString <$> nextRandom
-    logM INFO $ "session ID: " ++ show sessionId
-
-    print
-        ( optIdent opts
-        , optInput opts
-        , optOutput opts
-        , optOnOverflow opts
-        )
-    {-
+        "Buffer drop size too small for a given send size."
 
     recorderId <- do
-        -- TODO... get hostname
-        return $ fromMaybe "noident" $ optIdent opts
+        hostname <- Event.sourceId <$> getHostName
+        return $ fromMaybe hostname $ optIdent opts
+    logM INFO $ "recorder ID: " ++ show recorderId
 
-    buf <- liftIO $ atomically $
-        newBuffer (optBufferSize opts) (optLimitSend opts)
+    buf <- STM.atomically $
+        Buffer.newBuffer (optLimitDrop opts) (optLimitSend opts)
 
-    input <- startInput
-        (optInput opts)
-        buf
-        (SessionId sessionId)
-        (SourceId recorderId)
-        (Channel $ optChannel opts)
-        (optDrop opts)
+    syslogOpts <- do
+        progName <- getProgName
+        return $ SL.defaultConfig {SL.identifier = pack progName}
 
-    output <- startOutput (optOutput opts) buf
+    -- initiate a reader for each input
+    inputs <- case optInput opts of
+        IStdin ch -> forM [ch] $ reader syslogOpts recorderId buf
+            (optOnOverflow opts) prepareStdin readStdin
+        IUdp inputs -> forM inputs $ reader syslogOpts recorderId buf
+            (optOnOverflow opts) prepareUdp readUdp
+
+    -- start writer
+    output <- writer (optOutput opts) buf
 
     -- all threads shall remain running
-    _ <- liftIO $ waitAnyCatchCancel $ [input, output]
-    throw "process terminated"
-
--- | Copy messages from input to buffer (or call drop handler).
-startInput :: Input -> Buffer -> SessionId -> SourceId -> Channel
-    -> [Drop] -> Action (Async a)
-startInput i buf sessionId recorderId ch dropList = do
-    let tell prio msg = logM (show i) prio msg
-    tell INFO "starting"
-    let (ip,port,mclocal) = case i of
-            IUnicast ip' port' -> (ip', port', Nothing)
-            IMulticast mcast' port' local' -> (mcast', port', Just local')
-
-    sock <- liftIO $ do
-        (serveraddr:_) <- getAddrInfo
-            (Just (defaultHints {addrFlags = [AI_PASSIVE]}))
-            (Just ip)
-            (Just port)
-        sock <- socket (addrFamily serveraddr) Datagram defaultProtocol
-
-        case mclocal of
-            Nothing -> return ()
-            Just _ -> do
-                setSocketOption sock ReuseAddr 1
-                addMembership sock ip mclocal
-
-        bind sock (addrAddress serveraddr)
-        return sock
-
-    let loop seqNum = do
-            (datagram, _addr) <- NB.recvFrom sock (2^(16::Int))
-            ts <- now
-            let evt = createEvent ts seqNum datagram
-            notAppended <- atomically $ appendBuffer (snd ts) buf [evt]
-            _ <- runAction $ case notAppended of
-                [] -> tell DEBUG $ show evt
-                [x] -> tell NOTICE $ "error appending: " ++ show x
-                _ -> tell ERROR $ "internal error: unexpected events"
-            forM_ dropList $ handleDrop notAppended
-            loop $ nextSequenceNum seqNum
-
-    liftIO $ async $ loop minBound
+    _ <- Async.waitAnyCatchCancel (output:inputs)
+    C.throw "process terminated"
 
   where
-    createEvent (t1,t2) seqNum datagram = Event
-        { eChannel = ch
-        , eSourceId = recorderId
-        , eUtcTime = t1
-        , eMonoTime = t2
-        , eSessionId = sessionId
-        , eSequence = seqNum
-        , eValue = datagram
-        }
 
-    handleDrop [] _ = return ()
-    handleDrop lst dst = case dst of
-        DSyslog prio fmt -> SL.withSyslog slOpts $ \syslog -> do
-            forM_ lst $ \evt -> do
-                let e = encodeEvent fmt evt
-                    msg = "["++show i++"] " ++ unpack e
-                syslog SL.USER prio $ pack msg
-        DFile filename fmt ->
-            let s = encodeEvents fmt lst
-            in case filename of
-                "-" -> BS.hPut System.IO.stdout s
-                _ -> BS.appendFile filename s
+    prepareStdin ch = return (ch,())
 
-    slOpts = SL.defaultConfig
-        { SL.identifier = pack $ "vcr" -- TODO: use real program name
-        }
+    readStdin _ = pack <$> getLine
+
+    prepareUdp (addr,ch) = do
+        sock <- Udp.rxSocket addr
+        return (ch, sock)
+
+    readUdp sock = fst <$> Udp.rxUdp sock
+
+-- Reader loop is identical for all inputs,
+-- except for prepare and actual read functions.
+reader :: Show a1 =>
+    SL.SyslogConfig
+    -> Event.SourceId -> Buffer.Buffer -> OnOverflow
+    -> (a1 -> IO (Event.Channel, t))
+    -> (t -> IO BS.ByteString)
+    -> a1
+    -> IO (Async.Async ())
+reader syslogOpts recorderId buf ofAction prepare readData arg = do
+    (ch, handle) <- prepare arg
+
+    -- Each reader has own session id, so that sequence
+    -- numbers can be independant between readers.
+    sessionId <- Event.sessionId . Data.UUID.toString <$> nextRandom
+    logM INFO $ "starting input"
+        ++ ", ch: " ++ show ch
+        ++ ", arg: " ++ show arg
+        ++ ", session ID: " ++ show sessionId
+
+    let createEvent (t1,t2) seqNum msg = Event.Event
+            { Event.eChannel = ch
+            , Event.eSourceId = recorderId
+            , Event.eUtcTime = t1
+            , Event.eMonoTime = t2
+            , Event.eSessionId = sessionId
+            , Event.eSequence = seqNum
+            , Event.eValue = msg
+            }
+
+        loop seqNum = do
+            msg <- readData handle
+            ts <- Event.now
+            let evt = createEvent ts seqNum msg
+            logM DEBUG $ "read event: " ++ show evt
+
+            notAppended <- STM.atomically $
+                Buffer.appendBuffer (snd ts) buf [evt]
+
+            case notAppended of
+                [] -> return ()
+                [x] -> do
+                    logM NOTICE $ "overflow: " ++ show x
+                    onOverflow ofAction [x]
+                _ -> C.throw "unexpected list of not appended events"
+
+            loop $ Event.nextSequenceNum seqNum
+
+    Async.async $ loop minBound
+  where
+
+    -- ignore overflow
+    onOverflow OnOverflowDrop _ = return ()
+
+    -- append overflow to a file
+    onOverflow (OnOverflowFile fs) lst = File.appendFile fs lst
+
+    -- send overflow to syslog
+    onOverflow (OnOverflowSyslog level) lst =
+        SL.withSyslog syslogOpts $ \syslog -> forM_ lst $ \evt -> do
+            let e = Enc.encode (Enc.EncJSON Enc.JSONCompact) evt
+                msg = "["++show (Event.eChannel evt)++"] " ++ unpack e
+            syslog SL.USER level $ pack msg
 
 -- | Copy messages from buffer to output.
-startOutput :: Output -> Buffer -> Action (Async ())
-startOutput o buf = do
-    tell INFO "starting"
-    tick <- liftIO (now >>= \(_,t) -> newTVarIO t)
-    liftIO $ async $ race_ (ticker tick) (sender tick)
+writer :: Output -> Buffer.Buffer -> IO (Async.Async ())
+writer out buf = do
+    logM INFO $ "starting output: " ++ show out
+
+    tick <- (snd <$> Event.now) >>= STM.newTVarIO
+    Async.async $ Async.race_ (ticker tick) (sender tick)
 
   where
-    tell prio msg = logM (show o) prio msg
-    tellIO a b = (runAction $ tell a b) >>= \_ -> return ()
-
     threadDelaySec :: Double -> IO ()
     threadDelaySec = threadDelay . round . (1000000*)
 
     ticker tick = forever $ do
         threadDelaySec 1
-        (_, t) <- now
-        atomically $ writeTVar tick t
+        t <- snd <$> Event.now
+        STM.atomically $ STM.writeTVar tick t
 
     sender tick = forever $ do
-        evts <- liftIO $ atomically $ readBuffer tick buf
-        case o of
-            -- send to file
-            OFile filename fmt ->
-                let s = encodeEvents fmt evts
-                in case filename of
-                    "-" -> BS.hPut System.IO.stdout s
-                    _ -> BS.appendFile filename s
+        evts <- STM.atomically $ Buffer.readBuffer tick buf
+        case out of
+            OFile fs -> File.appendFile fs evts
+            OServer _conn -> undefined -- Srv.request??method evts
 
-            -- send data to the server
-            OHttp ip port -> sendHttp ip port evts
-
-    sendHttp ip port evts = do
-        -- TODO: add proper content type
-        request <- parseRequest $ "PUT http://"++ip++":"++port++"/events"
-        let request' = setRequestBodyJSON evts $ request
-            retryWith s = do
-                tellIO NOTICE s
-                threadDelaySec 3
-                process
-            process = do
-                eResponse <- try (httpLBS request')
-                case eResponse of
-                    Left (SomeException _e) ->
-                        retryWith "Unable to connect."
-                    Right resp -> do
-                        case getResponseStatusCode resp of
-                            200 -> tellIO DEBUG "Request processed."
-                            _ -> do retryWith $ show resp
-        process
--}

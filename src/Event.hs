@@ -13,15 +13,13 @@ module Event
 ( Event(..)
 , Hash
 , Channel, channelOptions
-, SourceId, sourceIdOptions
-, sessionId
+, SourceId, sourceId, sourceIdOptions
+, SessionId, sessionId
 , sequenceNum
 , nextSequenceNum
 , sizeOf
 , hash
 , now
-, encodeEvent, decodeEvent
-, encodeEvents, decodeEvents
 ) where
 
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -72,6 +70,9 @@ instance ToJSON SourceId
 instance FromJSON SourceId
 instance Arbitrary SourceId where
     arbitrary = SourceId <$> arbitrary
+
+sourceId :: String -> SourceId
+sourceId = SourceId
 
 sourceIdOptions :: Opt.Parser SourceId
 sourceIdOptions = SourceId <$> Opt.strOption
@@ -196,6 +197,26 @@ instance FromJSON Event where
 
     parseJSON invalid    = typeMismatch "Event" invalid
 
+instance Enc.Encodable Event where
+
+    -- | Encode single event.
+    encode Enc.EncText evt = pack $ show evt
+    encode (Enc.EncJSON Enc.JSONCompact) evt = BSL.toStrict $ encode evt
+    encode (Enc.EncJSON (Enc.JSONPretty i)) e =
+        BSL.toStrict $ AP.encodePretty'
+        (AP.defConfig {AP.confCompare = compare, AP.confIndent = AP.Spaces i}) e
+    encode Enc.EncBin evt = Enc.cobsEncode $ BSL.toStrict $ Bin.encode evt
+
+    -- | Try to decode single event.
+    decode Enc.EncText s = readMaybe $ unpack s
+    decode (Enc.EncJSON _) s = decode $ BSL.fromStrict s
+    decode Enc.EncBin s = do
+        s' <- Enc.cobsDecode s
+        let result = Bin.decodeOrFail $ BSL.fromStrict s'
+        case result of
+            Left _ -> Nothing
+            Right (_,_,val) -> Just val
+
 -- | Calculate size of event as size of it's eValue.
 sizeOf :: Event -> Integer
 sizeOf = fromIntegral . BS.length . eValue
@@ -218,54 +239,4 @@ hash (Event ch src utc mono ses seqNum val) = Hash $
 -- | Get current time (UTC,boot).
 now :: IO (UTCTime, TimeSpec)
 now = (,) <$> getCurrentTime <*> getTime Boottime
-
--- | Encode single event.
-encodeEvent :: Enc.EncodeFormat -> Event -> BS.ByteString
-encodeEvent Enc.EncText evt = pack $ show evt
-encodeEvent (Enc.EncJSON Enc.JSONCompact) evt = BSL.toStrict $ encode evt
-encodeEvent (Enc.EncJSON (Enc.JSONPretty i)) evt =
-    BSL.toStrict $ AP.encodePretty'
-    (AP.defConfig {AP.confCompare = compare, AP.confIndent = AP.Spaces i}) evt
-encodeEvent Enc.EncBin evt = Enc.cobsEncode $ BSL.toStrict $ Bin.encode evt
-
--- | Encode multiple events.
-encodeEvents :: Enc.EncodeFormat -> [Event] -> BS.ByteString
-encodeEvents fmt lst = foldr mappend BS.empty
-    [encodeEvent fmt e `mappend` pack (Enc.delimit fmt) | e <- lst]
-
--- | Try to decode single event.
-decodeEvent :: Enc.EncodeFormat -> BS.ByteString -> Maybe Event
-decodeEvent Enc.EncText s = readMaybe $ unpack s
-decodeEvent (Enc.EncJSON _) s = decode $ BSL.fromStrict s
-decodeEvent Enc.EncBin s = do
-    s' <- Enc.cobsDecode s
-    let result = Bin.decodeOrFail $ BSL.fromStrict s'
-    case result of
-        Left _ -> Nothing
-        Right (_,_,val) -> Just val
-
--- | Try to decode multiple events.
-decodeEvents :: Enc.EncodeFormat -> BS.ByteString -> Maybe [Event]
-decodeEvents fmt s
-    | BS.null s = Just []
-    | otherwise = do
-        (e,s') <- tryDecode s
-        rest <- decodeEvents fmt s'
-        return $ e:rest
-  where
-    delim = pack $ Enc.delimit fmt
-
-    getProbes probe x = (probe,x) : case BS.null x of
-        True -> []
-        False -> getProbes
-            (BS.concat [probe,a]) (BS.drop (BS.length delim) b)
-      where
-        (a,b) = BS.breakSubstring delim x
-
-    tryDecode x = do
-        let probes = getProbes BS.empty x
-            firstOf [] = Nothing
-            firstOf ((Nothing,_):rest) = firstOf rest
-            firstOf ((Just a,b):_) = Just (a,b)
-        firstOf [(decodeEvent fmt a,b) | (a,b) <- probes]
 

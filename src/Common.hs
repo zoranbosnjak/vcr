@@ -9,8 +9,10 @@ module Common
 ( logM
 , VcrOptions(..)
 , vcrOptions
+, syslogOptions
 , timeOptions
 , subparserCmd
+, throw
 , check
 ) where
 
@@ -23,6 +25,7 @@ import qualified Options.Applicative as Opt
 import qualified Options.Applicative.Builder.Internal as Opt.Int
 import Options.Applicative.Types (OptReader(CmdReader))
 import qualified System.Log.Logger as Log
+import qualified System.Posix.Syslog as SL
 
 -- | Log a message.
 logM :: Log.Priority -> String -> IO ()
@@ -45,6 +48,16 @@ vcrOptions = VcrOptions
   where
     levels = [minBound..maxBound] :: [Log.Priority]
 
+-- A parser for syslog priority options.
+syslogOptions :: Opt.Parser SL.Priority
+syslogOptions = Opt.option Opt.auto
+        ( Opt.long "level"
+       <> Opt.metavar "LEVEL"
+       <> Opt.help ("Set syslog level, one of: " ++ show levels)
+        )
+  where
+    levels = [minBound..maxBound] :: [SL.Priority]
+
 -- | Options for start/stop time.
 timeOptions :: String -> Opt.Parser UTCTime
 timeOptions _s = undefined
@@ -65,7 +78,14 @@ instance Exception VcrError
 instance Show VcrError where
     show (VcrError err) = err
 
--- | Throw exception if the condition is not True
+-- | Throw VCR exception.
+throw :: String -> IO ()
+throw s = do
+    let err = VcrError s
+    logM Log.ERROR $ show err
+    throwIO err
+
+-- | Throw exception if the condition is not True.
 check :: Bool -> String -> IO ()
-check condition err = unless condition $ throwIO (VcrError err)
+check condition = unless condition . throw
 

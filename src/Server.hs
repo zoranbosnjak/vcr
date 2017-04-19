@@ -14,6 +14,8 @@ module Server
 import Data.Monoid ((<>))
 import qualified Options.Applicative as Opt
 
+-- import Network.HTTP.Simple
+
 -- local imports
 
 type URI = String
@@ -61,4 +63,26 @@ retryTimeoutOptions = Opt.option Opt.auto
    <> Opt.value 10
    <> Opt.showDefault
     )
+
+{-
+requestMethod????
+sendHttp ip port evts = do
+    -- TODO: add proper content type
+    request <- parseRequest $ "PUT http://"++ip++":"++port++"/events"
+    let request' = setRequestBodyJSON evts $ request
+        retryWith s = do
+            tellIO NOTICE s
+            threadDelaySec 3
+            process
+        process = do
+            eResponse <- try (httpLBS request')
+            case eResponse of
+                Left (SomeException _e) ->
+                    retryWith "Unable to connect."
+                Right resp -> do
+                    case getResponseStatusCode resp of
+                        200 -> tellIO DEBUG "Request processed."
+                        _ -> do retryWith $ show resp
+    process
+-}
 

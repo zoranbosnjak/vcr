@@ -108,14 +108,14 @@ propCobs :: Property
 propCobs = forAll (largeByteString 2000) $ \bs -> do
     cobsDecode (cobsEncode bs) == Just bs
 
--- | encodeEvent and decodeEvent shall be inverse operations.
+-- | encode and decode shall be inverse operations.
 propEncodeDecode :: EncodeFormat -> Event -> Bool
-propEncodeDecode fmt e = decodeEvent fmt (encodeEvent fmt e) == Just e
+propEncodeDecode fmt e = decode fmt (encode fmt e) == Just e
 
 -- | encodeEvents and decodeEvents shall be inverse operations.
 propEncodeDecodeMulti :: EncodeFormat -> [Event]-> Bool
 propEncodeDecodeMulti fmt lst =
-    decodeEvents fmt (encodeEvents fmt lst) == Just lst
+    decodeList fmt (encodeList fmt lst) == Just lst
 
 -- | test leap seconds
 propLeapEncodeDecode :: EncodeFormat -> Event -> Property
@@ -124,5 +124,5 @@ propLeapEncodeDecode fmt e' = prop where
     t = UTCTime
             (utctDay $ eUtcTime e')
             (picosecondsToDiffTime (24*3600*(10^(12::Int))-1))
-    prop = decodeEvent fmt (encodeEvent fmt e) === Just e
+    prop = decode fmt (encode fmt e) === Just e
 

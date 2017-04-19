@@ -8,7 +8,8 @@
 {-# LANGUAGE DeriveGeneric #-}
 
 module Encodings
-( EncodeFormat(..)
+( Encodable(..)
+, EncodeFormat(..)
 , JSONFormat(..)
 , encodeFormatOptions
 , delimit
@@ -19,12 +20,48 @@ module Encodings
 import Control.Monad (guard)
 import Data.Monoid ((<>))
 import qualified Data.ByteString as BS
+import Data.ByteString.Char8 (pack)
 import GHC.Generics (Generic)
 import Numeric (readHex)
 import Options.Applicative ((<|>))
 import qualified Options.Applicative as Opt
 import qualified Test.QuickCheck as QC
 import Text.Printf (printf)
+
+-- | Interface for encode and decode something.
+class Encodable a where
+    encode :: EncodeFormat -> a -> BS.ByteString
+    decode :: EncodeFormat -> BS.ByteString -> Maybe a
+
+    -- Encode list of items with default implementation
+    encodeList :: EncodeFormat -> [a] -> BS.ByteString
+    encodeList fmt lst = foldr mappend BS.empty
+        [encode fmt e `mappend` pack (delimit fmt) | e <- lst]
+
+    -- Try to decode list of items with default implementation.
+    decodeList :: EncodeFormat -> BS.ByteString -> Maybe [a]
+    decodeList fmt s
+        | BS.null s = Just []
+        | otherwise = do
+            (e,s') <- tryDecode s
+            rest <- decodeList fmt s'
+            return $ e:rest
+      where
+        delim = pack $ delimit fmt
+
+        getProbes probe x = (probe,x) : case BS.null x of
+            True -> []
+            False -> getProbes
+                (BS.concat [probe,a]) (BS.drop (BS.length delim) b)
+          where
+            (a,b) = BS.breakSubstring delim x
+
+        tryDecode x = do
+            let probes = getProbes BS.empty x
+                firstOf [] = Nothing
+                firstOf ((Nothing,_):rest) = firstOf rest
+                firstOf ((Just a,b):_) = Just (a,b)
+            firstOf [(decode fmt a,b) | (a,b) <- probes]
 
 -- | JSON format variants
 data JSONFormat

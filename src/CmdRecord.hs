@@ -12,9 +12,12 @@ import Control.Concurrent (threadDelay)
 import qualified Control.Concurrent.Async as Async
 import qualified Control.Concurrent.STM as STM
 import Control.Monad (forM_, forM, forever)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Maybe (MaybeT(MaybeT), runMaybeT)
 import qualified Data.ByteString as BS
 import Data.ByteString.Char8 (pack, unpack)
 import Data.Maybe (fromMaybe)
+import Data.Monoid ((<>))
 import qualified Data.UUID
 import Data.UUID.V4 (nextRandom)
 import Network.BSD (getHostName)
@@ -65,7 +68,7 @@ data Input
 
 -- | Output options.
 data Output
-    = OFile File.FileStore
+    = OFile File.FileStore (Maybe Rotate)
     | OServer Srv.ServerConnection
     deriving (Eq, Show)
 
@@ -75,6 +78,13 @@ data OnOverflow
     | OnOverflowFile File.FileStore
     | OnOverflowSyslog SL.Priority
     deriving (Eq, Show)
+
+-- | File rotate options (for File output).
+data Rotate = Rotate
+    { _rotateKeep :: Int
+    , _rotateSize :: Maybe Integer
+    , _rotateTime :: Maybe Double
+    } deriving (Eq, Show)
 
 -- | Command option parser.
 options :: Opt.Parser Options
@@ -100,12 +110,31 @@ udpInputOptions = IUdp <$> Opt.some udp where
         (Opt.progDesc "Read data from UDP")
     opts = (,) <$> Udp.udpInOptions <*> Event.channelOptions
 
+rotateOptions :: Opt.Parser Rotate
+rotateOptions = Rotate
+    <$> Opt.option Opt.auto
+        ( Opt.long "rotateKeep"
+       <> Opt.help "Keep number of rotated files"
+        )
+    <*> Opt.optional (Opt.option Buffer.kiloMega
+        ( Opt.long "rotateSize"
+       <> Opt.help "Rotate file after <SIZE>[kMG] bytes"
+       <> Opt.metavar "SIZE"
+        ))
+    <*> Opt.optional (Opt.option humanTime
+        ( Opt.long "rotateTime"
+       <> Opt.help "Rotate file after <SEC>[s|min|h|day]"
+       <> Opt.metavar "SEC"
+        ))
+
 storeFileOptions :: Opt.Parser Output
 storeFileOptions = C.subparserCmd "file ..." $ Opt.command "file" $ Opt.info
     (opts <**> Opt.helper)
     (Opt.progDesc "Store data to a file")
   where
-    opts = OFile <$> File.fileStoreOptions
+    opts = OFile
+        <$> File.fileStoreOptions
+        <*> Opt.optional rotateOptions
 
 storeServerOptions :: Opt.Parser Output
 storeServerOptions = OServer <$> srvCmd where
@@ -133,6 +162,25 @@ onOverflowSyslog = C.subparserCmd "dropSyslog" $ Opt.command "dropSyslog" $
         (Opt.progDesc "In case of buffer overflow, send data to syslog")
   where
     opts = OnOverflowSyslog <$> C.syslogOptions
+
+-- | Convert some time units to seconds (eg. 1min -> 60.0).
+humanTime :: Opt.ReadM Double
+humanTime = Opt.eitherReader $ \arg -> do
+    let suffix :: [(String,Double)]
+        suffix =
+            [ ("", 1)
+            , ("s", 1)
+            , ("min", 60)
+            , ("h", 3600)
+            , ("day", 24*3600)
+            ]
+        (a,b) = span (flip elem ['0'..'9']) arg
+    factor <- case lookup b suffix of
+        Nothing -> Left $ "cannot parse suffix `" ++ b ++ "'"
+        Just val -> Right val
+    case reads a of
+        [(r, "")] -> return (r * factor)
+        _         -> Left $ "cannot parse value `" ++ arg ++ "'"
 
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
@@ -256,6 +304,22 @@ writer :: Output -> Buffer.Buffer -> IO (Async.Async ())
 writer out buf = do
     logM INFO $ "starting output: " ++ show out
 
+    -- check rotate options
+    _ <- case out of
+        OFile _ rot -> runMaybeT $ do
+            Rotate keep mSize mTime <- MaybeT $ return rot
+            liftIO $ check (keep >= 0)
+                "Number of files to keep can not be negative."
+            liftIO $ case mSize of
+                Nothing -> return ()
+                Just size -> check (size >= 0)
+                    "Rotate size can not be negative."
+            liftIO $ case mTime of
+                Nothing -> return ()
+                Just time -> check (time >= 0)
+                    "Rotate time can not be negative."
+        OServer _conn -> return Nothing
+
     tick <- (snd <$> Event.now) >>= STM.newTVarIO
     Async.async $ Async.race_ (ticker tick) (sender tick)
 
@@ -271,6 +335,18 @@ writer out buf = do
     sender tick = forever $ do
         evts <- STM.atomically $ Buffer.readBuffer tick buf
         case out of
-            OFile fs -> File.appendFile fs evts
+            OFile fs rot -> do
+                -- append data
+                File.appendFile fs evts
+
+                -- rotate file
+                runMaybeT $ do
+                    Rotate keep mSize mTime <- MaybeT $ return rot
+                    (new, old) <- MaybeT $ File.rotateFile fs keep mSize mTime
+                    liftIO $ do
+                        logM INFO $ "Output file rotated: " ++ new
+                        forM_ old $ \i -> do
+                            logM INFO $ "Old file removed: " ++ i
+
             OServer _conn -> undefined -- Srv.request??method evts
 

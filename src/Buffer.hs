@@ -82,7 +82,7 @@ isBelow (Threshold a1 b1 c1) (Threshold a2 b2 c2) = and [a1<!a2, b1<!b2, c1<!c2]
 threshold :: (Maybe Int) -> (Maybe Integer) -> (Maybe Double) -> Threshold
 threshold = Threshold
 
--- | Check if any limit has been reached.
+-- | Check if any limit has been set.
 anyLimit :: Threshold -> Bool
 anyLimit (Threshold a b c) = or [isJust a, isJust b, isJust c]
 

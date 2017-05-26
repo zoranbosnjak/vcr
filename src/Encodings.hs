@@ -27,6 +27,7 @@ import Options.Applicative ((<|>))
 import qualified Options.Applicative as Opt
 import qualified Test.QuickCheck as QC
 import Text.Printf (printf)
+import Data.Maybe
 
 -- | Interface for encode and decode something.
 class Encodable a where
@@ -62,6 +63,29 @@ class Encodable a where
                 firstOf ((Nothing,_):rest) = firstOf rest
                 firstOf ((Just a,b):_) = Just (a,b)
             firstOf [(decode fmt a,b) | (a,b) <- probes]
+
+    -- TODO: docs
+    decodeFirst :: EncodeFormat -> BS.ByteString ->
+                   (Maybe a, BS.ByteString)
+    decodeFirst fmt str =
+        case filter (isJust.fst)
+                    [(decode fmt pfx,rest)
+                     |(pfx,rest) <- (splits BS.empty str)] of
+          []       -> (Nothing, str)
+          (just:_) -> just
+      where
+        bsDelimiter :: BS.ByteString
+        bsDelimiter = pack $ delimit fmt
+
+        splits :: BS.ByteString -> BS.ByteString
+               -> [(BS.ByteString, BS.ByteString)]
+        splits pfx rest
+          | BS.null rest' = []
+          | otherwise     = (newPfx,newRest):(splits newPfx newRest)
+          where
+            (pfx',rest') = BS.breakSubstring bsDelimiter rest
+            newPfx = BS.append pfx pfx'
+            newRest = BS.drop (BS.length bsDelimiter) rest'
 
 -- | JSON format variants
 data JSONFormat

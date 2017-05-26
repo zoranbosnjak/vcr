@@ -36,7 +36,7 @@ instance Show VcrError where
     show (VcrError err) = err
 
 -- | Throw VCR exception.
-throw :: String -> IO ()
+throw :: String -> IO a
 throw s = do
     let err = VcrError s
     logM Log.ERROR $ show err

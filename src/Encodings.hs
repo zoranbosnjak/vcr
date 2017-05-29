@@ -8,60 +8,28 @@
 {-# LANGUAGE DeriveGeneric #-}
 
 module Encodings
-( Encodable(..)
+( JSONFormat(..)
 , EncodeFormat(..)
-, JSONFormat(..)
+, Encodable(..)
 , encodeFormatOptions
-, delimit
+, join, split
+, encodeList, decodeList
 , hexlify, unhexlify
 , cobsEncode, cobsDecode
 ) where
 
 import Control.Monad (guard)
 import Data.Monoid ((<>))
+import qualified Data.Word
 import qualified Data.ByteString as BS
-import Data.ByteString.Char8 (pack)
+import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString.Internal as BS (c2w)
 import GHC.Generics (Generic)
-import Numeric (readHex)
 import Options.Applicative ((<|>))
 import qualified Options.Applicative as Opt
 import qualified Test.QuickCheck as QC
 import Text.Printf (printf)
-
--- | Interface for encode and decode something.
-class Encodable a where
-    encode :: EncodeFormat -> a -> BS.ByteString
-    decode :: EncodeFormat -> BS.ByteString -> Maybe a
-
-    -- Encode list of items with default implementation
-    encodeList :: EncodeFormat -> [a] -> BS.ByteString
-    encodeList fmt lst = foldr mappend BS.empty
-        [encode fmt e `mappend` pack (delimit fmt) | e <- lst]
-
-    -- Try to decode list of items with default implementation.
-    decodeList :: EncodeFormat -> BS.ByteString -> Maybe [a]
-    decodeList fmt s
-        | BS.null s = Just []
-        | otherwise = do
-            (e,s') <- tryDecode s
-            rest <- decodeList fmt s'
-            return $ e:rest
-      where
-        delim = pack $ delimit fmt
-
-        getProbes probe x = (probe,x) : case BS.null x of
-            True -> []
-            False -> getProbes
-                (BS.concat [probe,a]) (BS.drop (BS.length delim) b)
-          where
-            (a,b) = BS.breakSubstring delim x
-
-        tryDecode x = do
-            let probes = getProbes BS.empty x
-                firstOf [] = Nothing
-                firstOf ((Nothing,_):rest) = firstOf rest
-                firstOf ((Just a,b):_) = Just (a,b)
-            firstOf [(decode fmt a,b) | (a,b) <- probes]
+import Numeric (readHex)
 
 -- | JSON format variants
 data JSONFormat
@@ -72,14 +40,14 @@ data JSONFormat
 instance QC.Arbitrary JSONFormat where
     arbitrary = QC.oneof
         [ pure JSONCompact
-        , JSONPretty <$> QC.choose (1,8)
+        -- , JSONPretty <$> QC.choose (1,8)  -- TODO: decoding not implemented
         ]
 
 -- | File encoding formats.
 data EncodeFormat
-    = EncText
-    | EncBin
-    | EncJSON JSONFormat
+    = EncText               -- text encoding, based on Show and Read
+    | EncBin                -- binary encoding (without zero bytes)
+    | EncJSON JSONFormat    -- JSON encoding
     deriving (Generic, Eq, Show)
 
 instance QC.Arbitrary EncodeFormat where
@@ -102,11 +70,42 @@ encodeFormatOptions =
         )
     )
 
--- | Event delimiter for different encoding formats.
-delimit :: EncodeFormat -> String
-delimit EncText = "\n"
-delimit EncBin = "\0"
-delimit (EncJSON _) = "\n"
+-- | An interface to encode and decode something to/from a bytestring.
+class Encodable a where
+    encode :: EncodeFormat -> a -> BSL.ByteString
+    decode :: EncodeFormat -> BSL.ByteString -> Maybe a
+
+-- | A delimiter for different encoding formats.
+delim :: EncodeFormat -> Data.Word.Word8
+delim fmt = case fmt of
+    EncText -> BS.c2w '\n'
+    EncBin -> 0
+    EncJSON _ -> BS.c2w '\n'
+
+-- | Join multiple bytestrings to a single bytestring.
+-- Insert a dilimiter at the end of each bytestring, depending on encoding.
+join :: EncodeFormat -> [BSL.ByteString] -> BSL.ByteString
+join fmt lst = BSL.concat [i `mappend` BSL.singleton (delim fmt) | i <- lst]
+
+-- | Split bytestring to multiple bytestrings, remove delimiters.
+split :: EncodeFormat -> BSL.ByteString -> [BSL.ByteString]
+split fmt s = case fmt of
+    EncText -> parts
+    EncBin -> parts
+    EncJSON JSONCompact -> parts
+    EncJSON (JSONPretty _) -> undefined -- TODO: not all '\n' are delimiters
+  where
+    parts = safeInit $ BSL.split (delim fmt) s
+    safeInit [] = []
+    safeInit lst = init lst
+
+-- | Encode list of encodable items.
+encodeList :: (Encodable a) => EncodeFormat -> [a] -> BSL.ByteString
+encodeList fmt lst = join fmt (encode fmt <$> lst)
+
+-- | Try to decode list of encodable items.
+decodeList :: (Encodable a) => EncodeFormat -> BSL.ByteString -> Maybe [a]
+decodeList fmt s = sequence (decode fmt <$> split fmt s)
 
 -- | Convert bytestring to hex representation.
 hexlify :: BS.ByteString -> String
@@ -127,43 +126,43 @@ unhexlify s = do
         _ -> Nothing
 
 -- | COBS encode single binary string
-cobsEncode :: BS.ByteString -> BS.ByteString
-cobsEncode s = BS.concat $ encodeSegments s where
-    encodeSegments x = BS.singleton prefix : chunk : rest where
-        (a,b) = BS.span (/= 0) x
-        chunk = BS.take 254 a
-        n = BS.length chunk
+cobsEncode :: BSL.ByteString -> BSL.ByteString
+cobsEncode s = BSL.concat $ encodeSegments s where
+    encodeSegments x = BSL.singleton prefix : chunk : rest where
+        (a,b) = BSL.span (/= 0) x
+        chunk = BSL.take 254 a
+        n = BSL.length chunk
         prefix = fromIntegral $ succ n
-        c = BS.drop n a `BS.append` b
-        rest = case BS.null c of
+        c = BSL.drop n a `BSL.append` b
+        rest = case BSL.null c of
             True -> []
             False -> case prefix of
                 255 -> encodeSegments c
-                _ -> encodeSegments $ BS.drop 1 c
+                _ -> encodeSegments $ BSL.drop 1 c
 
 -- | COBS decode single binary string.
-cobsDecode :: BS.ByteString -> Maybe BS.ByteString
+cobsDecode :: BSL.ByteString -> Maybe BSL.ByteString
 cobsDecode s = do
     (a,b) <- decodeSegment s
-    case BS.null b of
+    case BSL.null b of
         True -> return a
         False -> do
             rest <- cobsDecode b
-            return $ a `BS.append` rest
+            return $ a `BSL.append` rest
   where
-    decodeSegment :: BS.ByteString -> Maybe (BS.ByteString, BS.ByteString)
+    decodeSegment :: BSL.ByteString -> Maybe (BSL.ByteString, BSL.ByteString)
     decodeSegment x = do
-        (a,b) <- BS.uncons x
+        (a,b) <- BSL.uncons x
         guard $ a > 0
         let n = pred $ fromIntegral a
-            (c,d) = BS.splitAt n b
-        guard $ BS.length c == n
-        guard $ BS.findIndex (== 0) c == Nothing
-        case BS.null d of
+            (c,d) = BSL.splitAt n b
+        guard $ BSL.length c == n
+        guard $ BSL.findIndex (== 0) c == Nothing
+        case BSL.null d of
             True -> return (c, d)
             False -> case a of
                 255 -> do
                     (e,f) <- decodeSegment d
-                    return (c `BS.append` e, f)
-                _ -> return (c `BS.append` BS.singleton 0, d)
+                    return (c `BSL.append` e, f)
+                _ -> return (c `BSL.append` BSL.singleton 0, d)
 

@@ -15,7 +15,8 @@ import Control.Monad (forM_, forM, forever)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Maybe (MaybeT(MaybeT), runMaybeT)
 import qualified Data.ByteString as BS
-import Data.ByteString.Char8 (pack, unpack)
+import qualified Data.ByteString.Char8 as BS8
+import qualified Data.ByteString.Lazy.Char8 as BSL8
 import Data.Maybe (fromMaybe)
 import Data.Monoid ((<>))
 import qualified Data.UUID
@@ -207,7 +208,7 @@ runCmd opts vcrOpts = do
 
     syslogOpts <- do
         progName <- getProgName
-        return $ SL.defaultConfig {SL.identifier = pack progName}
+        return $ SL.defaultConfig {SL.identifier = BS8.pack progName}
 
     -- initiate a reader for each input
     inputs <- case optInput opts of
@@ -227,7 +228,7 @@ runCmd opts vcrOpts = do
 
     prepareStdin ch = return (ch,())
 
-    readStdin _ = pack <$> getLine
+    readStdin _ = BS8.pack <$> getLine
 
     prepareUdp (addr,ch) = do
         sock <- Udp.rxSocket addr
@@ -296,8 +297,8 @@ reader syslogOpts recorderId buf ofAction prepare readData arg = do
     onOverflow (OnOverflowSyslog level) lst =
         SL.withSyslog syslogOpts $ \syslog -> forM_ lst $ \evt -> do
             let e = Enc.encode (Enc.EncJSON Enc.JSONCompact) evt
-                msg = "["++show (Event.eChannel evt)++"] " ++ unpack e
-            syslog SL.USER level $ pack msg
+                msg = "["++show (Event.eChannel evt)++"] " ++ BSL8.unpack e
+            syslog SL.USER level $ BS8.pack msg
 
 -- | Copy messages from buffer to output.
 writer :: Output -> Buffer.Buffer -> IO (Async.Async ())

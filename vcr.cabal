@@ -21,6 +21,8 @@ library
     exposed-modules:
         Event
         Encodings
+    ghc-options:        -O2 -Wall -funbox-strict-fields
+    default-extensions: StrictData
     build-depends:
         base >=4.9 && <4.10
         , clock >=0.7 && <0.8

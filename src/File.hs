@@ -12,7 +12,7 @@ module File
 , rotateFile
 ) where
 
-import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
 import Data.List (isPrefixOf, sort)
 import qualified Data.Time as Time
 import qualified Data.Time.Clock.POSIX
@@ -46,8 +46,8 @@ appendFile :: (Enc.Encodable msg) => FileStore -> [msg] -> IO ()
 appendFile (FileStore path fmt) messages = do
     let s = Enc.encodeList fmt messages
     case path of
-        "-" -> BS.hPut System.IO.stdout s
-        _ -> BS.appendFile path s
+        "-" -> BSL.hPut System.IO.stdout s
+        _ -> BSL.appendFile path s
 
 -- | Rotate a file if limit reached.
 rotateFile :: FileStore -> Int -> Maybe Integer -> Maybe Double

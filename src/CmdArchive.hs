@@ -98,20 +98,19 @@ output = C.subparserCmd "output ..." $ Opt.command "output" $ Opt.info
 runCmd :: Options -> C.VcrOptions -> IO ()
 runCmd opts vcrOpts = do
     C.logM INFO $
-        "archive, opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
+        "archive: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
 
     C.logM NOTICE $
         "archive: no server support implemented yet"
 
-    -- TODO: to be finalized when server support is added
-    inpFS <- case (optInput opts) of
-        IFile fileStore -> return fileStore
-        IServer _       -> error "INPUT: No server support yet."
-    outFS <- case (optOutput opts) of
-        OFile fileStore -> return fileStore
-        OServer _       -> error "OUTPUT: No server support yet."
+    case (optInput opts,optOutput opts) of
+      (IFile inpFS,OFile outFS) ->
+          copyFromFileToFile inpFS outFS
+      _ ->
+          C.throw "TODO"
 
-    copyFromFileToFile inpFS outFS
+    C.logM INFO $
+        "archive: done"
 
 
 

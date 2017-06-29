@@ -2,43 +2,48 @@
 -- |
 -- Module: CmdArchive
 --
--- 'archive' command
---
+-- TODO: WRITE COMPREHENSIVE DOCUMENTATION OF THE ARCHIVER
+
 
 module CmdArchive (cmdArchive) where
 
--- standard imports
-import Control.Monad (forM_)
---import Control.Exception as CE
+-- Standard imports.
+import qualified Control.Exception    as CE
+import           Control.Monad           (forM_)
 import qualified Data.ByteString.Lazy as BSL
---import Data.Time (UTCTime(UTCTime))
-import Options.Applicative ((<**>), (<|>))
-import qualified Options.Applicative as Opt
-import System.Log.Logger (Priority(INFO, DEBUG, NOTICE))
+import           Options.Applicative     ((<**>), (<|>))
+import qualified Options.Applicative  as Opt
+import           System.IO
+import           System.Log.Logger       (Priority(INFO, DEBUG, NOTICE))
+-- import Control.Exception as CE
+-- import Data.Time (UTCTime(UTCTime))
+-- import Network.HTTP.Client.Conduit
 
--- local imports
---import qualified Buffer
-import Common (logM)
+-- Local imports.
 import qualified Common as C
 import qualified Event
 import qualified Server as Srv
 import qualified File
 import qualified Encodings
-
 -- import Test.QuickCheck hiding (output)
 
-import System.IO
 
+
+-- | The exported function implementing the entire functionality of
+-- the archiver.  For more information see the documentation at the
+-- top of this source file.
 cmdArchive :: Opt.ParserInfo (C.VcrOptions -> IO ())
 cmdArchive = Opt.info ((runCmd <$> options) <**> Opt.helper)
     (Opt.progDesc "Event archiver")
 
--- | Speciffic command options.
+
+
+-- | Archiver specific command options.
 data Options = Options
     { optInput          :: Input
     , optOutput         :: Output
-    , optChannelFilter  :: [Event.Channel]
-    , optSourceIdFilter :: [Event.SourceId]
+    -- TODO: , optChannelFilter  :: [Event.Channel]
+    -- TODO: , optSourceIdFilter :: [Event.SourceId]
     -- TODO: , optStartTime      :: Maybe UTCTime
     -- TODO: , optStopTime       :: Maybe UTCTime
     -- TODO: , read/write batch size and speed
@@ -61,8 +66,8 @@ options :: Opt.Parser Options
 options = Options
     <$> input
     <*> output
-    <*> Opt.many Event.channelOptions
-    <*> Opt.many Event.sourceIdOptions
+    -- <*> Opt.many Event.channelOptions
+    -- <*> Opt.many Event.sourceIdOptions
     -- <*> Opt.optional (C.timeOptions "start")
     -- <*> Opt.optional (C.timeOptions "stop")
     -- some more options...
@@ -87,13 +92,15 @@ output = C.subparserCmd "output ..." $ Opt.command "output" $ Opt.info
     server = Opt.flag' () (Opt.long "server")
         *> (OServer <$> Srv.serverConnectionOptions)
 
+
+
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
 runCmd opts vcrOpts = do
-    logM INFO $
+    C.logM INFO $
         "archive, opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
 
-    logM NOTICE $
+    C.logM NOTICE $
         "archive: no server support implemented yet"
 
     -- TODO: to be finalized when server support is added
@@ -106,52 +113,57 @@ runCmd opts vcrOpts = do
 
     copyFromFileToFile inpFS outFS
 
+
+
 -- | Copies one file of events to another file of events, possibly in
 -- a different format.
 -- Throws an exception
--- (1) if either file cannot be opened;
--- (2) if any segment cannot be recognized as an event.
+-- (1) if any IO operation on files fails, or
+-- (2) if any segment of the input file cannot be recognized as an event.
 copyFromFileToFile :: File.FileStore -> File.FileStore -> IO ()
 copyFromFileToFile inpFS outFS = do
-    logM INFO $ "archive: file to file"
+    C.logM DEBUG $ "archive: file to file started"
 
-    -- open input file, auto close
-    withFile (File.filePath inpFS) ReadMode $ \inputH -> do
-        let inputEnc = File.fileEnc inpFS
+    -- Open the input and the output file:
+    inpFH <- if (File.filePath inpFS)=="-" then return stdin else
+                 CE.catch (openFile (File.filePath inpFS) ReadMode)
+                   ((\ _ -> do
+                         C.throw ("archive: Cannot open input file '"++
+                                  (File.filePath inpFS)++"'."))
+                    :: (CE.IOException -> IO Handle))
+    outFH <- if (File.filePath outFS)=="-" then return stdout else
+                 CE.catch (openFile ((File.filePath outFS)++"") WriteMode)
+                   ((\ _ -> do
+                         hClose inpFH
+                         C.throw ("archive: Cannot open output file '"++
+                                  (File.filePath outFS)++"'."))
+                    :: (CE.IOException -> IO Handle))
 
-        -- get complete input string,
-        -- split to individual bytestrings (lazy)
-        -- use separator as defined by the input encoding
-        lst <- Encodings.split inputEnc <$> BSL.hGetContents inputH
+    -- Input and output encodings:
+    let inpEnc = File.fileEnc inpFS
+    let outEnc = File.fileEnc outFS
 
-        -- For each bytestring from the list,
-        -- try to decode as event, then append to output file.
-        -- For the moment, append events to an output file one by one,
-        -- TODO: check performance, take more events at the time...
-        forM_ lst $ \i -> case Encodings.decode inputEnc i of
-            Nothing -> C.throw "unable to decode event"
-            Just event -> do
-                logM DEBUG $ "got event, " ++ show (Event.eUtcTime event)
-                File.appendFile outFS [event]
+    -- Get the complete input string and split it to bytestrings
+    -- representing individual events using the separator defined by
+    -- the input encoding:
+    bss <- Encodings.split inpEnc <$> BSL.hGetContents inpFH
 
--------------------------------------------------------------------------------
-{-
+    -- Decode each bytestring representing an individual event write
+    -- the event to the output file one by one.
+    -- TODO: check performance, take more events at the same time.
+    forM_ (take 100000 bss) $ \ bs -> case Encodings.decode inpEnc bs of
+        Nothing -> do
+            hClose outFH
+            hClose inpFH
+            C.throw "archive: Cannot decode an event."
+        Just event -> do
+            C.logM DEBUG $ "archive: event " ++ show (Event.eUtcTime event)
+            BSL.hPutStr outFH
+              (Encodings.encode outEnc (event::Event.Event))
 
-    -- generating test input
-    events <- sample' (arbitrary::Gen Event.Event)
-    File.appendFile (File.FileStore "input.text" Encodings.EncText) events
-    File.appendFile (File.FileStore "input.bin" Encodings.EncBin) events
-    File.appendFile (File.FileStore "input.json" (Encodings.EncJSON (Encodings.JSONCompact))) events
-    File.appendFile (File.FileStore "input.json4" (Encodings.EncJSON (Encodings.JSONPretty 4))) events
-
-    -- simple copy from one file to another, no error recovery
-    inpBS <- BS.readFile (File.filePath inpFileStore)
-    events <- return ((Encodings.decodeList (File.fileEnc inpFileStore) inpBS)
-                      ::(Maybe [Event.Event]))
-    File.appendFile outFileStore
-      (case events of
-         Just events -> events
-         Nothing     -> [])
-
--}
-
+    -- Close the input and the output file:
+    if (File.filePath inpFS)=="-" then return () else hClose outFH
+    if (File.filePath outFS)=="-" then return () else hClose inpFH
+    
+    C.logM DEBUG $ "archive: file to file done"
+    return ()

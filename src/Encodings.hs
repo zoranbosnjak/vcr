@@ -107,6 +107,12 @@ encodeList fmt lst = join fmt (encode fmt <$> lst)
 decodeList :: (Encodable a) => EncodeFormat -> BSL.ByteString -> Maybe [a]
 decodeList fmt s = sequence (decode fmt <$> split fmt s)
 
+-- TODO:
+decodeStream :: (Encodable a)
+             => EncodeFormat -> BSL.ByteString
+             -> ([Either BSL.ByteString a],BSL.ByteString)
+decodeStream = error "TODO decodeStream"
+
 -- | Convert bytestring to hex representation.
 hexlify :: BS.ByteString -> String
 hexlify = foldr (++) "" . map (printf "%02X") . BS.unpack

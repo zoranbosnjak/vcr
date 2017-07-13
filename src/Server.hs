@@ -7,6 +7,7 @@
 
 module Server
 ( ServerConnection(..)
+, Server(..)
 , serverConnectionOptions
 ) where
 

@@ -17,18 +17,21 @@ import qualified System.Environment
 
 -- local imports
 import qualified Common as C
+{-
 import CmdRecord    (cmdRecord)
 import CmdArchive   (cmdArchive)
 import CmdReplay    (cmdReplay)
+-}
 --import CmdServe     (cmdServe)
 --import CmdHousekeep (cmdHousekeep)
 
 -- | Available commands.
 commands :: [(String, Opt.ParserInfo (C.VcrOptions -> IO ()))]
 commands =
-    [ ("record",    cmdRecord)
+    [ {- ("record",    cmdRecord)
     , ("archive",   cmdArchive)
     , ("replay",    cmdReplay)
+    -}
     --, ("serve",     cmdServe)
     --, ("housekeep", cmdHousekeep)
     ]

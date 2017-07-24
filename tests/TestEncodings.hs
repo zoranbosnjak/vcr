@@ -2,7 +2,6 @@
 module TestEncodings (testEncodings) where
 
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
 import Data.Maybe (isJust)
 import Test.Framework (Test, testGroup)
 import Test.Framework.Providers.QuickCheck2 (testProperty)
@@ -57,33 +56,32 @@ cobsExamples = do
     f x y = do
         assertEqual "differ"
             (hexlify $ BS.pack y)
-            (hexlify $ BS.pack $ BSL.unpack $ cobsEncode $ BSL.pack x)
+            (hexlify $ BS.pack $ BS.unpack $ cobsEncode $ BS.pack x)
         assertEqual "inverse"
             (fmap hexlify $ Just $ BS.pack x)
-            (fmap hexlify $
-                fmap BSL.toStrict $ cobsDecode $ cobsEncode $ BSL.pack x)
+            (fmap hexlify $ cobsDecode $ cobsEncode $ BS.pack x)
 
 -- | COBS encoded string shall not contain any zero byte
 propCobsEncodeNonZero :: (Positive Int) -> Property
 propCobsEncodeNonZero (Positive n) = forAll sample $ \bs -> do
-    BSL.elemIndex 0 (cobsEncode bs) == Nothing
+    BS.elemIndex 0 (cobsEncode bs) == Nothing
   where
     sample =
-        (BSL.pack <$> largeByteString n)
-        `suchThat` (\s -> isJust (BSL.elemIndex 0 s))
+        (BS.pack <$> largeByteString n)
+        `suchThat` (\s -> isJust (BS.elemIndex 0 s))
 
 -- | COBS encoded string has at most one extra byte for each 254 data bytes
 propCobsEncodeLength :: Property
-propCobsEncodeLength = forAll (BSL.pack <$> largeByteString 2000) $ \bs1 -> do
-    let n = BSL.length bs1
+propCobsEncodeLength = forAll (BS.pack <$> largeByteString 2000) $ \bs1 -> do
+    let n = BS.length bs1
         bs2 = cobsEncode bs1
         overhead
             | n == 0 = 0
             | otherwise = div n 254
-    BSL.length bs2 > n && BSL.length bs2 <= n + overhead + 1
+    BS.length bs2 > n && BS.length bs2 <= n + overhead + 1
 
 -- | cobsEncode and cobsDecode shall be inverse operations
 propCobs :: Property
-propCobs = forAll (BSL.pack <$> largeByteString 2000) $ \bs -> do
+propCobs = forAll (BS.pack <$> largeByteString 2000) $ \bs -> do
     cobsDecode (cobsEncode bs) == Just bs
 

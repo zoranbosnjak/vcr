@@ -2,7 +2,7 @@
 module TestEvent (testEvent) where
 
 import qualified Data.Aeson
-import qualified Data.Binary
+import qualified Data.Serialize
 import Data.Time.Clock
 import Test.Framework (Test, testGroup)
 import Test.Framework.Providers.QuickCheck2 (testProperty)
@@ -34,7 +34,7 @@ propJSON e = Data.Aeson.decode (Data.Aeson.encode e) == Just e
 
 -- | Bin encode/decode gets the same event
 propBIN :: Event -> Bool
-propBIN e = Data.Binary.decode (Data.Binary.encode e) == e
+propBIN e = Data.Serialize.decode (Data.Serialize.encode e) == Right e
 
 -- | encode and decode shall be inverse operations.
 propEncodeDecode :: EncodeFormat -> Event -> Bool
@@ -43,14 +43,15 @@ propEncodeDecode fmt e = decode fmt (encode fmt e) == Just e
 -- | encodeEvents and decodeEvents shall be inverse operations.
 propEncodeDecodeMulti :: EncodeFormat -> [Event]-> Bool
 propEncodeDecodeMulti fmt lst =
-    decodeList fmt (encodeList fmt lst) == Just lst
+    decodeList maxBound fmt (encodeList fmt lst) == Just lst
 
 -- | test leap seconds
 propLeapEncodeDecode :: EncodeFormat -> Event -> Property
 propLeapEncodeDecode fmt e' = prop where
-    e = e' {eUtcTime = t}
+    e = e' {eUtcTime = UtcTime t}
+    UtcTime u = eUtcTime e'
     t = UTCTime
-            (utctDay $ eUtcTime e')
+            (utctDay u)
             (picosecondsToDiffTime (24*3600*(10^(12::Int))-1))
     prop = decode fmt (encode fmt e) === Just e
 

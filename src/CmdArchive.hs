@@ -11,17 +11,21 @@ module CmdArchive (cmdArchive) where
 import qualified Control.Exception    as CE
 import           Control.Monad           (forM_)
 import qualified Data.ByteString.Char8 as BS8
+import qualified Data.ByteString      as BS
 import qualified Data.ByteString.Lazy as BSL
 import           Network.HTTP.Client  as NC
 import qualified Network.HTTP.Types.Method
 import           Options.Applicative     ((<**>), (<|>))
 import qualified Options.Applicative  as Opt
 import           System.IO
-import           System.Log.Logger       (Priority(INFO, DEBUG, NOTICE))
+import           System.Log.Logger       (Priority(INFO, DEBUG)) -- ,NOTICE))
 -- import Control.Exception as CE
 -- import Data.Time (UTCTime(UTCTime))
 -- import Network.HTTP.Client.Conduit
 import qualified Data.Maybe as Maybe
+
+import           Pipes
+import qualified Pipes.Prelude as PP
 
 -- Local imports.
 import qualified Common as C
@@ -33,7 +37,7 @@ import qualified Encodings
 
 import Control.Concurrent
 
-  
+
 
 -- | The exported function implementing the entire functionality of
 -- the archiver.  For more information see the documentation at the
@@ -57,13 +61,13 @@ data Options = Options
 
 -- | Input options.
 data Input
-    = IFile File.FileStore
+    = IFile Encodings.EncodeFormat File.FileStore
     | IServer Srv.ServerConnection
     deriving (Eq, Show)
 
 -- | Output options.
 data Output
-    = OFile File.FileStore
+    = OFile Encodings.EncodeFormat File.FileStore
     | OServer Srv.ServerConnection
     deriving (Eq, Show)
 
@@ -84,7 +88,8 @@ input = C.subparserCmd "input ..." $ Opt.command "input" $ Opt.info
     (Opt.progDesc "Data source")
   where
     opts = file <|> server
-    file = Opt.flag' () (Opt.long "file") *> (IFile <$> File.fileStoreOptions)
+    file = Opt.flag' () (Opt.long "file") *>
+        (IFile <$> Encodings.encodeFormatOptions <*> File.fileStoreOptions)
     server = Opt.flag' () (Opt.long "server")
         *> (IServer <$> Srv.serverConnectionOptions)
 
@@ -94,7 +99,8 @@ output = C.subparserCmd "output ..." $ Opt.command "output" $ Opt.info
     (Opt.progDesc "Data destination")
   where
     opts = file <|> server
-    file = Opt.flag' () (Opt.long "file") *> (OFile <$> File.fileStoreOptions)
+    file = Opt.flag' () (Opt.long "file") *>
+        (OFile <$> Encodings.encodeFormatOptions <*> File.fileStoreOptions)
     server = Opt.flag' () (Opt.long "server")
         *> (OServer <$> Srv.serverConnectionOptions)
 
@@ -107,10 +113,10 @@ runCmd opts vcrOpts = do
         "archive: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
 
     case (optInput opts,optOutput opts) of
-      (IFile inpFS,OFile outFS) ->
-          copyFromFileToFile inpFS outFS
-      (IServer inpSC,OFile outFS) ->
-          copyFromHTTPToFile inpSC outFS
+      (IFile inpEnc inpFS, OFile outEnc outFS) ->
+          copyFromFileToFile (inpEnc,inpFS) (outEnc,outFS)
+      (IServer inpSC, OFile outEnc outFS) ->
+          copyFromHTTPToFile inpSC (outEnc,outFS)
       _ ->
           C.throw "TODO"
 
@@ -124,8 +130,11 @@ runCmd opts vcrOpts = do
 -- Throws an exception
 -- (1) if any IO operation on files fails, or
 -- (2) if any segment of the input file cannot be recognized as an event.
-copyFromFileToFile :: File.FileStore -> File.FileStore -> IO ()
-copyFromFileToFile inpFS outFS = do
+copyFromFileToFile ::
+    (Encodings.EncodeFormat,File.FileStore)
+    -> (Encodings.EncodeFormat,File.FileStore)
+    -> IO ()
+copyFromFileToFile (inpEnc,inpFS) (outEnc,outFS) = do
     C.logM DEBUG $ "archive: file to file started"
 
     -- Open the input and the output file:
@@ -143,14 +152,10 @@ copyFromFileToFile inpFS outFS = do
                                   (File.filePath outFS)++"'."))
                     :: (CE.IOException -> IO Handle))
 
-    -- The input and output encodings:
-    let inpEnc = File.fileEnc inpFS
-    let outEnc = File.fileEnc outFS
-
     -- Get the complete input string and split it to bytestrings
     -- representing individual events using the separator defined by
     -- the input encoding:
-    bss <- Encodings.split inpEnc <$> BSL.hGetContents inpFH
+    bss <- split inpEnc <$> BS.hGetContents inpFH
 
     -- Decode each bytestring representing an individual event write
     -- the event to the output file one by one.
@@ -162,20 +167,23 @@ copyFromFileToFile inpFS outFS = do
             C.throw "archive: Cannot decode an event."
         Just event -> do
             C.logM DEBUG $ "archive: event " ++ show (Event.eUtcTime event)
-            BSL.hPutStr outFH
+            BS.hPutStr outFH
               (Encodings.encode outEnc (event::Event.Event))
 
     -- Close the input and the output file:
     if (File.filePath inpFS)=="-" then return () else hClose inpFH
     if (File.filePath outFS)=="-" then return () else hClose outFH
-    
+
     C.logM DEBUG $ "archive: file to file done"
     return ()
 
 
 
-copyFromHTTPToFile :: Srv.ServerConnection -> File.FileStore -> IO ()
-copyFromHTTPToFile inpSC outFS = do
+copyFromHTTPToFile ::
+    Srv.ServerConnection
+    -> (Encodings.EncodeFormat,File.FileStore)
+    -> IO ()
+copyFromHTTPToFile inpSC (outEnc,outFS) = do
     C.logM DEBUG $ "archive: http to file started"
 
     -- Open the output file:
@@ -192,9 +200,6 @@ copyFromHTTPToFile inpSC outFS = do
                            NC.responseTimeoutMicro
                                (round ((Srv.connectTimeout inpSC) * 1e6)) })
 
-    -- The output encoding:
-    let outEnc = File.fileEnc outFS
-
     let Srv.Server uri = head (Srv.serverPool inpSC)
     request <- parseRequest ("GET " ++ uri)
     C.logM DEBUG $ (show request)
@@ -203,25 +208,25 @@ copyFromHTTPToFile inpSC outFS = do
         let loop buffer = do
                 -- Read the new data and make it lazy:
                 newInpData8 <- NC.brRead $ NC.responseBody response
-                let newInpDataL = BSL.fromStrict newInpData8
-                if BSL.null newInpDataL then
+                let newInpDataL = {-BSL.fromStrict-} newInpData8    -- TODO: strict is used by default
+                if BS.null newInpDataL then
                     do -- Try converting the buffer data:
                        let mbEvents =
-                            (Encodings.decodeList Encodings.EncBin buffer)
+                            (Encodings.decodeList maxBound Encodings.EncBin buffer)
                             ::(Maybe [Event.Event])
                        if Maybe.isJust mbEvents then
                            do let newOutDataL =
                                       Encodings.encodeList outEnc
                                           (Maybe.fromJust mbEvents)
-                              BSL.hPut outFH newOutDataL
+                              BS.hPut outFH newOutDataL
                               return ()
                        else
                            do return ()
                 else
                     do -- Append the new data to the buffer:
-                       putStr ((show (BSL.length newInpDataL))++":")
-                       let newBuffer = BSL.append buffer newInpDataL
-                       putStr ((show (BSL.length newBuffer))++" ")
+                       putStr ((show (BS.length newInpDataL))++":")
+                       let newBuffer = BS.append buffer newInpDataL
+                       putStr ((show (BS.length newBuffer))++" ")
                        loop newBuffer
                 {-
                 if BSL.null newInpDataL then return () else do
@@ -242,7 +247,7 @@ copyFromHTTPToFile inpSC outFS = do
                               loop BSL.empty
                       else loop newBuffer
                 -}
-        loop BSL.empty
+        loop BS.empty
 
     -- Close the output file:
     if (File.filePath outFS)=="-" then return () else hClose outFH
@@ -252,8 +257,8 @@ copyFromHTTPToFile inpSC outFS = do
 
 
 
-copyFromFileToHTTP_ :: File.FileStore -> Srv.ServerConnection -> IO ()
-copyFromFileToHTTP_ inpFS outSC = do
+copyFromFileToHTTP_ :: (Encodings.EncodeFormat,File.FileStore) -> Srv.ServerConnection -> IO ()
+copyFromFileToHTTP_ (inpEnc,inpFS) outSC = do
     C.logM DEBUG $ "archive: file to http started"
 
     -- Open the input file:
@@ -268,13 +273,10 @@ copyFromFileToHTTP_ inpFS outSC = do
 
     outFH <- openFile "bla.bin" WriteMode
 
-    -- The input encodings:
-    let inpEnc = File.fileEnc inpFS
-
     -- Get the complete input string and split it to bytestrings
     -- representing individual events using the separator defined by
     -- the input encoding:
-    bss <- Encodings.split inpEnc <$> BSL.hGetContents inpFH
+    bss <- split inpEnc <$> BS.hGetContents inpFH
 
     -- Decode each bytestring representing an individual event write
     -- the event to the output file one by one.
@@ -321,9 +323,9 @@ copyFromFileToHTTP_ inpFS outSC = do
                               threadDelay 500
                               loop
               loop
-            
+
             --putStrLn $ "Body: "++(show (NC.responseBody response))
-            
+
             --BSL.hPutStr outFH
             --  (Encodings.encode outEnc (event::Event.Event))
             return ()
@@ -332,6 +334,25 @@ copyFromFileToHTTP_ inpFS outSC = do
 
     -- Close the input file:
     if (File.filePath inpFS)=="-" then return () else hClose inpFH
-    
+
     C.logM DEBUG $ "archive: file to http done"
     return ()
+
+-- | This function was removed from Encodings module... (deprecated).
+-- Please rewrite program to use Encodings.fromByteString
+-- or Encodings.decodeStream functions instead.
+-- Here is a dummy version of the split function, just to make program work,
+-- but this function shall not be used otherwise.
+split :: Encodings.EncodeFormat -> BS.ByteString -> [BS.ByteString]
+split fmt s = case sequence (check <$> result) of
+    -- in case of problems just return empty list
+    Nothing -> []
+    -- On success, encode each Event, so that it can be decoded
+    -- again later (this is the dummy part).
+    Just lst -> Encodings.encode fmt <$> (lst :: [Event.Event])
+  where
+    check (Left _) = Nothing
+    check (Right a) = Just a
+    -- feed input string to the parsing pipe and collect results to the list.
+    result = PP.toList (Pipes.yield s >-> Encodings.fromByteString maxBound fmt)
+

@@ -5,31 +5,35 @@
 -- This module provides common File definitions.
 --
 
-module File
+module File {-
 ( FileStore(..)
 , fileStoreOptions
 , File.appendFile
 , rotateFile
-) where
+) -} where
 
-import qualified Data.ByteString.Lazy as BSL
-import Data.List (isPrefixOf, sort)
+import           Control.Monad
+import           Pipes
+import qualified Pipes.ByteString as PBS
+import qualified Options.Applicative as Opt
+import           Data.Monoid ((<>))
+import qualified Data.ByteString as BS
+import           System.IO as IO
+{-
+import           Data.List (isPrefixOf, sort)
 import qualified Data.Time as Time
 import qualified Data.Time.Clock.POSIX
-import Data.Monoid ((<>))
-import qualified Options.Applicative as Opt
-import qualified System.IO
-import System.Directory (renameFile, listDirectory, removeFile)
-import System.FilePath ((</>), takeDirectory)
-import System.Posix (getFileStatus, fileSize, accessTimeHiRes)
+import           System.Directory (renameFile, listDirectory, removeFile)
+import           System.FilePath ((</>), takeDirectory)
+import           System.Posix (getFileStatus, fileSize, accessTimeHiRes)
+-}
 
 -- local imports
-import qualified Encodings as Enc
+import qualified Common as C
 
 -- | File storage.
 data FileStore = FileStore
     { filePath  :: FilePath
-    , fileEnc   :: Enc.EncodeFormat
     } deriving (Eq, Show)
 
 fileStoreOptions :: Opt.Parser FileStore
@@ -39,8 +43,67 @@ fileStoreOptions = FileStore
        <> Opt.metavar "FILE"
        <> Opt.help "Filename, '-' for stdin/stdout"
         )
-    <*> Enc.encodeFormatOptions
 
+-- | File rotate options (for File output).
+data Rotate = Rotate
+    { rotateKeep :: Int
+    , rotateSize :: Maybe Integer
+    , rotateTime :: Maybe Double
+    } deriving (Eq, Show)
+
+rotateOptions :: Opt.Parser Rotate
+rotateOptions = Rotate
+    <$> Opt.option Opt.auto
+        ( Opt.long "rotateKeep"
+       <> Opt.help "Keep number of rotated files"
+        )
+    <*> Opt.optional (Opt.option C.kiloMega
+        ( Opt.long "rotateSize"
+       <> Opt.help "Rotate file after <SIZE>[kMG] bytes"
+       <> Opt.metavar "SIZE"
+        ))
+    <*> Opt.optional (Opt.option humanTime
+        ( Opt.long "rotateTime"
+       <> Opt.help "Rotate file after <SEC>[s|min|h|day]"
+       <> Opt.metavar "SEC"
+        ))
+
+-- | Convert some time units to seconds (eg. 1min -> 60.0).
+humanTime :: Opt.ReadM Double
+humanTime = Opt.eitherReader $ \arg -> do
+    let suffix :: [(String,Double)]
+        suffix =
+            [ ("", 1)
+            , ("s", 1)
+            , ("min", 60)
+            , ("h", 3600)
+            , ("day", 24*3600)
+            ]
+        (a,b) = span (flip elem ['0'..'9']) arg
+    factor <- case lookup b suffix of
+        Nothing -> Left $ "cannot parse suffix `" ++ b ++ "'"
+        Just val -> Right val
+    case reads a of
+        [(r, "")] -> return (r * factor)
+        _         -> Left $ "cannot parse value `" ++ arg ++ "'"
+
+-- | File writer with 'rotation' support.
+-- | TODO: implement file rotation
+fileWriter :: FileStore -> Maybe Rotate -> Consumer BS.ByteString IO ()
+fileWriter fs mRotate = forever $ do
+    msg <- await
+    lift $ case filePath fs of
+        "-" -> BS.putStr msg
+        f -> BS.appendFile f msg
+
+-- | File reader.
+-- TODO: Close the file when reading is done.
+fileReader :: FileStore -> Producer BS.ByteString IO ()
+fileReader fs = PBS.fromHandle =<< case filePath fs of
+    "-" -> return IO.stdin
+    f -> (lift $ openFile f ReadMode)
+
+{-
 -- | Append some data to a file.
 appendFile :: (Enc.Encodable msg) => FileStore -> [msg] -> IO ()
 appendFile (FileStore path fmt) messages = do
@@ -85,4 +148,5 @@ rotateFile (FileStore path _) keep mSize mTime = do
         return oldFiles
 
     myFiles = isPrefixOf path
+-}
 

@@ -1,8 +1,18 @@
+------------------
+-- |
+-- Module: CmdServe
+--
+-- 'serve' command
+--
+
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module CmdServe (cmdServe) where
 
+cmdServe = undefined
+
+{-
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Monad
@@ -275,4 +285,5 @@ safeDeposit conns requested evts =
             case st of
                 ConnAlive -> depositMany (n-1) failed conns' lst
                 ConnDead -> depositMany n (ix:failed) rest lst
+-}
 

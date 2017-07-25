@@ -5,19 +5,21 @@
 -- This module provides common UDP definitions.
 --
 
-module Udp
+module Udp {-
 ( Ip, Port, Mcast, TTL
 , UdpIn, udpInOptions
 , UdpOut, udpOutOptions
 , rxSocket, rxUdp
-) where
+) -} where
 
+import           Control.Monad
 import qualified Data.ByteString as BS
-import Data.Monoid ((<>))
+import           Data.Monoid ((<>))
 import qualified Network.Socket as Net
 import qualified Network.Socket.ByteString as NB
 import qualified Network.Multicast as Mcast
 import qualified Options.Applicative as Opt
+import           Pipes
 
 type Ip = String
 type Port = String
@@ -75,4 +77,12 @@ rxSocket addr = do
 -- | Receive data from the socket.
 rxUdp :: Net.Socket -> IO (BS.ByteString, Net.SockAddr)
 rxUdp sock = NB.recvFrom sock (2^(16::Int))
+
+-- | UDP bytestring producer.
+udpReader :: Udp.UdpIn -> Producer (BS.ByteString, Net.SockAddr) IO ()
+udpReader addr = do
+    sock <- lift $ Udp.rxSocket addr
+    forever $ do
+        msg <- lift $ Udp.rxUdp sock
+        yield msg
 

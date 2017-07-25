@@ -24,6 +24,9 @@ import           Control.Monad
 import           Data.Monoid ((<>))
 import           Data.Word (Word8)
 
+import           Pipes
+import qualified Pipes.Prelude as P
+
 import qualified Data.Attoparsec.ByteString as ATP
 
 import qualified Data.Aeson
@@ -109,7 +112,7 @@ cobsEncode s = BS.concat $ encodeSegments s where
         chunk = BS.take 254 a
         n = BS.length chunk
         prefix = fromIntegral $ succ n
-        c = BS.drop n a `BS.append` b
+        c = BS.drop n a <> b
         rest = case BS.null c of
             True -> []
             False -> case prefix of
@@ -124,7 +127,7 @@ cobsDecode s = do
         True -> return a
         False -> do
             rest <- cobsDecode b
-            return $ a `BS.append` rest
+            return $ a <> rest
   where
     decodeSegment :: BS.ByteString -> Maybe (BS.ByteString, BS.ByteString)
     decodeSegment x = do
@@ -139,8 +142,8 @@ cobsDecode s = do
             False -> case a of
                 255 -> do
                     (e,f) <- decodeSegment d
-                    return (c `BS.append` e, f)
-                _ -> return (c `BS.append` BS.singleton 0, d)
+                    return (c <> e, f)
+                _ -> return (c <> BS.singleton 0, d)
 
 recordSeparator :: Word8
 recordSeparator = 0x1E
@@ -206,6 +209,11 @@ encodeList :: (Data.Aeson.ToJSON a, Bin.Serialize a, Show a) =>
     EncodeFormat -> [a] -> BS.ByteString
 encodeList fmt lst = BS.concat (encode fmt <$> lst)
 
+-- | Pipe from items to bytestrings.
+toByteString :: (Monad m, Data.Aeson.ToJSON a, Bin.Serialize a, Show a) =>
+    EncodeFormat -> Pipe a BS.ByteString m ()
+toByteString fmt = P.map (encode fmt)
+
 -- | Decode ByteString to list of items + some remaining.
 decodeStream :: (Read a, Bin.Serialize a, Data.Aeson.FromJSON a) =>
     Int
@@ -237,4 +245,16 @@ decode fmt s = do
     case result of
         [a] -> Just a
         _ -> Nothing
+
+-- | Pipe from ByteString to item.
+fromByteString :: (Monad m, Data.Aeson.FromJSON a, Bin.Serialize a, Read a) =>
+    Int
+    -> EncodeFormat
+    -> Pipe BS.ByteString (Either (String, BS.ByteString) a) m ()
+fromByteString maxSize fmt = go BS.empty where
+    go acc = do
+        s <- await
+        let (lst, leftover) = decodeStream maxSize fmt (acc <> s)
+        mapM_ yield lst
+        go leftover
 

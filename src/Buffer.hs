@@ -5,7 +5,7 @@
 -- Buffer manipulations
 --
 
-module Buffer
+module Buffer {-
 ( Buffer
 , Threshold (thLength, thBytes, thSeconds)
 , threshold, thresholdOptions
@@ -17,20 +17,20 @@ module Buffer
 , readBuffer
 
 -- helpers
-, kiloMega
 , anyLimit
-) where
+) -} where
 
 import qualified Control.Concurrent.STM as STM
-import Data.Foldable (toList)
-import Data.Maybe (isJust)
-import Data.Monoid ((<>))
+import           Data.Foldable (toList)
+import           Data.Maybe (isJust)
+import           Data.Monoid ((<>))
 import qualified Data.Sequence as DS
 import qualified Options.Applicative as Opt
-import System.Clock (TimeSpec, toNanoSecs)
+import           System.Clock (TimeSpec, toNanoSecs)
 
 import qualified Event
 
+{-
 -- | Buffer (sequence of data) with thresholds.
 data Buffer = Buffer
     { bufData       :: STM.TVar (DS.Seq Event.Event)
@@ -85,18 +85,6 @@ threshold = Threshold
 -- | Check if any limit has been set.
 anyLimit :: Threshold -> Bool
 anyLimit (Threshold a b c) = or [isJust a, isJust b, isJust c]
-
--- | Helper function to convert eg. 1k -> 1024
-kiloMega :: Opt.ReadM Integer
-kiloMega = Opt.eitherReader $ \arg -> do
-    let (a,b) = case last arg of
-            'k' -> (init arg, 1)
-            'M' -> (init arg, 2)
-            'G' -> (init arg, 3)
-            _ -> (arg, 0)
-    case reads a of
-        [(r, "")] -> return (r * (1024^(b::Int)))
-        _         -> Left $ "cannot parse value `" ++ arg ++ "'"
 
 -- | Create new buffer.
 newBuffer :: Threshold -> Threshold -> STM.STM Buffer
@@ -158,4 +146,5 @@ thCompare ts s th = maximum [thCompareLength, thCompareBytes, thCompareSeconds]
         secondsSince t1 t2 = (/ (10^(9::Int))) $ fromIntegral (t2' - t1') where
             t2' = toNanoSecs t2
             t1' = toNanoSecs t1
+-}
 

@@ -7,6 +7,9 @@
 
 module CmdReplay (cmdReplay) where
 
+cmdReplay = undefined
+
+{-
 -- standard imports
 import Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
@@ -76,4 +79,5 @@ runCmd opts vcrOpts = do
         , optOutput opts
         , optBatchSize opts
         )
+-}
 

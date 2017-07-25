@@ -5,35 +5,34 @@
 module Main where
 
 -- standard imports
-import Control.Exception (catch, SomeException)
-import Options.Applicative ((<**>))
+import           Control.Exception (catch, SomeException)
+import           Options.Applicative ((<**>))
 import qualified Options.Applicative as Opt
-import System.Log.Logger (Priority(DEBUG, INFO))
+import           System.Log.Logger (Priority(DEBUG, INFO))
 import qualified System.Log.Logger as Log
-import System.Log.Handler.Simple (verboseStreamHandler)
-import System.IO (stdout, stderr, hPutStrLn)
-import System.Exit (exitWith, ExitCode(ExitFailure, ExitSuccess))
+import           System.Log.Handler.Simple (verboseStreamHandler)
+import           System.IO (stdout, stderr, hPutStrLn)
+import           System.Exit (exitWith, ExitCode(ExitFailure, ExitSuccess))
 import qualified System.Environment
 
 -- local imports
 import qualified Common as C
+import           CmdRecord    (cmdRecord)
+import           CmdArchive   (cmdArchive)
 {-
-import CmdRecord    (cmdRecord)
-import CmdArchive   (cmdArchive)
-import CmdReplay    (cmdReplay)
+import           CmdReplay    (cmdReplay)
+import           CmdServe     (cmdServe)
 -}
---import CmdServe     (cmdServe)
---import CmdHousekeep (cmdHousekeep)
 
 -- | Available commands.
 commands :: [(String, Opt.ParserInfo (C.VcrOptions -> IO ()))]
 commands =
-    [ {- ("record",    cmdRecord)
+    [ ("record",    cmdRecord)
     , ("archive",   cmdArchive)
+    {-
     , ("replay",    cmdReplay)
+    , ("serve",     cmdServe)
     -}
-    --, ("serve",     cmdServe)
-    --, ("housekeep", cmdHousekeep)
     ]
 
 -- | Toplevel command line options.

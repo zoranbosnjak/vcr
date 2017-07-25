@@ -14,6 +14,7 @@ module Common
 , subparserCmd
 , throw
 , check
+, kiloMega
 ) where
 
 import Control.Exception (throwIO, Exception)
@@ -94,3 +95,16 @@ subparserCmd disp m = Opt.Int.mkParser d g rdr
     Opt.Int.Mod _ d g = Opt.metavar disp `mappend` m
     (groupName, cmds, subs) = Opt.Int.mkCommand m
     rdr = CmdReader groupName cmds subs
+
+-- | Helper function to convert eg. 1k -> 1024
+kiloMega :: Opt.ReadM Integer
+kiloMega = Opt.eitherReader $ \arg -> do
+    let (a,b) = case last arg of
+            'k' -> (init arg, 1)
+            'M' -> (init arg, 2)
+            'G' -> (init arg, 3)
+            _ -> (arg, 0)
+    case reads a of
+        [(r, "")] -> return (r * (1024^(b::Int)))
+        _         -> Left $ "cannot parse value `" ++ arg ++ "'"
+

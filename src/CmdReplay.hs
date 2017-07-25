@@ -7,21 +7,23 @@
 
 module CmdReplay (cmdReplay) where
 
-cmdReplay = undefined
-
-{-
--- standard imports
-import Options.Applicative ((<**>), (<|>))
+-- Standard imports.
+import           Control.Monad
+import           Pipes
+import qualified Pipes.Prelude as PP
+import           Options.Applicative ((<**>)) -- , (<|>))
 import qualified Options.Applicative as Opt
-import System.Log.Logger (Priority(INFO))
+import           System.Log.Logger (Priority(INFO, NOTICE))
+import           Control.Concurrent (threadDelay)
 
 -- local imports
-import qualified Buffer
-import Common (logM)
+import           Common (logM)
+-- import qualified Buffer
 import qualified Common as C
 import qualified Event
-import qualified Server as Srv
+import qualified Server
 import qualified File
+import qualified Encodings
 import qualified Udp
 
 {-
@@ -39,15 +41,15 @@ cmdReplay= Opt.info ((runCmd <$> options) <**> Opt.helper)
 
 -- | Speciffic command options.
 data Options = Options
-    { optInput      :: Input
-    , optOutput     :: Output
-    , optBatchSize  :: Buffer.Threshold
+    { --optInput      :: Input
+    --, optOutput     :: Output
+    --, optBatchSize  :: Buffer.Threshold
     } deriving (Eq, Show)
 
 -- | Input options.
 data Input
     = IFile File.FileStore
-    | IServer Srv.ServerConnection
+    | IServer Server.ServerConnection
     deriving (Eq, Show)
 
 -- | Output options.
@@ -58,26 +60,55 @@ data Output
 
 -- | Command option parser.
 options :: Opt.Parser Options
-options = Options
+options = pure Options
+    {-
     <$> (readFileOptions <|> readServerOptions)
     <*> (stdoutOptions <|> udpOutputOptions)
-    <*> Buffer.thresholdOptions "batch"
+    -- <*> Buffer.thresholdOptions "batch"
+    -}
   where
+    {-
     readFileOptions = undefined
     readServerOptions = undefined
     stdoutOptions = undefined
     udpOutputOptions = undefined
+    -}
 
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
 runCmd opts vcrOpts = do
     logM INFO $
         "replay, opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
+    runEffect $ source >-> cleanup >-> eventFilter >-> timing >-> destination
 
-    print
-        ( optInput opts
-        , optOutput opts
-        , optBatchSize opts
-        )
--}
+  where
+
+    -- read from file, decode data
+    source =
+        File.fileReader (File.FileStore "test1.json")
+        >-> Encodings.fromByteString (100*1024)
+                (Encodings.EncJSON Encodings.JSONCompact)
+
+    -- log errors if any
+    cleanup = forever $ do
+        result <- await
+        case result of
+            Left e -> lift $ logM NOTICE $ "error: " ++ show e
+            Right a -> yield a
+
+    -- pass if channel name has 3 chars or more
+    eventFilter = PP.filter $ \evt ->
+        let Event.Channel ch = Event.eChannel evt
+        in length ch >= 3
+
+    -- insert some delay between frames
+    timing = forever $ do
+        msg <- await
+        lift $ threadDelay . round . (1000000*) $ (0.3 :: Double)
+        yield msg
+
+    -- send to stdout
+    destination =
+        Encodings.toByteString (Encodings.EncJSON Encodings.JSONCompact)
+        >-> File.fileWriter (File.FileStore "-") Nothing
 

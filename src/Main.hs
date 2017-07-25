@@ -19,8 +19,8 @@ import qualified System.Environment
 import qualified Common as C
 import           CmdRecord    (cmdRecord)
 import           CmdArchive   (cmdArchive)
-{-
 import           CmdReplay    (cmdReplay)
+{-
 import           CmdServe     (cmdServe)
 -}
 
@@ -29,8 +29,8 @@ commands :: [(String, Opt.ParserInfo (C.VcrOptions -> IO ()))]
 commands =
     [ ("record",    cmdRecord)
     , ("archive",   cmdArchive)
-    {-
     , ("replay",    cmdReplay)
+    {-
     , ("serve",     cmdServe)
     -}
     ]

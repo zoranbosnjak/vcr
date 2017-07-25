@@ -172,6 +172,8 @@ encode (EncJSON (JSONPretty i)) val = BS.concat
 --    for all formats (like jsonStream)
 --  - compare performance (BS.elem... vs parser)
 --  - BS.null check might not be necessary any more
+--  - check performance for very large files, for example
+--    '\n\n...' without recordSeparator for jsonPretty
 parse :: (Read a, Bin.Serialize a, Data.Aeson.FromJSON a) =>
     Int -> EncodeFormat -> BS.ByteString -> ATP.Result a
 parse maxSize fmt s

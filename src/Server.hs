@@ -6,10 +6,10 @@
 --
 
 module Server
+{-
 ( ServerConnection(..)
-, Server(..)
 , serverConnectionOptions
-) where
+) -} where
 
 -- standard imports
 import Data.Monoid ((<>))
@@ -19,19 +19,16 @@ import qualified Options.Applicative as Opt
 
 -- local imports
 
-type URI = String
+newtype URI = URI String deriving (Eq, Show)
 type ConnectTimeout = Double
 type RetryTimeout = Double
 
 -- | Server connection pool.
 data ServerConnection = ServerConnection
-    { serverPool      :: [Server]
+    { serverPool      :: [URI]
     , connectTimeout  :: ConnectTimeout
     , retryTimeout    :: RetryTimeout
     } deriving (Eq, Show)
-
--- | Single Server.
-data Server = Server URI deriving (Eq, Show)
 
 serverConnectionOptions :: Opt.Parser ServerConnection
 serverConnectionOptions = ServerConnection
@@ -39,12 +36,12 @@ serverConnectionOptions = ServerConnection
     <*> connectTimeoutOptions
     <*> retryTimeoutOptions
 
-serverOptions :: Opt.Parser Server
-serverOptions = Server
+serverOptions :: Opt.Parser URI
+serverOptions = URI
     <$> Opt.strOption
         (Opt.long "uri"
        <> Opt.metavar "URI"
-       <> Opt.help "Server URI address"
+       <> Opt.help "URI address"
         )
 
 connectTimeoutOptions :: Opt.Parser ConnectTimeout

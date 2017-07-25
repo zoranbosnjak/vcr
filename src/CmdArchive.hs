@@ -200,7 +200,7 @@ copyFromHTTPToFile inpSC (outEnc,outFS) = do
                            NC.responseTimeoutMicro
                                (round ((Srv.connectTimeout inpSC) * 1e6)) })
 
-    let Srv.Server uri = head (Srv.serverPool inpSC)
+    let Srv.URI uri = head (Srv.serverPool inpSC)
     request <- parseRequest ("GET " ++ uri)
     C.logM DEBUG $ (show request)
 

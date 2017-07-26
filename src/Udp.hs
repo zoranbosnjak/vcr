@@ -5,12 +5,7 @@
 -- This module provides common UDP definitions.
 --
 
-module Udp {-
-( Ip, Port, Mcast, TTL
-, UdpIn, udpInOptions
-, UdpOut, udpOutOptions
-, rxSocket, rxUdp
-) -} where
+module Udp where
 
 import           Control.Monad
 import qualified Data.ByteString as BS
@@ -28,7 +23,10 @@ type TTL = Int
 
 -- | UDP (unicast or multicast)
 data UdpIn = UdpIn Ip Port (Maybe Mcast) deriving (Eq, Show)
-data UdpOut = UdpOut Ip Port (Maybe Mcast, (Maybe TTL)) deriving (Eq, Show)
+data UdpOut = UdpOut Ip Port (Maybe (Mcast, Maybe TTL)) deriving (Eq, Show)
+
+newtype RxSocket = RxSocket Net.Socket
+data TxSocket = TxSocket Net.Socket Net.SockAddr
 
 udpInOptions :: Opt.Parser UdpIn
 udpInOptions = UdpIn
@@ -52,7 +50,7 @@ udpOutOptions :: Opt.Parser UdpOut
 udpOutOptions = undefined
 
 -- | Open RX socket and join to multicast if required.
-rxSocket :: UdpIn -> IO Net.Socket
+rxSocket :: UdpIn -> IO RxSocket
 rxSocket addr = do
     let (ip, port, mclocal) = case addr of
             UdpIn ip' port' Nothing -> (ip', port', Nothing)
@@ -72,17 +70,54 @@ rxSocket addr = do
             Mcast.addMembership sock ip mclocal
 
     Net.bind sock (Net.addrAddress serveraddr)
-    return sock
+    return $ RxSocket sock
 
 -- | Receive data from the socket.
-rxUdp :: Net.Socket -> IO (BS.ByteString, Net.SockAddr)
-rxUdp sock = NB.recvFrom sock (2^(16::Int))
+rxUdp :: RxSocket -> IO (BS.ByteString, Net.SockAddr)
+rxUdp (RxSocket sock) = NB.recvFrom sock (2^(16::Int))
 
 -- | UDP bytestring producer.
-udpReader :: Udp.UdpIn -> Producer (BS.ByteString, Net.SockAddr) IO ()
+udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr) IO ()
 udpReader addr = do
-    sock <- lift $ Udp.rxSocket addr
+    sock <- lift $ rxSocket addr
     forever $ do
-        msg <- lift $ Udp.rxUdp sock
+        msg <- lift $ rxUdp sock
         yield msg
+
+-- | Close Rx socket.
+closeRxSock :: RxSocket -> IO ()
+closeRxSock (RxSocket sock) = Net.close sock
+
+-- | Open TX socket.
+txSocket :: UdpOut -> IO TxSocket
+txSocket (UdpOut ip port mMcast) = do
+    sock <- Net.socket Net.AF_INET Net.Datagram Net.defaultProtocol
+    dst <- case mMcast of
+        Nothing -> do
+            (serveraddr:_) <- Net.getAddrInfo Nothing (Just ip) (Just port)
+            return (Net.addrAddress serveraddr)
+        Just (mcast, mTtl) -> do
+            (serveraddr:_) <- Net.getAddrInfo Nothing (Just mcast) (Just port)
+            Mcast.setInterface sock ip
+            case mTtl of
+                Nothing -> return ()
+                Just ttl -> Mcast.setTimeToLive sock ttl
+            return (Net.addrAddress serveraddr)
+    return $ TxSocket sock dst
+
+-- | Send data to the socket.
+txUdp :: TxSocket -> BS.ByteString -> IO ()
+txUdp (TxSocket sock dst) s = NB.sendAllTo sock s dst
+
+-- | UDP bytestring consumer.
+udpWriter :: UdpOut -> Consumer BS.ByteString IO ()
+udpWriter addr = do
+    sock <- lift $ txSocket addr
+    forever $ do
+        s <- await
+        lift $ txUdp sock s
+
+-- | Close Tx socket.
+closeTxSock :: TxSocket -> IO ()
+closeTxSock (TxSocket sock _dst) = Net.close sock
 

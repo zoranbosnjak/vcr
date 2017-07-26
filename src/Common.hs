@@ -7,6 +7,7 @@
 
 module Common
 ( logM
+, Log.Priority(..)
 , VcrOptions(..)
 , vcrOptions
 , syslogOptions

@@ -116,7 +116,7 @@ sourceIdOptions = SourceId <$> Opt.strOption
     )
 
 newtype UtcTime = UtcTime Data.Time.UTCTime
-    deriving (Generic, Eq, Show, Read)
+    deriving (Generic, Eq, Show, Read, Ord)
 
 instance Arbitrary UtcTime where
     arbitrary = do

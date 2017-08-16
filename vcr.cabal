@@ -21,6 +21,7 @@ library
     exposed-modules:
         Event
         Encodings
+        Streams
     ghc-options:        -O2 -Wall -funbox-strict-fields
     default-extensions: StrictData
     build-depends:
@@ -33,6 +34,7 @@ library
         , time >=1.6 && <1.7
         , QuickCheck >=2.8 && <2.10
         , optparse-applicative >=0.12 && <0.14
+        , async >=2.1 &&<2.2
         , attoparsec >=0.13 && <0.14
         , pipes >=4.3 && <4.4
         , pipes-concurrency >=2.0 && <2.1

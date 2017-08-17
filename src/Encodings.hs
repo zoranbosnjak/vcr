@@ -24,9 +24,6 @@ import           Control.Monad
 import           Data.Monoid ((<>))
 import           Data.Word (Word8)
 
-import           Pipes
-import qualified Pipes.Prelude as P
-
 import qualified Data.Attoparsec.ByteString as ATP
 
 import qualified Data.Aeson
@@ -46,6 +43,16 @@ import           Text.Printf (printf)
 import           Text.Read (readMaybe)
 
 import           Numeric (readHex)
+
+-- local imports
+import qualified Streams
+import           Streams hiding (map)
+
+class HasSize a where
+    sizeOf :: a -> Integer
+
+instance HasSize BS.ByteString where
+    sizeOf = fromIntegral . BS.length
 
 -- | JSON format variants
 data JSONFormat
@@ -212,9 +219,9 @@ encodeList :: (Data.Aeson.ToJSON a, Bin.Serialize a, Show a) =>
 encodeList fmt lst = BS.concat (encode fmt <$> lst)
 
 -- | Pipe from items to bytestrings.
-toByteString :: (Monad m, Data.Aeson.ToJSON a, Bin.Serialize a, Show a) =>
-    EncodeFormat -> Pipe a BS.ByteString m ()
-toByteString fmt = P.map (encode fmt)
+toByteString :: (Data.Aeson.ToJSON a, Bin.Serialize a, Show a) =>
+    EncodeFormat -> Pipe a BS.ByteString
+toByteString fmt = Streams.map (encode fmt)
 
 -- | Decode ByteString to list of items + some remaining.
 decodeStream :: (Read a, Bin.Serialize a, Data.Aeson.FromJSON a) =>
@@ -248,6 +255,7 @@ decode fmt s = do
         [a] -> Just a
         _ -> Nothing
 
+{-
 -- | Pipe from ByteString to item.
 fromByteString :: (Monad m, Data.Aeson.FromJSON a, Bin.Serialize a, Read a) =>
     Int
@@ -259,4 +267,5 @@ fromByteString maxSize fmt = go BS.empty where
         let (lst, leftover) = decodeStream maxSize fmt (acc <> s)
         mapM_ yield lst
         go leftover
+-}
 

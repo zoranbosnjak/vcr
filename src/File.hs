@@ -5,11 +5,12 @@
 -- This module provides common File definitions.
 --
 
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module File where
 
+import           Control.Exception (bracket, try, SomeException)
 import           Control.Monad
-import           Pipes
-import qualified Pipes.ByteString as PBS
 import qualified Options.Applicative as Opt
 import           Data.Monoid ((<>))
 import qualified Data.ByteString as BS
@@ -23,6 +24,7 @@ import           System.Posix (getFileStatus, fileSize, accessTimeHiRes)
 
 -- local imports
 import qualified Common as C
+import           Streams hiding (filter)
 
 -- | File storage.
 data FileStore = FileStore
@@ -81,19 +83,19 @@ humanTime = Opt.eitherReader $ \arg -> do
         _         -> Left $ "cannot parse value `" ++ arg ++ "'"
 
 -- | File writer with 'rotation' support.
-fileWriter :: FileStore -> Maybe Rotate -> Consumer BS.ByteString IO ()
-fileWriter fs mRotate = forever $ do
-    msg <- await
-    lift $ do
-        appendToFile fs msg
+fileWriter :: FileStore -> Maybe Rotate -> Pipe BS.ByteString String
+fileWriter fs mRotate = mkPipe action
+  where
+    action consume produce = forever $ do
+        consume >>= appendToFile fs
         rotateResult <- maybe (return Nothing) (rotateFile fs) mRotate
         case rotateResult of
             Nothing -> return ()
             Just (new, old) -> do
-                C.logM C.INFO $ "Output file rotated: " ++ new
+                _ <- produce $ "Output file rotated: " ++ new
                 forM_ old $ \i -> do
-                    C.logM C.INFO $ "Old file removed: " ++ i
-  where
+                    produce $ "Old file removed: " ++ i
+
     appendToFile (FileStore "-") = BS.putStr
     appendToFile (FileStore f) = BS.appendFile f
 
@@ -137,8 +139,34 @@ fileWriter fs mRotate = forever $ do
 
 -- | File reader.
 -- TODO: Close the file when reading is done.
+{-
 fileReader :: FileStore -> Producer BS.ByteString IO ()
 fileReader fs = PBS.fromHandle =<< case filePath fs of
     "-" -> return IO.stdin
     f -> (lift $ IO.openFile f IO.ReadMode)
+-}
+
+-- chunkReader = undefined
+
+-- | Read lines from file.
+lineReader :: FileStore -> Producer BS.ByteString
+lineReader fs = mkProducer action where
+    acquire = do
+        h <- case filePath fs of
+            "-" -> return IO.stdin
+            f -> IO.openFile f IO.ReadMode
+        IO.hSetBuffering h IO.LineBuffering
+        return h
+    release h = case filePath fs of
+        "-" -> return ()
+        _ -> IO.hClose h
+    action produce = bracket acquire release $ \h -> do
+        let loop = do
+                rv <- try $ BS.hGetLine h
+                case rv of
+                    Left (_e::SomeException) -> return ()
+                    Right val -> do
+                        _ <- produce val
+                        loop
+        loop
 

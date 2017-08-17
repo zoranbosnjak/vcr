@@ -62,7 +62,7 @@ module Streams
 where
 
 import           Control.Monad
-import           Control.Exception (bracket)
+import           Control.Exception (bracket, throw)
 import qualified Control.Concurrent
 import qualified Control.Concurrent.Async
 
@@ -153,4 +153,35 @@ noConsume = error "can not consume values"
 -- | Producer that fails.
 noProduce :: t -> a
 noProduce _ = error "can not produce values"
+
+-- | Utils
+
+-- | map function over each element
+map :: (a -> b) -> Streaming a b
+map f = mkPipe $ \consume produce -> forever $ do
+    consume >>= produce . f
+
+-- | filter stream elements
+filter :: (a -> Bool) -> Streaming a a
+filter f = mkPipe $ \consume produce -> forever $ do
+    msg <- consume
+    when (f msg) $ produce msg
+
+-- | Perform some action when original stream component terminates on it's own.
+onTerminate :: IO () -> Streaming a b -> Streaming a b
+onTerminate act s = Streaming action where
+    action consume produce = do
+        a <- Control.Concurrent.Async.async $
+            (streamAction s) consume produce
+        rv <- Control.Concurrent.Async.waitCatch a
+        -- perform required action, then re-throw exception if any
+        act
+        case rv of
+            Left e -> throw e
+            Right _ -> return ()
+
+-- | Consumer that just consumes all input.
+drain :: Consumer a
+drain = mkConsumer $ \consume -> forever $ do
+    consume >> return ()
 

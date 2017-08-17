@@ -110,5 +110,5 @@ runCmd opts vcrOpts = do
     -- send to stdout
     destination =
         Encodings.toByteString (Encodings.EncJSON Encodings.JSONCompact)
-        >-> File.fileWriter (File.FileStore "-") Nothing
+        >-> File.fileWriter (File.FileStore "-") Nothing Nothing
 

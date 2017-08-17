@@ -5,38 +5,23 @@
 -- Buffer manipulations
 --
 
-module Buffer {-
-( Buffer
-, Threshold (thLength, thBytes, thSeconds)
-, threshold, thresholdOptions
-, isBelow
+module Buffer where
 
--- buffer manipulation
-, newBuffer
-, appendBuffer
-, readBuffer
-
--- helpers
-, anyLimit
-) -} where
-
-import qualified Control.Concurrent.STM as STM
+import qualified Control.Concurrent.Async as Async
+import           Control.Exception (bracket)
+import           Control.Monad
+import qualified Data.Sequence as DS
 import           Data.Foldable (toList)
 import           Data.Maybe (isJust)
+import           Control.Concurrent.STM as STM
+
 import           Data.Monoid ((<>))
-import qualified Data.Sequence as DS
 import qualified Options.Applicative as Opt
-import           System.Clock (TimeSpec, toNanoSecs)
 
-import qualified Event
-
-{-
--- | Buffer (sequence of data) with thresholds.
-data Buffer = Buffer
-    { bufData       :: STM.TVar (DS.Seq Event.Event)
-    , bufAppendTh   :: Threshold
-    , bufReadTh     :: Threshold
-    }
+-- import qualified Event
+import qualified Common as C
+import qualified Encodings as Enc
+import           Streams
 
 -- | Threshold, limit by different properties.
 data Threshold = Threshold
@@ -56,13 +41,16 @@ instance Monoid Threshold where
         lower x Nothing = x
         lower (Just a) (Just b) = Just (min a b)
 
+thresholdValid :: Threshold -> Bool
+thresholdValid th = not (th == mempty)
+
 thresholdOptions :: String -> Opt.Parser Threshold
 thresholdOptions s = threshold
     <$> Opt.optional (Opt.option Opt.auto
         ( Opt.long (s++"Events")
        <> Opt.help "number of events")
         )
-    <*> Opt.optional (Opt.option Buffer.kiloMega
+    <*> Opt.optional (Opt.option C.kiloMega
         ( Opt.long (s++"Bytes")
        <> Opt.help "size in bytes")
         )
@@ -82,69 +70,64 @@ isBelow (Threshold a1 b1 c1) (Threshold a2 b2 c2) = and [a1<!a2, b1<!b2, c1<!c2]
 threshold :: (Maybe Int) -> (Maybe Integer) -> (Maybe Double) -> Threshold
 threshold = Threshold
 
--- | Check if any limit has been set.
-anyLimit :: Threshold -> Bool
-anyLimit (Threshold a b c) = or [isJust a, isJust b, isJust c]
+activeThrashold :: Threshold -> Bool
+activeThrashold (Threshold a b c) = or [isJust a, isJust b, isJust c]
 
--- | Create new buffer.
-newBuffer :: Threshold -> Threshold -> STM.STM Buffer
-newBuffer appendTh readTh = Buffer
-    <$> STM.newTVar mempty
-    <*> pure appendTh
-    <*> pure readTh
+-- | Buffer will hold data until the threshold is reached.
+-- Then it will send all buffered data as a list.
+-- Threshold must be valid, that is: some limit set.
+holdBuffer :: (Enc.HasSize a) => Threshold -> Pipe a [a]
+holdBuffer th = mkPipe action where
 
--- | Append new events to the buffer.
--- We need to respect buffer append threshold, so in case of
--- overflow, some events will not be appended (but returned).
-appendBuffer :: TimeSpec -> Buffer -> [Event.Event] -> STM.STM [Event.Event]
-appendBuffer ts buf evts = do
-    content <- STM.readTVar $ bufData buf
-    let (newContent, leftover) = appendItems content evts
-    STM.writeTVar (bufData buf) newContent
-    return leftover
-  where
-    appendItems content [] = (content, [])
-    appendItems content lst@(x:xs) =
-        let newContent = content `mappend` DS.singleton x
-        in case thCompare ts newContent (bufAppendTh buf) of
-            GT -> (content, lst)
-            _ -> appendItems newContent xs
+    acquire consume = do
+        buffer <- newTVarIO DS.empty
+        cnt <- newTVarIO (0::Int)
+        bytes <- newTVarIO (0::Integer)
+        reader <- Async.async $ forever $ do
+            msg <- consume
+            atomically $ do
+                modifyTVar buffer (\s -> s DS.|> msg)
+                modifyTVar cnt succ
+                modifyTVar bytes (+ (Enc.sizeOf msg))
+        return (buffer, cnt, bytes, reader)
 
--- | Read buffer content when ready to read.
--- Read only as many events as allowed by the threshold
-readBuffer :: STM.TVar TimeSpec -> Buffer -> STM.STM [Event.Event]
-readBuffer tick buf = do
-    ts <- STM.readTVar tick
-    content <- STM.readTVar $ bufData buf
-    (contentReady, leftover) <- readItems ts DS.empty content
-    STM.writeTVar (bufData buf) leftover
-    return $ toList contentReady
-  where
-    readItems ts acc content = case DS.viewr content of
-        DS.EmptyR -> STM.retry
-        (rest DS.:> aR) ->
-            let newAcc = aR DS.<| acc
-            in case thCompare ts newAcc (bufReadTh buf) of
-                LT -> readItems ts newAcc rest
-                _ -> return (newAcc, rest)
+    release (_,_,_,reader) = Async.cancel reader
 
--- | Compare content of the buffer with the threshold
-thCompare :: TimeSpec -> DS.Seq Event.Event -> Threshold -> Ordering
-thCompare ts s th = maximum [thCompareLength, thCompareBytes, thCompareSeconds]
-  where
-    mCompare _ Nothing = LT
-    mCompare actual (Just limit) = compare actual limit
+    action consume produce = bracket (acquire consume) release $
+      \(buffer,cnt,bytes,_) -> do
+        C.check (thresholdValid th) "this buffer would wait indefinetly"
+        let loop = do
+                timeout <- case thSeconds th of
+                    Nothing -> newTVarIO False
+                    Just val -> registerDelay $ (round val) * 1000000
+                items <- atomically $ do
+                    c1 <- case thLength th of
+                        Nothing -> return False
+                        Just val -> (>= val) <$> readTVar cnt
+                    c2 <- case thBytes th of
+                        Nothing -> return False
+                        Just val -> (>= val) <$> readTVar bytes
+                    c3 <- readTVar timeout
+                    case (c1 || c2 || c3) of
+                        False -> retry
+                        True -> do
+                            content <- readTVar buffer
+                            case DS.null content of
+                                True -> retry
+                                False -> do
+                                    writeTVar buffer DS.empty
+                                    writeTVar cnt 0
+                                    writeTVar bytes 0
+                                    return $ toList content
+                _ <- produce items
+                loop
+        loop
 
-    thCompareLength = mCompare (DS.length s) (thLength th)
-    thCompareBytes = mCompare (foldr (+) 0 (fmap Event.sizeOf s)) (thBytes th)
-    thCompareSeconds = mCompare age (thSeconds th) where
-        oldest = DS.viewr s
-        age = case oldest of
-            (_ DS.:> aR) -> secondsSince (Event.eMonoTime aR) ts
-            _ -> 0
-        secondsSince :: TimeSpec -> TimeSpec -> Double
-        secondsSince t1 t2 = (/ (10^(9::Int))) $ fromIntegral (t2' - t1') where
-            t2' = toNanoSecs t2
-            t1' = toNanoSecs t1
--}
+-- | Concatinate incomming items.
+concatinated :: (Monoid a) => Pipe [a] a
+concatinated = mkPipe $ \consume produce -> forever $ do
+    consume >>= produce . mconcat
+
+-- dropBuffer
+-- TODO
 

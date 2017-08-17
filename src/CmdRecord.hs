@@ -4,11 +4,18 @@
 --
 -- 'record' command
 --
+-- Flow diagram:
+--
+--        stdIn
+--      | [UdpIn] -> (events) -> fork
+--                  | toByteString -> WriteBuffer -> Concatinate -> FileOutput
+--                  | WriteBuffer -> ServerOutput
+
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module CmdRecord (cmdRecord) where
 
 -- standard imports
-import           Control.Exception (onException)
 import           Control.Monad
 import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
@@ -16,31 +23,22 @@ import           System.Log.Logger (Priority(INFO, DEBUG, NOTICE))
 import           Data.Maybe (fromMaybe)
 import           Network.BSD (getHostName)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
-import           Pipes
-import qualified Pipes.Concurrent as PC
-import qualified Pipes.Prelude as P
 import qualified Data.UUID
 import           Data.UUID.V4 (nextRandom)
-import qualified Control.Concurrent.Async as Async
 {-
-import           Control.Concurrent (threadDelay)
-import qualified Control.Concurrent.STM as STM
-import           Control.Monad.IO.Class (liftIO)
-import           Control.Monad.Trans.Maybe (MaybeT(MaybeT), runMaybeT)
-import qualified Data.ByteString.Lazy.Char8 as BSL8
-import           Data.Monoid ((<>))
+--import qualified Data.ByteString.Char8 as BS8
 import           System.Environment (getProgName)
 import qualified System.Posix.Syslog as SL
 -}
 
 -- local imports
-import           Common (logM) --, check)
+import           Common (logM, check)
 import qualified Common as C
--- import qualified Buffer
+import qualified Buffer
 import qualified Encodings as Enc
 import qualified Event
 --import qualified Server
+import           Streams
 import qualified Udp
 import qualified File
 
@@ -62,11 +60,10 @@ data Options = Options
     { optIdent      :: Maybe Event.SourceId
     , optInput      :: Input
     , optOutFile    :: Maybe OutputFile
-    {-
-    , optOnOverflow :: OnOverflow
+    --, optOutServer  :: Maybe OutputServer
+    --, optOnOverflow :: OnOverflow
     , optLimitSend  :: Buffer.Threshold
-    , optLimitDrop  :: Buffer.Threshold
-    -}
+    --, optLimitDrop  :: Buffer.Threshold
     } deriving (Eq, Show)
 
 -- | Input options.
@@ -76,8 +73,11 @@ data Input
     deriving (Eq, Show)
 
 -- | File output.
-data OutputFile = OutputFile Enc.EncodeFormat File.FileStore (Maybe File.Rotate)
-    deriving (Eq, Show)
+data OutputFile = OutputFile
+    { outFileStore  :: File.FileStore
+    , outFileEnc    :: Enc.EncodeFormat
+    , outFileRotate :: (Maybe File.Rotate)
+    } deriving (Eq, Show)
 
 {-
 -- | Server output.
@@ -100,12 +100,10 @@ options = Options
     <$> Opt.optional Event.sourceIdOptions
     <*> (stdinOptions <|> udpInputOptions)
     <*> Opt.optional storeFileOptions
-    {-
-    <*> storeServerOptions
-    <*> (onOverflowDrop <|> onOverflowFile <|> onOverflowSyslog)
+    -- <*> storeServerOptions
+    -- <*> (onOverflowDrop <|> onOverflowFile <|> onOverflowSyslog)
     <*> Buffer.thresholdOptions "send"
-    <*> Buffer.thresholdOptions "drop"
-    -}
+    -- <*> Buffer.thresholdOptions "drop"
 
 stdinOptions :: Opt.Parser Input
 stdinOptions = C.subparserCmd "stdin ..." $ Opt.command "stdin" $ Opt.info
@@ -127,8 +125,8 @@ storeFileOptions = C.subparserCmd "file ..." $ Opt.command "file" $ Opt.info
     (Opt.progDesc "Store data to a file")
   where
     opts = OutputFile
-        <$> Enc.encodeFormatOptions
-        <*> File.fileStoreOptions
+        <$> File.fileStoreOptions
+        <*> Enc.encodeFormatOptions
         <*> Opt.optional File.rotateOptions
 
 {-
@@ -161,16 +159,15 @@ onOverflowSyslog = C.subparserCmd "dropSyslog" $ Opt.command "dropSyslog" $
 -}
 
 -- | Convert raw data to Event.
-toEvents :: Event.Channel -> Event.SourceId
-    -> Pipe BS.ByteString Event.Event IO ()
-toEvents ch recId = do
+toEvents :: Event.Channel -> Event.SourceId -> Pipe BS.ByteString Event.Event
+toEvents ch recId = mkPipe $ \consume produce -> do
     -- Each reader has own session id, so that sequence
     -- numbers can be independant between readers.
-    sessionId <- Event.sessionId . Data.UUID.toString <$> lift nextRandom
+    sessionId <- Event.sessionId . Data.UUID.toString <$> nextRandom
     let loop seqNum = do
-            msg <- await
-            (t1,t2) <- lift Event.now
-            yield $ Event.Event
+            msg <- consume
+            (t1,t2) <- Event.now
+            produce $ Event.Event
                 { Event.eChannel = ch
                 , Event.eSourceId = recId
                 , Event.eUtcTime = t1
@@ -182,130 +179,12 @@ toEvents ch recId = do
             loop $ Event.nextSequenceNum seqNum
     loop minBound
 
-{-
--- Reader loop is identical for all inputs,
--- except for prepare and actual read functions.
-reader :: Show a1 =>
-    SL.SyslogConfig
-    -> Event.SourceId -> Buffer.Buffer -> OnOverflow
-    -> (a1 -> IO (Event.Channel, t))
-    -> (t -> IO BS.ByteString)
-    -> a1
-    -> IO (Async.Async ())
-reader syslogOpts recId buf ofAction prepare readData arg = do
-    (ch, handle) <- prepare arg
-
-    -- Each reader has own session id, so that sequence
-    -- numbers can be independant between readers.
-    sessionId <- Event.sessionId . Data.UUID.toString <$> nextRandom
-    logM INFO $ "starting input"
-        ++ ", ch: " ++ show ch
-        ++ ", arg: " ++ show arg
-        ++ ", session ID: " ++ show sessionId
-
-    let createEvent (t1,t2) seqNum msg = Event.Event
-            { Event.eChannel = ch
-            , Event.eSourceId = recId
-            , Event.eUtcTime = t1
-            , Event.eMonoTime = t2
-            , Event.eSessionId = sessionId
-            , Event.eSequence = seqNum
-            , Event.eValue = msg
-            }
-
-        loop seqNum = do
-            msg <- readData handle
-            ts <- Event.now
-            let evt = createEvent ts seqNum msg
-            logM DEBUG $ "read event: " ++ show evt
-
-            notAppended <- STM.atomically $
-                Buffer.appendBuffer (snd ts) buf [evt]
-
-            case notAppended of
-                [] -> return ()
-                [x] -> do
-                    logM NOTICE $ "overflow: " ++ show x
-                    onOverflow ofAction [x]
-                _ -> C.throw "unexpected list of not appended events"
-
-            loop $ Event.nextSequenceNum seqNum
-
-    Async.async $ loop minBound
-  where
-
-    -- ignore overflow
-    onOverflow OnOverflowDrop _ = return ()
-
-    -- append overflow to a file
-    onOverflow (OnOverflowFile fs) lst = File.appendFile fs lst
-
-    -- send overflow to syslog
-    onOverflow (OnOverflowSyslog level) lst =
-        SL.withSyslog syslogOpts $ \syslog -> forM_ lst $ \evt -> do
-            let e = Enc.encode (Enc.EncJSON Enc.JSONCompact) evt
-                msg = "["++show (Event.eChannel evt)++"] " ++ BSL8.unpack e
-            syslog SL.USER level $ BS8.pack msg
--}
-
-{-
--- | Copy messages from buffer to output.
-writer :: Output -> Buffer.Buffer -> IO (Async.Async ())
-writer out buf = do
-    logM INFO $ "starting output: " ++ show out
-
-    -- check rotate options
-    _ <- case out of
-        OFile _ rot -> runMaybeT $ do
-            Rotate keep mSize mTime <- MaybeT $ return rot
-            liftIO $ check (keep >= 0)
-                "Number of files to keep can not be negative."
-            liftIO $ case mSize of
-                Nothing -> return ()
-                Just size -> check (size >= 0)
-                    "Rotate size can not be negative."
-            liftIO $ case mTime of
-                Nothing -> return ()
-                Just time -> check (time >= 0)
-                    "Rotate time can not be negative."
-        OServer _conn -> return Nothing
-
-    tick <- (snd <$> Event.now) >>= STM.newTVarIO
-    Async.async $ Async.race_ (ticker tick) (sender tick)
-
-  where
-    threadDelaySec :: Double -> IO ()
-    threadDelaySec = threadDelay . round . (1000000*)
-
-    ticker tick = forever $ do
-        threadDelaySec 1
-        t <- snd <$> Event.now
-        STM.atomically $ STM.writeTVar tick t
-
-    sender tick = forever $ do
-        evts <- STM.atomically $ Buffer.readBuffer tick buf
-        case out of
-            OFile fs rot -> do
-                -- append data
-                File.appendFile fs evts
-
-                -- rotate file
-                runMaybeT $ do
-                    Rotate keep mSize mTime <- MaybeT $ return rot
-                    (new, old) <- MaybeT $ File.rotateFile fs keep mSize mTime
-                    liftIO $ do
-                        logM INFO $ "Output file rotated: " ++ new
-                        forM_ old $ \i -> do
-                            logM INFO $ "Old file removed: " ++ i
-
-            OServer _conn -> undefined -- Srv.request??method evts
--}
-
-debugP :: (Show a) => String -> Pipe a a IO ()
-debugP prefix = forever $ do
-    msg <- await
-    lift $ logM DEBUG $ prefix ++ ": " ++ show msg
-    yield msg
+-- | Log every messages.
+debugP :: (Show a) => String -> Pipe a a
+debugP prefix = mkPipe $ \consume produce -> forever $ do
+    msg <- consume
+    logM DEBUG $ prefix ++ ": " ++ show msg
+    produce msg
 
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
@@ -313,11 +192,11 @@ runCmd opts vcrOpts = do
     logM INFO $
         "command 'record', opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
 
-    {-
-    check (Buffer.anyLimit $ optLimitSend opts)
+    check (Buffer.thresholdValid $ optLimitSend opts)
         "Some limit on send size is required."
 
-    check (Buffer.anyLimit $ optLimitDrop opts)
+    {-
+    check (Buffer.thresholdValid $ optLimitDrop opts)
         "Some limit on drop size is required."
 
     check (optLimitSend opts `Buffer.isBelow` optLimitDrop opts)
@@ -330,49 +209,48 @@ runCmd opts vcrOpts = do
     logM INFO $ "recorder ID: " ++ show recId
 
     {-
-    buf <- STM.atomically $
-        Buffer.newBuffer (optLimitDrop opts) (optLimitSend opts)
-
     syslogOpts <- do
         progName <- getProgName
         return $ SL.defaultConfig {SL.identifier = BS8.pack progName}
     -}
 
-    -- prepare application blocks
+    -- prepare streaming components
     let
-        -- inputs :: [(String, Producer Event.Event IO ())]
+        inputs :: [Producer Event.Event]
         inputs = case optInput opts of
-            IStdin ch -> do
-                let msg = show ch
-                    pipe = P.stdinLn >-> P.map BS8.pack >-> toEvents ch recId
-                return (msg, pipe)
+            IStdin ch -> return $
+                File.lineReader (File.FileStore "-") >-> toEvents ch recId
             IUdp src -> do
                 (udp,ch) <- src
-                let msg = show (udp,ch)
-                    pipe = Udp.udpReader udp >-> P.map fst >-> toEvents ch recId
-                return (msg, pipe)
-
-        fileOutput :: Consumer Event.Event IO ()
+                return $ onTerminate
+                    (logM NOTICE $ "Input error: " ++ show (udp,ch))
+                    (Udp.udpReader udp
+                        >-> Streams.map fst
+                        >-> toEvents ch recId
+                    )
+        fileOutput :: Consumer Event.Event
         fileOutput = case optOutFile opts of
-            Nothing -> P.drain
-            Just (OutputFile fmt fs rotate) ->
-                (Enc.toByteString fmt >-> File.fileWriter fs rotate)
+            Nothing -> drain
+            Just outFile ->
+                Enc.toByteString (outFileEnc outFile)
+                >-> Buffer.holdBuffer (optLimitSend opts)
+                >-> Buffer.concatinated
+                >-> onTerminate
+                    (logM NOTICE $ "Output error: " ++ show outFile)
+                    (File.fileWriter
+                        (outFileStore outFile)
+                        (outFileRotate outFile))
+                >-> dumpRotateMessages
 
-    -- merge all inputs to a single stream
-    (inputsOut, inputsIn) <- PC.spawn $ PC.bounded $ 2 * (length inputs)
+        dumpRotateMessages = mkConsumer $ \consume -> forever $ do
+            consume >>= logM INFO
 
-    -- start inputs
-    inputsTasks <- forM inputs $ \(msg, i) -> Async.async $
-        onException
-            (runEffect $ i >-> PC.toOutput inputsOut)
-            (logM NOTICE $ "Input error: " ++ msg)
+        webOutput :: Consumer Event.Event
+        webOutput = debugP "web" >-> drain -- TODO
 
-    -- start main process
-    mainTask <- Async.async $ do
-        -- TODO
-        runEffect $ PC.fromInput inputsIn >-> debugP "merged" >-> fileOutput
-
-    -- all threads shall remain running
-    _ <- Async.waitAnyCatchCancel (mainTask:inputsTasks)
-    C.throw "process terminated"
+    -- run the chain
+    runStream $
+        mergeStreams inputs
+        >-> debugP "events"
+        >-> forkStreams [fileOutput, webOutput]
 

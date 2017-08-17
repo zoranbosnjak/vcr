@@ -8,13 +8,14 @@
 module Udp where
 
 import           Control.Monad
+import           Control.Exception (bracket)
 import qualified Data.ByteString as BS
 import           Data.Monoid ((<>))
 import qualified Network.Socket as Net
 import qualified Network.Socket.ByteString as NB
 import qualified Network.Multicast as Mcast
 import qualified Options.Applicative as Opt
-import           Pipes
+import           Streams
 
 type Ip = String
 type Port = String
@@ -77,12 +78,12 @@ rxUdp :: RxSocket -> IO (BS.ByteString, Net.SockAddr)
 rxUdp (RxSocket sock) = NB.recvFrom sock (2^(16::Int))
 
 -- | UDP bytestring producer.
-udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr) IO ()
-udpReader addr = do
-    sock <- lift $ rxSocket addr
-    forever $ do
-        msg <- lift $ rxUdp sock
-        yield msg
+udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr)
+udpReader addr = mkProducer action where
+    acquire = rxSocket addr
+    release = closeRxSock
+    action produce = bracket acquire release $ \sock -> forever $ do
+        rxUdp sock >>= produce
 
 -- | Close Rx socket.
 closeRxSock :: RxSocket -> IO ()
@@ -109,6 +110,7 @@ txSocket (UdpOut ip port mMcast) = do
 txUdp :: TxSocket -> BS.ByteString -> IO ()
 txUdp (TxSocket sock dst) s = NB.sendAllTo sock s dst
 
+{-
 -- | UDP bytestring consumer.
 udpWriter :: UdpOut -> Consumer BS.ByteString IO ()
 udpWriter addr = do
@@ -116,6 +118,7 @@ udpWriter addr = do
     forever $ do
         s <- await
         lift $ txUdp sock s
+-}
 
 -- | Close Tx socket.
 closeTxSock :: TxSocket -> IO ()

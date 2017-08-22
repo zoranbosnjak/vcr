@@ -63,7 +63,7 @@ where
 
 import           Control.Monad
 import           Control.Exception (bracket, throw)
-import qualified Control.Concurrent
+import           Control.Concurrent.STM
 import qualified Control.Concurrent.Async
 
 type ConsumeFunc a = IO a
@@ -93,15 +93,15 @@ mkConsumer :: (ConsumeFunc a -> IO ()) -> Streaming a b
 mkConsumer f = Streaming action where
     action consume _produce = f consume
 
--- | Chain 2 streaming components using MVar and async.
+-- | Chain 2 streaming components using TBQueue and async.
 (>->) :: Streaming a b -> Streaming b c -> Streaming a c
 (>->) a b = Streaming action where
     action consume produce = do
-        var <- Control.Concurrent.newEmptyMVar
+        chan <- newTBQueueIO 1
         let act1 = streamAction a
             act2 = streamAction b
-            produce1 x = Control.Concurrent.putMVar var x
-            consume2 = Control.Concurrent.takeMVar var
+            produce1 x = atomically $ writeTBQueue chan x
+            consume2 = atomically $ readTBQueue chan
         Control.Concurrent.Async.race
             (act1 consume produce1)
             (act2 consume2 produce)
@@ -126,18 +126,18 @@ forkStreams lst = mkConsumer action where
     action consume = bracket acquire release $ \consumers -> do
         dispatcher <- Control.Concurrent.Async.async $ forever $ do
             msg <- consume
-            forM_ consumers $ \(var,_) -> do
-                Control.Concurrent.putMVar var msg
+            forM_ consumers $ \(chan,_) -> do
+                atomically $ writeTBQueue chan msg
         _ <- Control.Concurrent.Async.waitAnyCancel $
             dispatcher : (snd <$> consumers)
         return ()
       where
         acquire = forM lst $ \p -> do
-            -- separate var for each consumer
-            var <- Control.Concurrent.newEmptyMVar
+            -- separate chan for each consumer
+            chan <- newTBQueueIO 1
             a <- Control.Concurrent.Async.async $
-                (streamAction p) (Control.Concurrent.takeMVar var) noProduce
-            return (var, a)
+                (streamAction p) (atomically $ readTBQueue chan) noProduce
+            return (chan, a)
         release consumers = forM_ consumers $ \(_,a) -> do
             Control.Concurrent.Async.cancel a
 

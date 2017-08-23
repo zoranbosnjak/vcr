@@ -17,6 +17,7 @@ module CmdRecord (cmdRecord) where
 
 -- standard imports
 import           Control.Monad
+import           Control.Monad.IO.Class (liftIO)
 import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(INFO, DEBUG, NOTICE))
@@ -163,10 +164,10 @@ toEvents :: Event.Channel -> Event.SourceId -> Pipe BS.ByteString Event.Event
 toEvents ch recId = mkPipe $ \consume produce -> do
     -- Each reader has own session id, so that sequence
     -- numbers can be independant between readers.
-    sessionId <- Event.sessionId . Data.UUID.toString <$> nextRandom
+    sessionId <- liftIO $ Event.sessionId . Data.UUID.toString <$> nextRandom
     let loop seqNum = do
             msg <- consume
-            (t1,t2) <- Event.now
+            (t1,t2) <- liftIO $ Event.now
             produce $ Event.Event
                 { Event.eChannel = ch
                 , Event.eSourceId = recId
@@ -183,7 +184,7 @@ toEvents ch recId = mkPipe $ \consume produce -> do
 debugP :: (Show a) => String -> Pipe a a
 debugP prefix = mkPipe $ \consume produce -> forever $ do
     msg <- consume
-    logM DEBUG $ prefix ++ ": " ++ show msg
+    liftIO $ logM DEBUG $ prefix ++ ": " ++ show msg
     produce msg
 
 -- | Run command.
@@ -219,11 +220,11 @@ runCmd opts vcrOpts = do
         inputs :: [Producer Event.Event]
         inputs = case optInput opts of
             IStdin ch -> return $
-                File.lineReader (File.FileStore "-") >-> toEvents ch recId
+                File.fileReaderLines (File.FileStore "-") >-> toEvents ch recId
             IUdp src -> do
                 (udp,ch) <- src
                 return $ onTerminate
-                    (logM NOTICE $ "Input error: " ++ show (udp,ch))
+                    (liftIO $ logM NOTICE $ "Input error: " ++ show (udp,ch))
                     (Udp.udpReader udp
                         >-> Streams.map fst
                         >-> toEvents ch recId
@@ -236,14 +237,15 @@ runCmd opts vcrOpts = do
                 >-> Buffer.holdBuffer (optLimitSend opts)
                 >-> Buffer.concatinated
                 >-> onTerminate
-                    (logM NOTICE $ "Output error: " ++ show outFile)
+                    (liftIO $ logM NOTICE $ "Output error: " ++ show outFile)
                     (File.fileWriter
                         (outFileStore outFile)
                         (outFileRotate outFile))
                 >-> dumpRotateMessages
 
         dumpRotateMessages = mkConsumer $ \consume -> forever $ do
-            consume >>= logM INFO
+            msg <- consume
+            liftIO $ logM INFO msg
 
         webOutput :: Consumer Event.Event
         webOutput = debugP "web" >-> drain -- TODO

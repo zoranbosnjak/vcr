@@ -255,17 +255,15 @@ decode fmt s = do
         [a] -> Just a
         _ -> Nothing
 
-{-
 -- | Pipe from ByteString to item.
-fromByteString :: (Monad m, Data.Aeson.FromJSON a, Bin.Serialize a, Read a) =>
+fromByteString :: (Data.Aeson.FromJSON a, Bin.Serialize a, Read a) =>
     Int
     -> EncodeFormat
-    -> Pipe BS.ByteString (Either (String, BS.ByteString) a) m ()
-fromByteString maxSize fmt = go BS.empty where
-    go acc = do
-        s <- await
+    -> Pipe BS.ByteString (Either (String, BS.ByteString) a)
+fromByteString maxSize fmt = mkPipe $ go BS.empty where
+    go acc consume produce = do
+        s <- consume
         let (lst, leftover) = decodeStream maxSize fmt (acc <> s)
-        mapM_ yield lst
-        go leftover
--}
+        mapM_ produce lst
+        go leftover consume produce
 

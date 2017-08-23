@@ -9,8 +9,9 @@
 
 module File where
 
-import           Control.Exception (bracket, try, SomeException)
+import           Control.Exception (try, SomeException)
 import           Control.Monad
+import           Control.Monad.IO.Class (liftIO)
 import qualified Options.Applicative as Opt
 import           Data.Monoid ((<>))
 import qualified Data.ByteString as BS
@@ -87,8 +88,11 @@ fileWriter :: FileStore -> Maybe Rotate -> Pipe BS.ByteString String
 fileWriter fs mRotate = mkPipe action
   where
     action consume produce = forever $ do
-        consume >>= appendToFile fs
-        rotateResult <- maybe (return Nothing) (rotateFile fs) mRotate
+        consume >>= liftIO . appendToFile fs
+        rotateResult <- maybe
+            (return Nothing)
+            (\rot -> liftIO $ rotateFile fs rot)
+            mRotate
         case rotateResult of
             Nothing -> return ()
             Just (new, old) -> do
@@ -137,32 +141,40 @@ fileWriter fs mRotate = mkPipe action
 
         myFiles = isPrefixOf path
 
--- | File reader.
--- TODO: Close the file when reading is done.
-{-
-fileReader :: FileStore -> Producer BS.ByteString IO ()
-fileReader fs = PBS.fromHandle =<< case filePath fs of
-    "-" -> return IO.stdin
-    f -> (lift $ IO.openFile f IO.ReadMode)
--}
-
--- chunkReader = undefined
+-- | Read chunks from file.
+fileReaderChunks :: Int -> FileStore -> Producer BS.ByteString
+fileReaderChunks chunkSize fs = mkProducer action where
+    acquire = case filePath fs of
+        "-" -> return IO.stdin
+        f -> liftIO $ IO.openFile f IO.ReadMode
+    release h = case filePath fs of
+        "-" -> return ()
+        _ -> liftIO $ IO.hClose h
+    action produce = bracket acquire release $ \h -> do
+        let loop = do
+                val <- liftIO $ BS.hGetSome h chunkSize
+                case BS.null val of
+                    True -> return ()
+                    False -> do
+                        _ <- produce val
+                        loop
+        loop
 
 -- | Read lines from file.
-lineReader :: FileStore -> Producer BS.ByteString
-lineReader fs = mkProducer action where
+fileReaderLines :: FileStore -> Producer BS.ByteString
+fileReaderLines fs = mkProducer action where
     acquire = do
         h <- case filePath fs of
             "-" -> return IO.stdin
-            f -> IO.openFile f IO.ReadMode
-        IO.hSetBuffering h IO.LineBuffering
+            f -> liftIO $ IO.openFile f IO.ReadMode
+        liftIO $ IO.hSetBuffering h IO.LineBuffering
         return h
     release h = case filePath fs of
         "-" -> return ()
-        _ -> IO.hClose h
+        _ -> liftIO $ IO.hClose h
     action produce = bracket acquire release $ \h -> do
         let loop = do
-                rv <- try $ BS.hGetLine h
+                rv <- liftIO $ try $ BS.hGetLine h
                 case rv of
                     Left (_e::SomeException) -> return ()
                     Right val -> do

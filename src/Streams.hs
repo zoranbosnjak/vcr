@@ -8,6 +8,8 @@
 -- > import Control.Concurrent
 -- > import Control.Exception
 -- > import Control.Monad
+-- > import Control.Monad.IO.Class
+-- > import System.IO
 --
 -- Examples:
 --
@@ -21,28 +23,28 @@
 --
 -- >    srcFile :: FileName -> Producer String
 -- >    srcFile path = mkProducer action where
--- >        acquire = do
--- >            print "open file..."
--- >            TODO...
--- >        release f = do
--- >            print "close file..."
--- >            TODO...
+-- >        acquire = liftIO $ do
+-- >            print ("open file...", path)
+-- >            openFile path ReadMode
+-- >        release f = liftIO $ do
+-- >            print ("close file...", path)
+-- >            hClose f
 -- >        action produce = bracket acquire release $ \f -> do
--- >            TODO...
+-- >            -- do something with a file handle 'f'
 --
 --      * create delay pipe
 --
 -- >    pip :: Pipe a a
 -- >    pip = mkPipe $ \consume produce -> forever $ do
 -- >        msg <- consume
--- >        threadDelay 1000000
+-- >        liftIO $ threadDelay 1000000
 -- >        produce msg
 --
 --      * create consumer
 --
 -- >    cons :: Consumer Char
 -- >    cons = mkConsumer $ \consume -> do
--- >        replicateM_ 10 (consume >>= print)
+-- >        replicateM_ 10 (consume >>= (liftIO . print))
 --
 --      * run the chain
 --
@@ -62,16 +64,19 @@ module Streams
 where
 
 import           Control.Monad
-import           Control.Exception (bracket, throw)
+import           Control.Monad.IO.Class (liftIO)
+import qualified Control.Exception
 import           Control.Concurrent.STM
-import qualified Control.Concurrent.Async
+import qualified Control.Concurrent.Async as Async
+import           Control.Monad.Trans.Except
 
-type ConsumeFunc a = IO a
-type ProduceFunc b = b -> IO ()
+type StreamT = ExceptT () IO
+type ConsumeFunc a = StreamT a
+type ProduceFunc b = b -> StreamT ()
 
 -- | General streaming component.
 data Streaming a b = Streaming
-    { streamAction :: ConsumeFunc a -> ProduceFunc b -> IO ()
+    { streamAction :: ConsumeFunc a -> ProduceFunc b -> StreamT ()
     }
 
 type Producer a = Streaming () a
@@ -79,71 +84,46 @@ type Consumer a = Streaming a ()
 type Pipe a b = Streaming a b
 type Effect = Streaming () ()
 
--- | Create producer. It's action can only produce values.
-mkProducer :: (ProduceFunc b -> IO ()) -> Streaming a b
-mkProducer f = Streaming action where
-    action _consume produce = f produce
-
--- | Create pipe.
-mkPipe :: (ConsumeFunc a -> ProduceFunc b -> IO ()) -> Streaming a b
-mkPipe = Streaming
-
--- | Create consumer. It's action can only consume values.
-mkConsumer :: (ConsumeFunc a -> IO ()) -> Streaming a b
-mkConsumer f = Streaming action where
-    action consume _produce = f consume
-
 -- | Chain 2 streaming components using TBQueue and async.
 (>->) :: Streaming a b -> Streaming b c -> Streaming a c
 (>->) a b = Streaming action where
     action consume produce = do
-        chan <- newTBQueueIO 1
+        -- create a channel between left and right component
+        chan <- liftIO $ newTBQueueIO 1
         let act1 = streamAction a
             act2 = streamAction b
-            produce1 x = atomically $ writeTBQueue chan x
-            consume2 = atomically $ readTBQueue chan
-        Control.Concurrent.Async.race
-            (act1 consume produce1)
-            (act2 consume2 produce)
-        >> return ()
-
--- | Combine multiple producers of the same type to a single producer.
-mergeStreams :: [Producer a] -> Producer a
-mergeStreams lst = mkProducer action where
-    action produce = bracket acquire release $ \producers -> do
-        _ <- Control.Concurrent.Async.waitAnyCancel producers
-        return ()
-      where
-        -- start original producers from the list
-        acquire = forM lst $ \p -> do
-            Control.Concurrent.Async.async $ (streamAction p) noConsume produce
-        -- stop producers when done
-        release = mapM_ Control.Concurrent.Async.cancel
-
--- | Feed data to all consumers on the list.
-forkStreams :: [Consumer a] -> Consumer a
-forkStreams lst = mkConsumer action where
-    action consume = bracket acquire release $ \consumers -> do
-        dispatcher <- Control.Concurrent.Async.async $ forever $ do
-            msg <- consume
-            forM_ consumers $ \(chan,_) -> do
-                atomically $ writeTBQueue chan msg
-        _ <- Control.Concurrent.Async.waitAnyCancel $
-            dispatcher : (snd <$> consumers)
-        return ()
-      where
-        acquire = forM lst $ \p -> do
-            -- separate chan for each consumer
-            chan <- newTBQueueIO 1
-            a <- Control.Concurrent.Async.async $
-                (streamAction p) (atomically $ readTBQueue chan) noProduce
-            return (chan, a)
-        release consumers = forM_ consumers $ \(_,a) -> do
-            Control.Concurrent.Async.cancel a
+            -- when left action produces a value, it's written to chan
+            produce1 x = liftIO $ atomically $ writeTBQueue chan $ Just x
+            -- When right action requires a value, it's taken from chan.
+            -- In case of "end of data" - Nothing, the consumer
+            -- shall terminate gracefully, that is: only on the next
+            -- call to 'consume' function.
+            consume2 = do
+                mVal <- liftIO $ atomically $ readTBQueue chan
+                case mVal of
+                    Nothing -> throwE ()
+                    Just val -> return val
+        liftIO $ do
+            -- run left and right actions and wait for any to terminate
+            left  <- Async.async $ runExceptT (act1 consume produce1)
+            right <- Async.async $ runExceptT (act2 consume2 produce)
+            rv <- Async.waitEither left right
+            case rv of
+                Left _ -> do
+                    -- If a producer terminates, indicate end of
+                    -- data, then wait for the consumer to terminate
+                    -- on it's own.
+                    atomically $ writeTBQueue chan Nothing
+                    _ <- Async.wait right
+                    return ()
+                    -- If a consumer terminates, cancel the producer.
+                Right _ -> do
+                    Async.cancel left
+                    return ()
 
 -- | Run a stream.
 runStream :: Effect -> IO ()
-runStream s = action where
+runStream s = runExceptT action >> return () where
     action = (streamAction s) noConsume noProduce
 
 -- | Consumer that fails.
@@ -153,6 +133,67 @@ noConsume = error "can not consume values"
 -- | Producer that fails.
 noProduce :: t -> a
 noProduce _ = error "can not produce values"
+
+-- | Create producer. It's action can only produce values.
+mkProducer :: (ProduceFunc b -> StreamT ()) -> Streaming a b
+mkProducer f = Streaming action where
+    action _consume produce = f produce
+
+-- | Create pipe.
+mkPipe :: (ConsumeFunc a -> ProduceFunc b -> StreamT ()) -> Streaming a b
+mkPipe = Streaming
+
+-- | Create consumer. It's action can only consume values.
+mkConsumer :: (ConsumeFunc a -> StreamT ()) -> Streaming a b
+mkConsumer f = Streaming action where
+    action consume _produce = f consume
+
+-- | Combine multiple producers of the same type to a single producer.
+mergeStreams :: [Producer a] -> Producer a
+mergeStreams lst = mkProducer action where
+    action produce = do
+        -- Start original producers from the list, such that each
+        -- instance is using the same outer 'produce' function.
+        producers <- forM lst $ \producer -> liftIO $ do
+            Async.async $ runExceptT $ (streamAction producer) noConsume produce
+        -- Finish action when ALL producers are done.
+        liftIO $ mapM_ Async.wait producers
+
+-- | Fork data to all consumers on the list.
+forkStreams :: [Consumer a] -> Consumer a
+forkStreams lst = mkConsumer action where
+    action consume = do
+        branches <- forM lst $ \consumer -> do
+            -- need additional channel for each consumer
+            chan <- liftIO $ newTBQueueIO 1
+            -- need also a producer that would forward
+            -- messages from the channel to the original consumer
+            let producer = mkProducer $ \produce -> forever $ do
+                    val <- liftIO $ atomically $ readTBQueue chan
+                    produce val
+            a <- liftIO $ Async.async $ runStream $ producer >-> consumer
+            return (chan, a)
+
+        let dispatch = do
+                x <- consume
+                writers <- forM branches $ \(chan,_a) -> do
+                    liftIO $ Async.async $ atomically $ writeTBQueue chan x
+                writersDone <- liftIO $ Async.async $ mapM_ Async.wait writers
+                someTermination <- liftIO $ Async.async $ Async.waitAny $
+                    (snd <$> branches)
+                rv <- liftIO $ Async.waitEitherCancel
+                    someTermination
+                    writersDone
+                case rv of
+                    -- message is fully consumed, make another iterration
+                    Right _ -> dispatch
+
+                    -- in case of any consumer termination,
+                    -- we are done with dispatch, just do the cleanup
+                    Left _ -> do
+                        liftIO $ mapM_ Async.cancel (snd <$> branches)
+                        liftIO $ mapM_ Async.cancel writers
+        dispatch
 
 -- | Utils
 
@@ -168,20 +209,50 @@ filter f = mkPipe $ \consume produce -> forever $ do
     when (f msg) $ produce msg
 
 -- | Perform some action when original stream component terminates on it's own.
-onTerminate :: IO () -> Streaming a b -> Streaming a b
+onTerminate :: StreamT () -> Streaming a b -> Streaming a b
 onTerminate act s = Streaming action where
     action consume produce = do
-        a <- Control.Concurrent.Async.async $
+        a <- liftIO $ Async.async $ runExceptT $
             (streamAction s) consume produce
-        rv <- Control.Concurrent.Async.waitCatch a
+        rv <- liftIO $ Async.waitCatch a
         -- perform required action, then re-throw exception if any
         act
         case rv of
-            Left e -> throw e
+            Left e -> Control.Exception.throw e
             Right _ -> return ()
 
 -- | Consumer that just consumes all input.
 drain :: Consumer a
 drain = mkConsumer $ \consume -> forever $ do
     consume >> return ()
+
+-- | Produce each element from foldable.
+fromFoldable :: Foldable t => t a -> Producer a
+fromFoldable lst = mkProducer $ \produce -> do
+    mapM_ produce lst
+
+-- | Stream version of bracket.
+bracket ::
+    StreamT a
+    -> (a -> StreamT b)
+    -> (a -> StreamT c)
+    -> StreamT c
+bracket acquire release act =
+    liftIO $ Control.Exception.bracket acquire' release' act'
+  where
+    acquire' = do
+        rv <- runExceptT acquire
+        case rv of
+            Left _ -> fail "acquire exception"
+            Right val -> return val
+    release' res = do
+        rv <- runExceptT $ release res
+        case rv of
+            Left _ -> fail "release exception"
+            Right val -> return val
+    act' res = do
+        rv <- runExceptT $ act res
+        case rv of
+            Left _ -> fail "action exception"
+            Right val -> return val
 

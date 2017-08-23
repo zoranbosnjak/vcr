@@ -8,7 +8,6 @@
 module Buffer where
 
 import qualified Control.Concurrent.Async as Async
-import           Control.Exception (bracket)
 import           Control.Monad
 import qualified Data.Sequence as DS
 import           Data.Foldable (toList)
@@ -78,7 +77,8 @@ activeThrashold (Threshold a b c) = or [isJust a, isJust b, isJust c]
 -- Threshold must be valid, that is: some limit set.
 holdBuffer :: (Enc.HasSize a) => Threshold -> Pipe a [a]
 holdBuffer th = mkPipe action where
-
+    action = undefined
+    {-
     acquire consume = do
         buffer <- newTVarIO DS.empty
         cnt <- newTVarIO (0::Int)
@@ -122,6 +122,7 @@ holdBuffer th = mkPipe action where
                 _ <- produce items
                 loop
         loop
+    -}
 
 -- | Concatinate incomming items.
 concatinated :: (Monoid a) => Pipe [a] a

@@ -7,8 +7,8 @@
 
 module Udp where
 
+import           Control.Monad.IO.Class (liftIO)
 import           Control.Monad
-import           Control.Exception (bracket)
 import qualified Data.ByteString as BS
 import           Data.Monoid ((<>))
 import qualified Network.Socket as Net
@@ -80,10 +80,11 @@ rxUdp (RxSocket sock) = NB.recvFrom sock (2^(16::Int))
 -- | UDP bytestring producer.
 udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr)
 udpReader addr = mkProducer action where
-    acquire = rxSocket addr
-    release = closeRxSock
+    acquire = liftIO $ rxSocket addr
+    release = liftIO . closeRxSock
     action produce = bracket acquire release $ \sock -> forever $ do
-        rxUdp sock >>= produce
+        msg <- liftIO $ rxUdp sock
+        produce msg
 
 -- | Close Rx socket.
 closeRxSock :: RxSocket -> IO ()

@@ -8,9 +8,8 @@
 module CmdReplay (cmdReplay) where
 
 -- Standard imports.
+import           Control.Monad.IO.Class (liftIO)
 import           Control.Monad
-import           Pipes
-import qualified Pipes.Prelude as PP
 import           Options.Applicative ((<**>)) -- , (<|>))
 import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(INFO, NOTICE))
@@ -25,6 +24,7 @@ import qualified Server
 import qualified File
 import qualified Encodings
 import qualified Udp
+import           Streams
 
 {-
     - GUI or txt
@@ -79,36 +79,38 @@ runCmd :: Options -> C.VcrOptions -> IO ()
 runCmd opts vcrOpts = do
     logM INFO $
         "replay, opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
-    runEffect $ source >-> cleanup >-> eventFilter >-> timing >-> destination
+
+    runStream $ source >-> cleanup >-> eventFilter >-> timing >-> destination
 
   where
 
     -- read from file, decode data
     source =
-        File.fileReader (File.FileStore "test1.json")
+        File.fileReaderChunks 32752 (File.FileStore "test1.json")
         >-> Encodings.fromByteString (100*1024)
                 (Encodings.EncJSON Encodings.JSONCompact)
 
     -- log errors if any
-    cleanup = forever $ do
-        result <- await
+    cleanup = mkPipe $ \consume produce -> forever $ do
+        result <- consume
         case result of
-            Left e -> lift $ logM NOTICE $ "error: " ++ show e
-            Right a -> yield a
+            Left e -> liftIO $ logM NOTICE $ "error: " ++ show e
+            Right a -> produce a
 
     -- pass if channel name has 3 chars or more
-    eventFilter = PP.filter $ \evt ->
+    eventFilter = Streams.filter $ \evt ->
         let Event.Channel ch = Event.eChannel evt
         in length ch >= 3
 
     -- insert some delay between frames
-    timing = forever $ do
-        msg <- await
-        lift $ threadDelay . round . (1000000*) $ (0.3 :: Double)
-        yield msg
+    timing = mkPipe $ \consume produce -> forever $ do
+        msg <- consume
+        liftIO $ threadDelay . round . (1000000*) $ (0.3 :: Double)
+        produce msg
 
     -- send to stdout
     destination =
         Encodings.toByteString (Encodings.EncJSON Encodings.JSONCompact)
-        >-> File.fileWriter (File.FileStore "-") Nothing Nothing
+        >-> File.fileWriter (File.FileStore "-") Nothing
+        >-> drain
 

@@ -9,11 +9,12 @@ module Buffer where
 
 import qualified Control.Concurrent.Async as Async
 import           Control.Monad
+import           Control.Monad.IO.Class (liftIO)
 import qualified Data.Sequence as DS
 import           Data.Foldable (toList)
 import           Data.Maybe (isJust)
 import           Control.Concurrent.STM as STM
-
+import           Control.Monad.Trans.Except
 import           Data.Monoid ((<>))
 import qualified Options.Applicative as Opt
 
@@ -77,52 +78,68 @@ activeThrashold (Threshold a b c) = or [isJust a, isJust b, isJust c]
 -- Threshold must be valid, that is: some limit set.
 holdBuffer :: (Enc.HasSize a) => Threshold -> Pipe a [a]
 holdBuffer th = mkPipe action where
-    action = undefined
-    {-
-    acquire consume = do
-        buffer <- newTVarIO DS.empty
-        cnt <- newTVarIO (0::Int)
-        bytes <- newTVarIO (0::Integer)
-        reader <- Async.async $ forever $ do
-            msg <- consume
-            atomically $ do
-                modifyTVar buffer (\s -> s DS.|> msg)
-                modifyTVar cnt succ
-                modifyTVar bytes (+ (Enc.sizeOf msg))
-        return (buffer, cnt, bytes, reader)
+    action consume produce =
+      bracket (acquire consume produce) release $
+        \(reader, writer) -> do
+            _ <- liftIO $ Async.waitEitherCancel reader writer
+            return ()
 
-    release (_,_,_,reader) = Async.cancel reader
+    acquire consume produce = do
+        liftIO $ C.check (thresholdValid th)
+            "this buffer would wait indefinetly"
+        buffer <- liftIO $ newTVarIO DS.empty
+        cnt <- liftIO $ newTVarIO (0::Int)
+        bytes <- liftIO $ newTVarIO (0::Integer)
 
-    action consume produce = bracket (acquire consume) release $
-      \(buffer,cnt,bytes,_) -> do
-        C.check (thresholdValid th) "this buffer would wait indefinetly"
-        let loop = do
-                timeout <- case thSeconds th of
-                    Nothing -> newTVarIO False
-                    Just val -> registerDelay $ (round val) * 1000000
-                items <- atomically $ do
-                    c1 <- case thLength th of
-                        Nothing -> return False
-                        Just val -> (>= val) <$> readTVar cnt
-                    c2 <- case thBytes th of
-                        Nothing -> return False
-                        Just val -> (>= val) <$> readTVar bytes
-                    c3 <- readTVar timeout
-                    case (c1 || c2 || c3) of
-                        False -> retry
-                        True -> do
-                            content <- readTVar buffer
-                            case DS.null content of
-                                True -> retry
-                                False -> do
-                                    writeTVar buffer DS.empty
-                                    writeTVar cnt 0
-                                    writeTVar bytes 0
-                                    return $ toList content
-                _ <- produce items
-                loop
-        loop
-    -}
+        -- read using consume and put to intermediate buffer
+        reader <- liftIO $ Async.async $ do
+            let loop = do
+                    eMsg <- runExceptT consume
+                    case eMsg of
+                        Left _ -> return ()
+                        Right msg -> do
+                            atomically $ do
+                                modifyTVar buffer (\s -> s DS.|> msg)
+                                modifyTVar cnt succ
+                                modifyTVar bytes (+ (Enc.sizeOf msg))
+            loop
+
+        -- write from intermediate buffer via produce function
+        writer <- liftIO $ Async.async $ do
+            let loop = do
+                    timeout <- case thSeconds th of
+                        Nothing -> newTVarIO False
+                        Just val -> registerDelay $ (round val) * 1000000
+                    items <- atomically $ do
+                        c1 <- case thLength th of
+                            Nothing -> return False
+                            Just val -> (>= val) <$> readTVar cnt
+                        c2 <- case thBytes th of
+                            Nothing -> return False
+                            Just val -> (>= val) <$> readTVar bytes
+                        c3 <- readTVar timeout
+                        case (c1 || c2 || c3) of
+                            False -> retry
+                            True -> do
+                                content <- readTVar buffer
+                                case DS.null content of
+                                    True -> retry
+                                    False -> do
+                                        writeTVar buffer DS.empty
+                                        writeTVar cnt 0
+                                        writeTVar bytes 0
+                                        return $ toList content
+                    eVal <- runExceptT $ produce items
+                    case eVal of
+                        Left _ -> return ()
+                        Right _ -> loop
+            loop
+
+        return (reader, writer)
+
+    release (reader, writer) = liftIO $ do
+        Async.cancel reader
+        Async.cancel writer
 
 -- | Concatinate incomming items.
 concatinated :: (Monoid a) => Pipe [a] a

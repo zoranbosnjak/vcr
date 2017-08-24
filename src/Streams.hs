@@ -107,19 +107,23 @@ type Effect = Streaming () ()
             -- run left and right actions and wait for any to terminate
             left  <- Async.async $ runExceptT (act1 consume produce1)
             right <- Async.async $ runExceptT (act2 consume2 produce)
-            rv <- Async.waitEither left right
-            case rv of
-                Left _ -> do
+            rv <- Async.waitEitherCatch left right
+            result <- case rv of
+                Left result -> do
                     -- If a producer terminates, indicate end of
                     -- data, then wait for the consumer to terminate
                     -- on it's own.
                     atomically $ writeTBQueue chan Nothing
                     _ <- Async.wait right
-                    return ()
+                    return result
                     -- If a consumer terminates, cancel the producer.
-                Right _ -> do
+                Right result -> do
                     Async.cancel left
-                    return ()
+                    return result
+            -- rethrow exception if any
+            case result of
+                Left e -> Control.Exception.throw e
+                Right _ -> return ()
 
 -- | Run a stream.
 runStream :: Effect -> IO ()
@@ -215,11 +219,15 @@ onTerminate act s = Streaming action where
         a <- liftIO $ Async.async $ runExceptT $
             (streamAction s) consume produce
         rv <- liftIO $ Async.waitCatch a
-        -- perform required action, then re-throw exception if any
-        act
         case rv of
-            Left e -> Control.Exception.throw e
-            Right _ -> return ()
+            -- exception
+            Left e -> do
+                act
+                Control.Exception.throw e
+            -- function returned something
+            Right (Right _) -> act
+            -- endo of data (do not call action)
+            Right (Left ()) -> return ()
 
 -- | Consumer that just consumes all input.
 drain :: Consumer a

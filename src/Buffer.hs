@@ -102,6 +102,7 @@ holdBuffer th = mkPipe action where
                                 modifyTVar buffer (\s -> s DS.|> msg)
                                 modifyTVar cnt succ
                                 modifyTVar bytes (+ (Enc.sizeOf msg))
+                            loop
             loop
 
         -- write from intermediate buffer via produce function

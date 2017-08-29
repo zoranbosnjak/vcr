@@ -2,7 +2,6 @@
 module TestStreams (testStreams) where
 
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad
 import Control.Exception
 import Data.Foldable
 import Data.IORef

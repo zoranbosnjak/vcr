@@ -9,7 +9,6 @@ module CmdReplay (cmdReplay) where
 
 -- Standard imports.
 import           Control.Monad.IO.Class (liftIO)
-import           Control.Monad
 import           Options.Applicative ((<**>)) -- , (<|>))
 import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(INFO, NOTICE))

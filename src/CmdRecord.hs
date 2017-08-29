@@ -16,7 +16,6 @@
 module CmdRecord (cmdRecord) where
 
 -- standard imports
-import           Control.Monad
 import           Control.Monad.IO.Class (liftIO)
 import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt

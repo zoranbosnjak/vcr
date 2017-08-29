@@ -8,7 +8,6 @@
 module Udp where
 
 import           Control.Monad.IO.Class (liftIO)
-import           Control.Monad
 import qualified Data.ByteString as BS
 import           Data.Monoid ((<>))
 import qualified Network.Socket as Net

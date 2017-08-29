@@ -10,7 +10,7 @@
 module File where
 
 import           Control.Exception (try, SomeException)
-import           Control.Monad
+import           Control.Monad hiding (forever)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Options.Applicative as Opt
 import           Data.Monoid ((<>))

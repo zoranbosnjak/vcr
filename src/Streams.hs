@@ -7,7 +7,7 @@
 -- > import Streams
 -- > import Control.Concurrent
 -- > import Control.Exception
--- > import Control.Monad
+-- > import Control.Monad hiding (forever)
 -- > import Control.Monad.IO.Class
 -- > import System.IO
 --
@@ -63,7 +63,7 @@
 module Streams
 where
 
-import           Control.Monad
+import           Control.Monad hiding (forever)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Control.Exception
 import           Control.Concurrent.STM
@@ -83,6 +83,11 @@ type Producer a = Streaming () a
 type Consumer a = Streaming a ()
 type Pipe a b = Streaming a b
 type Effect = Streaming () ()
+
+-- | Forever implementation from Control.Monad in combination with transformers
+-- has some problem with memory leak, use this version instead.
+forever :: Monad m => m a -> m b
+forever act = act >> forever act
 
 -- | Chain 2 streaming components using TBQueue and async.
 (>->) :: Streaming a b -> Streaming b c -> Streaming a c

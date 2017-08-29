@@ -8,7 +8,6 @@
 module Buffer where
 
 import qualified Control.Concurrent.Async as Async
-import           Control.Monad
 import           Control.Monad.IO.Class (liftIO)
 import qualified Data.Sequence as DS
 import           Data.Foldable (toList)

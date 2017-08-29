@@ -15,7 +15,7 @@ cmdServe = undefined
 {-
 import Control.Concurrent
 import Control.Concurrent.Async
-import Control.Monad
+import Control.Monad hiding (forever)
 import Control.Monad.Trans
 import Control.Monad.Except
 import Data.Aeson

@@ -8,24 +8,24 @@
 module CmdArchive (cmdArchive) where
 
 -- Standard imports.
-import qualified Control.Exception    as CE
-import           Control.Monad           (forM_)
+--import qualified Control.Exception    as CE
+--import           Control.Monad           (forM_)
+import           Control.Monad.IO.Class (liftIO)
+{-
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString      as BS
 import qualified Data.ByteString.Lazy as BSL
-import           Network.HTTP.Client  as NC
-import qualified Network.HTTP.Types.Method
+-}
+--import           Network.HTTP.Client  as NC
+--import qualified Network.HTTP.Types.Method
 import           Options.Applicative     ((<**>), (<|>))
 import qualified Options.Applicative  as Opt
-import           System.IO
-import           System.Log.Logger       (Priority(INFO, DEBUG)) -- ,NOTICE))
+--import           System.IO
+import           System.Log.Logger       (Priority(INFO, DEBUG, NOTICE))
 -- import Control.Exception as CE
 -- import Data.Time (UTCTime(UTCTime))
 -- import Network.HTTP.Client.Conduit
-import qualified Data.Maybe as Maybe
-
-import           Pipes
-import qualified Pipes.Prelude as PP
+-- import qualified Data.Maybe as Maybe
 
 -- Local imports.
 import qualified Common as C
@@ -33,11 +33,10 @@ import qualified Event
 import qualified Server as Srv
 import qualified File
 import qualified Encodings
+import           Streams
 -- import Test.QuickCheck hiding (output)
 
-import Control.Concurrent
-
-
+-- import Control.Concurrent
 
 -- | The exported function implementing the entire functionality of
 -- the archiver.  For more information see the documentation at the
@@ -45,7 +44,6 @@ import Control.Concurrent
 cmdArchive :: Opt.ParserInfo (C.VcrOptions -> IO ())
 cmdArchive = Opt.info ((runCmd <$> options) <**> Opt.helper)
     (Opt.progDesc "Event archiver")
-
 
 
 -- | Archiver specific command options.
@@ -112,19 +110,48 @@ runCmd opts vcrOpts = do
     C.logM INFO $
         "archive: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
 
-    case (optInput opts,optOutput opts) of
-      (IFile inpEnc inpFS, OFile outEnc outFS) ->
-          copyFromFileToFile (inpEnc,inpFS) (outEnc,outFS)
-      (IServer inpSC, OFile outEnc outFS) ->
-          copyFromHTTPToFile inpSC (outEnc,outFS)
-      _ ->
-          C.throw "TODO"
+    runStream $ source >-> trace >-> Streams.filter flt >-> target
 
     C.logM INFO $
         "archive: done"
 
+  where
 
+    -- get events
+    source = case optInput opts of
+        -- TODO:
+        --  - configurable chunk size with default value
+        --  - configurable max item size
+        IFile inpEnc inpFS ->
+            File.fileReaderChunks 32752 (File.FileStore $ File.filePath inpFS)
+            >-> Encodings.fromByteString (100*1024) inpEnc
 
+        IServer _inpSC -> undefined
+
+    -- log errors and progress
+    trace = mkPipe $ \consume produce -> forever $ do
+        result <- consume
+        case result of
+            Left e -> do
+                liftIO $ C.logM NOTICE $ "Cannot decode an event." ++ show e
+            Right event -> do
+                liftIO $ C.logM DEBUG $
+                    "archive: event " ++ show (Event.eUtcTime event)
+                produce event
+
+    -- TODO: implement filter function: Event -> Bool,
+    -- based on given arguments
+    flt _event = True
+
+    -- store events
+    target = case optOutput opts of
+        OFile outEnc outFS ->
+            Encodings.toByteString outEnc
+            >-> File.fileWriter outFS Nothing
+            >-> drain -- ignore rotate information
+        OServer _outSC -> undefined
+
+{-
 -- | Copies one file of events to another file of events, possibly in
 -- a different format.
 -- Throws an exception
@@ -355,4 +382,5 @@ split fmt s = case sequence (check <$> result) of
     check (Right a) = Just a
     -- feed input string to the parsing pipe and collect results to the list.
     result = PP.toList (Pipes.yield s >-> Encodings.fromByteString maxBound fmt)
+-}
 

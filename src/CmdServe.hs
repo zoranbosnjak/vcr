@@ -10,6 +10,7 @@
 
 module CmdServe (cmdServe) where
 
+cmdServe :: a
 cmdServe = undefined
 
 {-

@@ -47,7 +47,30 @@ udpInOptions = UdpIn
         ))
 
 udpOutOptions :: Opt.Parser UdpOut
-udpOutOptions = undefined
+udpOutOptions = UdpOut
+    <$> Opt.strOption
+        ( Opt.long "ip"
+       <> Opt.metavar "IP"
+       <> Opt.help "IP address (destination or local in case of multicast)"
+        )
+    <*> Opt.strOption
+        ( Opt.long "port"
+       <> Opt.metavar "PORT"
+       <> Opt.help "Port number"
+        )
+    <*> Opt.optional mcast
+  where
+    mcast = (,)
+        <$> Opt.strOption
+            ( Opt.long "multicast"
+           <> Opt.metavar "IP"
+           <> Opt.help "Destination multicast IP address"
+            )
+        <*> Opt.optional (Opt.option Opt.auto
+            ( Opt.long "ttl"
+           <> Opt.metavar "TTL"
+           <> Opt.help "IP TTL value"
+            ))
 
 -- | Open RX socket and join to multicast if required.
 rxSocket :: UdpIn -> IO RxSocket
@@ -110,15 +133,14 @@ txSocket (UdpOut ip port mMcast) = do
 txUdp :: TxSocket -> BS.ByteString -> IO ()
 txUdp (TxSocket sock dst) s = NB.sendAllTo sock s dst
 
-{-
 -- | UDP bytestring consumer.
-udpWriter :: UdpOut -> Consumer BS.ByteString IO ()
-udpWriter addr = do
-    sock <- lift $ txSocket addr
-    forever $ do
-        s <- await
-        lift $ txUdp sock s
--}
+udpWriter :: UdpOut -> Consumer BS.ByteString
+udpWriter addr = mkConsumer action where
+    action consume = bracket acquire release $ \sock -> forever $ do
+        s <- consume
+        liftIO $ txUdp sock s
+    acquire = liftIO $ txSocket addr
+    release = liftIO . closeTxSock
 
 -- | Close Tx socket.
 closeTxSock :: TxSocket -> IO ()

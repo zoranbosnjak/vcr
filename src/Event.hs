@@ -211,3 +211,8 @@ now = (,)
     <$> (UtcTime <$> Data.Time.getCurrentTime)
     <*> (MonoTime <$> System.Clock.getTime System.Clock.Boottime)
 
+-- | Convert monotonic time to seconds.
+monoTimeToSeconds :: MonoTime -> Double
+monoTimeToSeconds (MonoTime t) =
+    (/ (10^(9::Int))) $ fromInteger $ System.Clock.toNanoSecs t
+

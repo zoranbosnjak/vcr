@@ -123,7 +123,7 @@ runCmd opts vcrOpts = do
         --  - configurable chunk size with default value
         --  - configurable max item size
         IFile inpEnc inpFS ->
-            File.fileReaderChunks 32752 (File.FileStore $ File.filePath inpFS)
+            File.fileReaderChunks 32752 inpFS
             >-> Encodings.fromByteString (100*1024) inpEnc
 
         IServer _inpSC -> undefined

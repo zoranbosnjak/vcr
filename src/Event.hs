@@ -115,7 +115,7 @@ sourceIdOptions = SourceId <$> Opt.strOption
    <> Opt.help "Recorder identifier"
     )
 
-newtype UtcTime = UtcTime Data.Time.UTCTime
+newtype UtcTime = UtcTime { unUtc :: Data.Time.UTCTime}
     deriving (Generic, Eq, Show, Read, Ord)
 
 instance Arbitrary UtcTime where
@@ -133,6 +133,9 @@ instance Arbitrary UtcTime where
 
 newtype MonoTime = MonoTime System.Clock.TimeSpec
     deriving (Generic, Eq, Show, Read)
+
+monoTimeToNanoSecs :: MonoTime -> Integer
+monoTimeToNanoSecs (MonoTime t) = System.Clock.toNanoSecs t
 
 instance Arbitrary MonoTime where
     arbitrary = do

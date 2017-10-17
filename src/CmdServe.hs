@@ -7,284 +7,276 @@
 
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ExistentialQuantification #-}
 
 module CmdServe (cmdServe) where
 
-cmdServe :: a
-cmdServe = undefined
+-- Standard imports.
+import           Control.Concurrent.Async
+import qualified Control.Exception
+import           Control.Monad hiding (forever)
+import           Control.Monad.IO.Class (liftIO)
+import           Options.Applicative ((<**>))
+import qualified Options.Applicative as Opt
+import           System.Log.Logger (Priority(DEBUG, INFO, NOTICE))
+import           Control.Concurrent (threadDelay)
+import           Data.Monoid
+import           Database.HDBC as DB
+import           Database.HDBC.Sqlite3 (connectSqlite3)
+import           Database.HDBC.PostgreSQL (connectPostgreSQL)
+import qualified Data.Text
+import qualified Data.ByteString as BS
+import           Text.Read (readMaybe)
+import           Network.Wai
+import qualified Network.Wai.Handler.Warp as Warp
+import           Network.HTTP.Types
 
-{-
-import Control.Concurrent
-import Control.Concurrent.Async
-import Control.Monad hiding (forever)
-import Control.Monad.Trans
-import Control.Monad.Except
-import Data.Aeson
-import Data.List
-import Data.Monoid
-import Database.HDBC as DB
-import Database.HDBC.Sqlite3 (connectSqlite3)
-import Network.HTTP.Types
-import Network.Wai.Handler.Warp
-import Options.Applicative
-import Web.Scotty as W
-import System.Clock
-import System.Log.Logger (Priority(..))
+-- local imports
+import           Common (logM)
+import qualified Common as C
+import qualified Event
+--import qualified Server
+--import qualified File
+import qualified Encodings
+import           Streams
 
-import Action
-import Event
-import IO
+cmdServe :: Opt.ParserInfo (C.VcrOptions -> IO ())
+cmdServe = Opt.info ((runCmd <$> CmdServe.options) <**> Opt.helper)
+    (Opt.progDesc "Server part of the recorder")
 
--- TODO: get all about Event from the module, eg. toNanosecs
-
-{-
-    - serve instanca tudi rabi session ID
-    - rabi odgovoriti/poročati na zahtevek za trenutno
-      konfiguracijo oz. njen hash
--}
-
-cmdServe :: ParserInfo (Action ())
-cmdServe = info (helper <*> (runCmd <$> CmdServe.options))
-    (progDesc "server part of the recorder")
-
+type Ip = String
+type Port = Int
 type RequestedReplicas = Int
-type ActualReplicas = Int
-data ConnStatus = ConnAlive | ConnDead
+--type ActualReplicas = Int
 
 data Options = Options
     { optServe :: [Server]
     , optStore :: [Store]
     , optReplicas :: RequestedReplicas
+    , optPrepare :: Bool
     } deriving (Eq, Show)
 
+options :: Opt.Parser CmdServe.Options
+options = CmdServe.Options
+    <$> Opt.some server
+    <*> Opt.some store
+    <*> Opt.option Opt.auto
+        (Opt.short 'n' <> Opt.long "replicas"
+            <> Opt.help "requested number of replicas before acknowledge write"
+            <> Opt.value 1)
+    <*> Opt.switch
+        (Opt.long "bootstrap"
+            <> Opt.help "create database tables and exit")
+
 data Server
-    = ServerHttp Ip Int
+    = ServerHttp Ip CmdServe.Port
     deriving (Eq, Show)
+
+server :: Opt.Parser Server
+server = Opt.subparser $
+    Opt.command "server"
+        (Opt.info (Opt.helper <*> level2) (Opt.progDesc "server definition"))
+  where
+    level2 = Opt.subparser $
+        Opt.command "http" (Opt.info (Opt.helper <*> http) Opt.idm)
+    http = ServerHttp
+        <$> Opt.argument Opt.str (Opt.metavar "IP" <> Opt.help "IP address")
+        <*> Opt.argument Opt.auto
+            (Opt.metavar "PORT" <> Opt.help "UDP port number")
 
 data Store
-    = StoreSQLite3 FilePath
-    | StorePostgreSQL String
-    -- | StoreRemote Http   -- permanent store to a remote server (cascade)
-    -- = StoreMemory Integer   -- store up to N events in memory (for test)
-    -- | StoreSql Address KeepDays -- permanent store
+    = StoreSQLite3 FilePath     -- sqlite3 file
+    | StorePostgreSQL String    -- postgresql database
+    -- | StoreRemote Http          -- remote server (cascade)
+    -- | StoreMemory Integer       -- in memory up to N events (for test)
     deriving (Eq, Show)
 
-options :: Parser CmdServe.Options
-options = CmdServe.Options
-    <$> some server
-    <*> some store
-    <*> option auto
-        (short 'n' <> long "replicas"
-            <> help "requested number of replicas before acknowledge write"
-            <> value 1)
+data Connector = forall c. (IConnection c) => Connector String (IO c)
 
-server :: Parser Server
-server = subparser $
-    command "server" (info (helper <*> level2) (progDesc "server definition"))
+store :: Opt.Parser Store
+store = Opt.subparser $
+    Opt.command "store"
+        (Opt.info (Opt.helper <*> level2) (Opt.progDesc "store definition"))
   where
-    level2 = subparser $
-        command "http" (info (helper <*> http) idm)
-    http = ServerHttp
-        <$> argument str (metavar "IP" <> help "IP address")
-        <*> argument auto (metavar "PORT" <> help "UDP port number")
-
-store :: Parser Store
-store = subparser $
-    command "store" (info (helper <*> level2) (progDesc "store definition"))
-  where
-    level2 = subparser
-        ( command "sqlite3" (info (helper <*> sqlite3) idm)
-       <> command "postgres" (info (helper <*> postgres) idm)
+    level2 = Opt.subparser
+        ( Opt.command "sqlite3" (Opt.info (Opt.helper <*> sqlite3) Opt.idm)
+       <> Opt.command "postgres" (Opt.info (Opt.helper <*> postgres) Opt.idm)
         )
     sqlite3 = StoreSQLite3
-        <$> argument str (metavar "PATH" <> help "File path.")
+        <$> Opt.argument Opt.str (Opt.metavar "PATH" <> Opt.help "File path.")
     postgres = StorePostgreSQL
-        <$> argument str (metavar "STRING" <> help "Connection string.")
+        <$> Opt.argument Opt.str
+            (Opt.metavar "STRING" <> Opt.help "Connection string.")
 
-runCmd :: CmdServe.Options -> Action ()
-runCmd opts = do
-    logM "init" INFO $ show opts
-    tid <- liftIO $ myThreadId
+connector :: Store -> Connector
+connector dbType = case dbType of
+    StoreSQLite3 path ->
+        Connector ("sqlite " ++ path) (connectSqlite3 path)
+    StorePostgreSQL addr ->
+        Connector ("postgreSQL " ++ addr) (connectPostgreSQL addr)
 
-    assert (optReplicas opts <= length (optStore opts))
+-- | Run command.
+runCmd :: CmdServe.Options -> C.VcrOptions -> IO ()
+runCmd opts vcrOpts = do
+    logM INFO $
+        "serve, opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
+
+    C.check (optReplicas opts <= length (optStore opts))
         "number of requested replicas must be <= available database connections"
 
-    -- connect to databases, (re)create tables
-    connections <- forM (optStore opts) $ \i -> do
-        conn <- case i of
-            StoreSQLite3 path -> liftIO $ connectSqlite3 path
-            StorePostgreSQL _s -> undefined
-        _ <- lift $ createTables conn
-        return conn
+    let connectors = connector <$> (optStore opts)
 
-    -- start servers
-    servers <- forM (optServe opts) $ \i -> liftIO $ async $ case i of
-        ServerHttp ip port ->
-            serveHttp tid ip port connections (optReplicas opts)
+    case optPrepare opts of
+        -- (re)create tables
+        True -> do
+            logM INFO "preparing databases..."
+            forM_ connectors $ flip withDatabase createTables
 
-    -- all threads shall remain running
-    _ <- liftIO $ waitAnyCatchCancel servers
-    throw "process terminated"
+        -- normal operation (assume tables are prepared)
+        False -> do
+            logM INFO "server..."
+            -- start servers
+            servers <- forM (optServe opts) $ \i -> liftIO $ async $ case i of
+                ServerHttp _ip port -> Warp.run port $
+                    app connectors (optReplicas opts)
 
--- TODO: runSql wrapper, check and return connection status
+            -- all threads shall remain running
+            _ <- liftIO $ waitAnyCatchCancel servers
+            C.throw "server process terminated"
+
+-- | Connect to a database, run some action, auto commit and disconnect.
+withDatabase :: Connector -> (ConnWrapper -> IO a) -> IO a
+withDatabase (Connector _name connect) f =
+    Control.Exception.bracket acquire disconnect action
+  where
+    acquire = ConnWrapper <$> connect
+    action conn = withTransaction conn f
 
 -- | Create database tables.
-createTables :: (IConnection conn) => conn -> IO ConnStatus
-createTables conn = do
-    _ <- DB.run conn (unwords
-        [ "CREATE TABLE IF NOT EXISTS events"
-        , "( hash VARCHAR(255) NOT NULL PRIMARY KEY ON CONFLICT REPLACE"
-        , ", ch VARCHAR(255)"
-        , ", srcId VARCHAR(255)"
-        , ", utcTime DATETIME"
-        , ", sesId VARCHAR(255)"
-        , ", monoTime BIGINT"
-        , ", value BLOB"
-        , ")"
-        ]) []
-    commit conn
-    return ConnAlive
+createTables :: (IConnection conn) => conn -> IO Integer
+createTables conn = DB.run conn (unwords
+    [ "CREATE TABLE IF NOT EXISTS events"
+    , "( ch VARCHAR(255)"
+    , ", srcId VARCHAR(255)"
+    , ", utcTime DATETIME"
+    , ", sesId VARCHAR(255)"
+    , ", monoTime BIGINT"
+    , ", value BLOB"
+    , ", constraint events_pk primary key (ch, sesId, monoTime)"
+    , ")"
+    ]) []
 
--- | Deposit events to a database.
-deposit :: (IConnection conn) => conn -> [Event] -> IO ConnStatus
-deposit conn events = do
-    mapM_ saveEvent events
-    commit conn
-    return ConnAlive
-  where
-    saveEvent e = DB.run conn "INSERT INTO events VALUES (?,?,?,?,?,?,?)"
-        [ toSql $ show $ hash e
-        , toSql $ show $ eChannel e
-        , toSql $ show $ eSourceId e
-        , toSql $ eUtcTime e
-        , toSql $ show $ eSessionId e
-        , toSql $ toNanoSecs $ eMonoTime e
-        , toSql $ eValue e
-        ]
+-- | Deposit event to a database.
+deposit :: (IConnection conn) => conn -> Event.Event -> IO Integer
+deposit conn event = DB.run conn
+    "INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?)"
+    [ toSql $ show $ Event.eChannel event
+    , toSql $ show $ Event.eSourceId event
+    , toSql $ Event.unUtc $ Event.eUtcTime event
+    , toSql $ show $ Event.eSessionId event
+    , toSql $ Event.monoTimeToNanoSecs $ Event.eMonoTime event
+    , toSql $ Event.eValue event
+    ]
 
-scOpts :: ThreadId -> Int -> W.Options
-scOpts _parent port =
-    let change = (setPort port) -- TODO: . (setOnException quit)
-        {-
-        quit req e = do
-            _ <- runAction $ logM "web" ERROR $ show e
-            killThread parent
-        -}
-    in W.Options { verbose = 0 , settings = change defaultSettings }
+app :: [Connector] -> Int -> Application
+app connectors _replicas request respond = withLog go where
 
-serveHttp :: (IConnection c) =>
-    ThreadId -> Ip -> RequestedReplicas -> [c] -> Int -> IO ()
-serveHttp parent _ip port conns replicas = scottyOpts (scOpts parent port) $ do
-    let on uri method act = addroute method uri $ do
-            -- this is required for testing
-            addHeader "Access-Control-Allow-Origin" "*"
-            eval <- runAction act
-            (rc, obj, level, s) <- case eval of
-                Left (rc, obj) -> do
-                    return (rc, obj, NOTICE, "error: ")
-                Right (rc, obj) -> return (rc, obj, DEBUG, "")
-            status rc
-            msg  <- do
-                req <- request
-                p <- params
-                body' <- body
-                return $ s
-                    ++ "request: " ++ show req
-                    ++ ", params: " ++ show p
-                    ++ ", body: " ++ show body'
-                    ++ " -> "
-                    ++ "return code: " ++ show rc
-            _ <- lift $ runAction $ logM "web" level msg
-            obj
+    threadDelaySec = threadDelay . round . (1000000*)
 
-        -- run action or throw error
-        act .! e = do
-            mval <- lift act
-            case mval of
-                Nothing -> throwError e
-                Just val -> return val
+    -- response check
+    go ["ping"] GET = respond $ responseLBS
+        status200
+        [("Content-Type", "text/plain")]
+        "pong"
 
-        onHead path = on path HEAD
-        onGet path = on path GET
-        onPut path = on path PUT
-        onDelete path = on path DELETE
+   -- simulate processing delay
+    go ["delay", s] GET = case readMaybe (Data.Text.unpack s) of
+        Nothing -> respond $ responseLBS
+            status400
+            [("Content-Type", "text/plain")]
+            "unable to decode delay value"
+        Just (val::Double) -> do
+            threadDelaySec val
+            respond $ responseLBS
+                status200
+                [("Content-Type", "text/plain")]
+                "ok"
 
-        ok = (status200, W.text "OK")
-        noDecode = (status400, W.text "unable to decode body")
-        --noResource = (status404, W.text "not found")
+    go ["events"] HEAD = undefined
 
-    -- quick response check
-    "/ping" `onGet` return (status200, W.text "pong")
-
-    -- simulate processing delay
-    "/delay/:d" `onGet` do
-        let threadDelaySec = threadDelay . round . (1000000*)
-
-        dt :: Double <- lift $ param "d"
-        liftIO $ threadDelaySec dt
-        return ok
-
-    -- /events methods
-
-    "/events" `onHead` do
-        undefined
-
-    "/events" `onGet` do
-        undefined
+    go ["events"] GET = undefined
 
     -- TODO: handle different content types
-    "/events" `onPut` do
-        events :: [Event] <- (fmap decode body) .! noDecode
-        n <- liftIO $ safeDeposit conns replicas events
-        case n >= replicas of
-            True -> return ok
-            False -> return (status503,
-                W.text "unable to store to all requested replicas")
+    -- TODO: maxSize param
+    -- TODO: run in parallel, use async
+    -- TODO: performance, finish when required number of replicas respond
+    -- TODO: handle database exceptions
+    go ["events"] PUT = do
+        rv <- Control.Exception.try $ runStream $
+            reader
+            >-> Encodings.fromByteString maxSize fmt
+            >-> forkStreams [writer c | c <- connectors]
+        case rv of
+            Left (_ :: Control.Exception.SomeException) -> respond $ responseLBS
+                status503
+                [("Content-Type", "text/plain")]
+                "database error"
+            Right _ -> respond $ responseLBS
+                status200
+                [("Content-Type", "text/plain")]
+                "ok"
+      where
+        fmt = Encodings.EncJSON Encodings.JSONCompact
+        maxSize = 100*1024
 
-    "/events" `onDelete` do
-        undefined
+        reader :: Producer BS.ByteString
+        reader = mkProducer f where
+            f produce = do
+                chunk <- liftIO $ requestBody request
+                case BS.null chunk of
+                    True -> return ()
+                    False -> do
+                        _ <- produce chunk
+                        f produce
 
--- try to store events to a number of connections
--- This function returns actual number of replicas,
--- that all given events are stored.
--- distribute connections randomly, where the seed is
--- the channel id of the event, so that the same channel data
--- tend to go to the same replica
---
--- TODO: run in parallel (async), starting at "requested" instances,
---  then try one more replica when detected a failure on one connection.
---
-safeDeposit :: (IConnection conn) =>
-    [conn] -> RequestedReplicas -> [Event] -> IO ActualReplicas
-safeDeposit conns requested evts =
-    process requested distinctChannels enumeratedConnections
-  where
+        writer :: Connector
+            -> Consumer (Either (String, BS.ByteString) Event.Event)
+        writer (Connector name connect) = mkConsumer action where
+            acquire = do
+                liftIO $ logM DEBUG $ "open database " ++ show name
+                ConnWrapper <$> (liftIO connect)
+            release conn = liftIO $ do
+                rv <- Control.Exception.try $ commit conn
+                case rv of
+                    Left (_e :: Control.Exception.SomeException) ->
+                        logM NOTICE "unable to commit messages"
+                    Right _ -> return ()
+                logM DEBUG $ "closing database " ++ show name
+                disconnect conn
+            action consume = bracket acquire release $ \conn -> forever $ do
+                eVal <- consume
+                case eVal of
+                    Left (msg, _bs) -> liftIO $ logM NOTICE msg
+                    Right evt -> liftIO $ do
+                        _ <- deposit conn evt
+                        logM DEBUG $
+                            show (Event.eChannel evt, Event.eUtcTime evt)
+                            ++ " saved."
 
-    distinctChannels = nub $ map eChannel evts
+    go ["events"] DELETE = undefined
 
-    enumeratedConnections = zip [(1::Int)..] conns
+    -- not found
+    go _ _ = respond $ responseLBS
+        status404
+        [("Content-Type", "text/plain")]
+        "404 - Not Found"
 
-    permutate lst _seed = lst -- TODO
-
-    -- process all channels
-    process n [] _ = return n -- all done, no more channels
-    process _ _ [] = return 0 -- not able, no more active connections
-    process n (channel:xs) conns' = do
-        let lst = [e | e <- evts, eChannel e == channel]
-            conns'' = permutate conns' channel
-        deadConns <- depositMany requested [] conns'' lst
-        let nextConns = [(i,c) | (i,c) <- conns'', i `notElem` deadConns]
-            nextN = min n $ length nextConns
-        process nextN xs nextConns
-
-    -- deposit events to n connections, return list of dead connections
-    depositMany n failed conns' lst
-        | n <= 0 || null conns' = return failed
-        | otherwise = do
-            let ((ix,conn),rest) = (head conns', tail conns')
-            st <- deposit conn lst
-            case st of
-                ConnAlive -> depositMany (n-1) failed conns' lst
-                ConnDead -> depositMany n (ix:failed) rest lst
--}
+    withLog act = case parseMethod (requestMethod request) of
+        Left _ -> respond $ responseLBS
+            status400
+            [("Content-Type", "text/plain")]
+            "400 - unknown request method"
+        Right mtd -> do
+            logM DEBUG $ show request
+            act (pathInfo request) mtd
 

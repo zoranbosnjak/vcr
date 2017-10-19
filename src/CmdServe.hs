@@ -20,7 +20,9 @@ import           Options.Applicative ((<**>))
 import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(DEBUG, INFO, NOTICE))
 import           Control.Concurrent (threadDelay)
+import           Data.Binary.Builder (fromByteString)
 import           Data.Monoid
+import           Data.Convertible
 import           Database.HDBC as DB
 import           Database.HDBC.Sqlite3 (connectSqlite3)
 import           Database.HDBC.PostgreSQL (connectPostgreSQL)
@@ -34,7 +36,7 @@ import           Network.HTTP.Types
 -- local imports
 import           Common (logM)
 import qualified Common as C
-import qualified Event
+import qualified Event as E
 --import qualified Server
 --import qualified File
 import qualified Encodings
@@ -159,24 +161,38 @@ createTables conn = DB.run conn (unwords
     , "( ch VARCHAR(255)"
     , ", srcId VARCHAR(255)"
     , ", utcTime DATETIME"
-    , ", sesId VARCHAR(255)"
     , ", monoTime BIGINT"
+    , ", sesId VARCHAR(255)"
+    , ", seqNum INT"
     , ", value BLOB"
     , ", constraint events_pk primary key (ch, sesId, monoTime)"
     , ")"
     ]) []
 
 -- | Deposit event to a database.
-deposit :: (IConnection conn) => conn -> Event.Event -> IO Integer
+deposit :: (IConnection conn) => conn -> E.Event -> IO Integer
 deposit conn event = DB.run conn
-    "INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?)"
-    [ toSql $ show $ Event.eChannel event
-    , toSql $ show $ Event.eSourceId event
-    , toSql $ Event.unUtc $ Event.eUtcTime event
-    , toSql $ show $ Event.eSessionId event
-    , toSql $ Event.monoTimeToNanoSecs $ Event.eMonoTime event
-    , toSql $ Event.eValue event
+    "INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?)"
+    [ toSql $ E.eChannel event
+    , toSql $ E.eSourceId event
+    , toSql $ E.eUtcTime event
+    , toSql $ E.eMonoTime event
+    , toSql $ E.eSessionId event
+    , toSql $ E.eSequence event
+    , toSql $ E.eValue event
     ]
+
+-- | Convert SQL row to event.
+toEvent :: [SqlValue] -> ConvertResult E.Event
+toEvent [ch, src, utc, mono, ses, sn, val] = E.Event
+    <$> safeFromSql ch
+    <*> safeFromSql src
+    <*> safeFromSql utc
+    <*> safeFromSql mono
+    <*> safeFromSql ses
+    <*> safeFromSql sn
+    <*> safeFromSql val
+toEvent val = convError "unexpected number of columns" val
 
 app :: [Connector] -> Int -> Application
 app connectors _replicas request respond = withLog go where
@@ -204,7 +220,59 @@ app connectors _replicas request respond = withLog go where
 
     go ["events"] HEAD = undefined
 
-    go ["events"] GET = undefined
+    -- TODO: add query params, see Data.Time.Format
+    -- TODO: handle different content types
+    go ["events"] GET = do
+        let producer = mergeOrdStreams (toProducer <$> connectors)
+        rv <- Control.Exception.try $ respond $ responseStream
+            status200
+            [("Content-Type", "text/plain")]
+            $ \write flush -> do
+                runStream $
+                    producer
+                    >-> Encodings.toByteString fmt
+                    >-> sender write
+                flush
+        case rv of
+            Left (_ :: Control.Exception.SomeException) -> respond $ responseLBS
+                status503
+                [("Content-Type", "text/plain")]
+                "database error"
+            Right val -> return val
+      where
+
+        fmt = Encodings.EncJSON Encodings.JSONCompact
+
+        -- create Producer out of database connector
+        toProducer :: Connector -> Producer E.Event
+        toProducer (Connector name connect) = mkProducer action where
+            acquire = liftIO $ do
+                logM DEBUG $ "open database " ++ show name
+                conn <- ConnWrapper <$> connect
+                select <- prepare conn
+                    "SELECT * from events ORDER BY ch, sesId, monoTime ASC;"
+                _ <- execute select []
+                return (conn, select)
+            release (conn, _) = liftIO $ do
+                logM DEBUG $ "closing database " ++ show name
+                disconnect conn
+            action produce = bracket acquire release $ \(_, sel) -> loop sel
+              where
+                loop sel = do
+                    mRow <- liftIO $ fetchRow sel
+                    case mRow of
+                        Nothing -> return ()
+                        Just row -> do
+                            case toEvent row of
+                                Left e -> do
+                                    liftIO $ logM NOTICE $
+                                        "error converting data from database "
+                                        ++ show e
+                                Right val -> produce val >> return ()
+                            loop sel
+
+        sender tx = mkConsumer $ \consume -> forever $ do
+            consume >>= liftIO . tx . fromByteString
 
     -- TODO: handle different content types
     -- TODO: maxSize param
@@ -240,7 +308,7 @@ app connectors _replicas request respond = withLog go where
                         f produce
 
         writer :: Connector
-            -> Consumer (Either (String, BS.ByteString) Event.Event)
+            -> Consumer (Either (String, BS.ByteString) E.Event)
         writer (Connector name connect) = mkConsumer action where
             acquire = do
                 liftIO $ logM DEBUG $ "open database " ++ show name
@@ -248,8 +316,10 @@ app connectors _replicas request respond = withLog go where
             release conn = liftIO $ do
                 rv <- Control.Exception.try $ commit conn
                 case rv of
-                    Left (_e :: Control.Exception.SomeException) ->
-                        logM NOTICE "unable to commit messages"
+                    Left (e :: Control.Exception.SomeException) -> logM NOTICE $
+                        "unable to commit messages to "
+                        ++ show name
+                        ++ ": " ++ show e
                     Right _ -> return ()
                 logM DEBUG $ "closing database " ++ show name
                 disconnect conn
@@ -260,7 +330,7 @@ app connectors _replicas request respond = withLog go where
                     Right evt -> liftIO $ do
                         _ <- deposit conn evt
                         logM DEBUG $
-                            show (Event.eChannel evt, Event.eUtcTime evt)
+                            show (E.eChannel evt, E.eUtcTime evt)
                             ++ " saved."
 
     go ["events"] DELETE = undefined

@@ -7,6 +7,7 @@
 
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
 module Event
 {-
@@ -24,6 +25,8 @@ import           Data.Aeson.Types (typeMismatch, object, (.=), (.:))
 import qualified Data.Serialize as Bin
 import qualified Data.ByteString as BS
 import           Data.Monoid ((<>))
+import           Database.HDBC
+import           Data.Convertible
 import qualified Data.Time
 import           GHC.Generics (Generic)
 import qualified Options.Applicative as Opt
@@ -45,6 +48,13 @@ data Event = Event
     } deriving (Generic, Eq, Show, Read)
 
 instance Bin.Serialize Event
+
+-- | One possible way to order events (by distinct key).
+instance Ord Event where
+    compare a b =
+        compare (eChannel a) (eChannel b)
+        `mappend` compare (eSessionId a) (eSessionId b)
+        `mappend` compare (eMonoTime a) (eMonoTime b)
 
 instance Arbitrary Event where
     arbitrary = Event
@@ -75,7 +85,7 @@ instance Data.Aeson.FromJSON Event where
         <*> fmap UtcTime (v .: "utcTime")
         <*> fmap (MonoTime . System.Clock.fromNanoSecs) (v .: "monoTime")
         <*> v .: "session"
-        <*> v .: "sequence"
+        <*> fmap SequenceNum (v .: "sequence")
         <*> readStr (v .: "data")
       where
         readStr px = do
@@ -84,12 +94,16 @@ instance Data.Aeson.FromJSON Event where
 
     parseJSON invalid    = typeMismatch "Event" invalid
 
-newtype Channel = Channel String deriving (Generic, Eq, Show, Read)
+newtype Channel = Channel String deriving (Generic, Eq, Ord, Show, Read)
 instance Bin.Serialize Channel
 instance Data.Aeson.ToJSON Channel
 instance Data.Aeson.FromJSON Channel
 instance Arbitrary Channel where
     arbitrary = Channel <$> arbitrary
+instance Convertible Channel SqlValue where
+    safeConvert (Channel val) = Right $ SqlString val
+instance Convertible SqlValue Channel where
+    safeConvert val = Channel <$> safeConvert val
 
 channelOptions :: Opt.Parser Channel
 channelOptions = Channel <$> Opt.strOption
@@ -104,6 +118,10 @@ instance Data.Aeson.ToJSON SourceId
 instance Data.Aeson.FromJSON SourceId
 instance Arbitrary SourceId where
     arbitrary = SourceId <$> arbitrary
+instance Convertible SourceId SqlValue where
+    safeConvert (SourceId val) = Right $ SqlString val
+instance Convertible SqlValue SourceId where
+    safeConvert val = SourceId <$> safeConvert val
 
 sourceId :: String -> SourceId
 sourceId = SourceId
@@ -115,8 +133,8 @@ sourceIdOptions = SourceId <$> Opt.strOption
    <> Opt.help "Recorder identifier"
     )
 
-newtype UtcTime = UtcTime { unUtc :: Data.Time.UTCTime}
-    deriving (Generic, Eq, Show, Read, Ord)
+newtype UtcTime = UtcTime Data.Time.UTCTime
+    deriving (Generic, Eq, Ord, Show, Read)
 
 instance Arbitrary UtcTime where
     arbitrary = do
@@ -131,17 +149,25 @@ instance Arbitrary UtcTime where
         diffT = Data.Time.picosecondsToDiffTime
             <$> choose (0, (24*3600*(10^(12::Int))-1))
 
-newtype MonoTime = MonoTime System.Clock.TimeSpec
-    deriving (Generic, Eq, Show, Read)
+instance Convertible UtcTime SqlValue where
+    safeConvert (UtcTime val) = Right $ SqlUTCTime val
 
-monoTimeToNanoSecs :: MonoTime -> Integer
-monoTimeToNanoSecs (MonoTime t) = System.Clock.toNanoSecs t
+instance Convertible SqlValue UtcTime where
+    safeConvert val = UtcTime <$> safeConvert val
+
+newtype MonoTime = MonoTime System.Clock.TimeSpec
+    deriving (Generic, Eq, Ord, Show, Read)
 
 instance Arbitrary MonoTime where
     arbitrary = do
         a <- fmap getPositive arbitrary
         b <- choose (0, 999999999)
         return $ MonoTime $ System.Clock.TimeSpec a b
+
+instance Convertible MonoTime SqlValue where
+    safeConvert (MonoTime x) = Right $ SqlInteger $ System.Clock.toNanoSecs x
+instance Convertible SqlValue MonoTime where
+    safeConvert val = (MonoTime . System.Clock.fromNanoSecs) <$> safeConvert val
 
 instance Bin.Serialize UtcTime where
     put (UtcTime t) = do
@@ -166,17 +192,23 @@ instance Bin.Serialize MonoTime where
 
 -- | Sequence number that wraps around.
 
-newtype SessionId = SessionId String deriving (Generic, Eq, Show, Read)
+newtype SessionId = SessionId String deriving (Generic, Eq, Ord, Show, Read)
 instance Bin.Serialize SessionId
 instance Data.Aeson.ToJSON SessionId
 instance Data.Aeson.FromJSON SessionId
 instance Arbitrary SessionId where
     arbitrary = SessionId <$> arbitrary
 
+instance Convertible SessionId SqlValue where
+    safeConvert (SessionId val) = Right $ SqlString val
+instance Convertible SqlValue SessionId where
+    safeConvert val = SessionId <$> safeConvert val
+
 sessionId :: String -> SessionId
 sessionId = SessionId
 
-newtype SequenceNum = SequenceNum Int deriving (Generic, Eq, Show, Read)
+newtype SequenceNum = SequenceNum Integer
+    deriving (Generic, Eq, Show, Read)
 instance Bin.Serialize SequenceNum
 instance Data.Aeson.ToJSON SequenceNum
 instance Data.Aeson.FromJSON SequenceNum
@@ -199,6 +231,12 @@ instance Arbitrary SequenceNum where
     arbitrary = sequenceNum <$> choose (a,b) where
         SequenceNum a = minBound
         SequenceNum b = maxBound
+
+instance Convertible SequenceNum SqlValue where
+    safeConvert (SequenceNum val) = Right $ SqlInteger val
+
+instance Convertible SqlValue SequenceNum where
+    safeConvert val = SequenceNum <$> safeConvert val
 
 -- | Increment sequence number, respect maxBound.
 nextSequenceNum :: SequenceNum -> SequenceNum

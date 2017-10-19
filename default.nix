@@ -1,10 +1,11 @@
 { mkDerivation, aeson, aeson-pretty, async, attoparsec, base
-, bytestring, cereal, clock, containers, directory, filepath, HDBC
-, HDBC-postgresql, HDBC-sqlite3, hslogger, hsyslog, http-client
-, http-conduit, http-types, HUnit, network, network-multicast
-, optparse-applicative, QuickCheck, scotty, stdenv, stm
-, test-framework, test-framework-hunit, test-framework-quickcheck2
-, text, text-format, time, transformers, unix, uuid, wai, warp
+, binary, bytestring, cereal, clock, containers, convertible
+, directory, filepath, HDBC, HDBC-postgresql, HDBC-sqlite3
+, hslogger, hsyslog, http-client, http-conduit, http-types, HUnit
+, network, network-multicast, optparse-applicative, QuickCheck
+, scotty, stdenv, stm, test-framework, test-framework-hunit
+, test-framework-quickcheck2, text, text-format, time, transformers
+, unix, uuid, wai, warp
 }:
 mkDerivation {
   pname = "vcr";
@@ -13,16 +14,17 @@ mkDerivation {
   isLibrary = true;
   isExecutable = true;
   libraryHaskellDepends = [
-    aeson aeson-pretty async attoparsec base bytestring cereal clock
-    containers directory filepath hslogger hsyslog optparse-applicative
-    QuickCheck stm time transformers unix
+    aeson aeson-pretty async attoparsec base binary bytestring cereal
+    clock containers convertible directory filepath HDBC hslogger
+    hsyslog optparse-applicative QuickCheck stm time transformers unix
   ];
   executableHaskellDepends = [
-    aeson aeson-pretty async attoparsec base bytestring cereal clock
-    containers directory filepath HDBC HDBC-postgresql HDBC-sqlite3
-    hslogger hsyslog http-client http-conduit http-types network
-    network-multicast optparse-applicative QuickCheck scotty stm text
-    text-format time transformers unix uuid wai warp
+    aeson aeson-pretty async attoparsec base binary bytestring cereal
+    clock containers convertible directory filepath HDBC
+    HDBC-postgresql HDBC-sqlite3 hslogger hsyslog http-client
+    http-conduit http-types network network-multicast
+    optparse-applicative QuickCheck scotty stm text text-format time
+    transformers unix uuid wai warp
   ];
   testHaskellDepends = [
     aeson base bytestring cereal containers directory HUnit QuickCheck

@@ -168,6 +168,13 @@ mergeStreams lst = mkProducer action where
         -- Finish action when ALL producers are done.
         liftIO $ mapM_ Async.wait producers
 
+-- | Combine multiple producers of the same type to a single producer.
+-- Resulting producer produces elements in order without any duplicates.
+-- Assume ordered elements from each producer from the list.
+mergeOrdStreams :: (Ord a) => [Producer a] -> Producer a
+mergeOrdStreams [] = empty
+mergeOrdStreams lst = head lst -- just for test take the first producer
+
 -- | Fork data to all consumers on the list.
 forkStreams :: [Consumer a] -> Consumer a
 forkStreams lst = mkConsumer action where
@@ -233,6 +240,10 @@ onTerminate act s = Streaming action where
             Right (Right _) -> act
             -- endo of data (do not call action)
             Right (Left ()) -> return ()
+
+-- | Producer that produces nothing.
+empty :: Producer a
+empty = mkProducer $ \_ -> return ()
 
 -- | Consumer that just consumes all input.
 drain :: Consumer a

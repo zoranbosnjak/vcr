@@ -69,6 +69,7 @@ import qualified Control.Exception
 import           Control.Concurrent.STM
 import qualified Control.Concurrent.Async as Async
 import           Control.Monad.Trans.Except
+import           Data.Maybe
 
 type StreamT = ExceptT () IO
 type ConsumeFunc a = StreamT a
@@ -172,8 +173,46 @@ mergeStreams lst = mkProducer action where
 -- Resulting producer produces elements in order without any duplicates.
 -- Assume ordered elements from each producer from the list.
 mergeOrdStreams :: (Ord a) => [Producer a] -> Producer a
-mergeOrdStreams [] = empty
-mergeOrdStreams lst = head lst -- just for test take the first producer
+mergeOrdStreams producers = mkProducer $ \produce -> do
+    generators <- mapM mkGenerator producers
+    loop produce generators
+  where
+    mkGenerator producer = do
+        var <- liftIO $ newEmptyTMVarIO
+        let act = streamAction producer
+            produce = liftIO . atomically . putTMVar var . Just
+        a <- liftIO $ Async.async $ do
+            _ <- runExceptT (act noConsume produce)
+            liftIO $ atomically $ putTMVar var Nothing
+        liftIO $ Async.link a
+        return (var, a)
+
+    -- fetch current value out of the generator
+    fetch (var,_) = atomically $ do
+        val <- takeTMVar var
+        putTMVar var val
+        return val
+
+    -- step the generator, until next value > prev
+    step prev (var,a) = do
+        mVal <- fetch (var,a)
+        case mVal of
+            Nothing -> return ()
+            Just val -> case val > prev of
+                True -> return ()
+                False -> do
+                    _ <- atomically $ takeTMVar var
+                    step prev (var,a)
+
+    loop produce generators = do
+        x <- mapM (liftIO . fetch) generators
+        case catMaybes x of
+            [] -> return ()
+            values -> do
+                let val = minimum values
+                _ <- produce val
+                mapM_ (liftIO . step val) generators
+                loop produce generators
 
 -- | Fork data to all consumers on the list.
 forkStreams :: [Consumer a] -> Consumer a

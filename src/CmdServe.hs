@@ -14,6 +14,7 @@ module CmdServe (cmdServe) where
 -- Standard imports.
 import           Control.Concurrent.Async
 import qualified Control.Exception
+import           Control.Exception (SomeException)
 import           Control.Monad hiding (forever)
 import           Control.Monad.IO.Class (liftIO)
 import           Options.Applicative ((<**>))
@@ -26,6 +27,7 @@ import           Data.Convertible
 import           Database.HDBC as DB
 import           Database.HDBC.Sqlite3 (connectSqlite3)
 import           Database.HDBC.PostgreSQL (connectPostgreSQL)
+import           Data.Either
 import qualified Data.Text
 import qualified Data.ByteString as BS
 import           Text.Read (readMaybe)
@@ -223,53 +225,78 @@ app connectors _replicas request respond = withLog go where
     -- TODO: add query params, see Data.Time.Format
     -- TODO: handle different content types
     go ["events"] GET = do
-        let producer = mergeOrdStreams (toProducer <$> connectors)
-        rv <- Control.Exception.try $ respond $ responseStream
-            status200
-            [("Content-Type", "text/plain")]
-            $ \write flush -> do
-                runStream $
-                    producer
-                    >-> Encodings.toByteString fmt
-                    >-> sender write
-                flush
-        case rv of
-            Left (_ :: Control.Exception.SomeException) -> respond $ responseLBS
-                status503
-                [("Content-Type", "text/plain")]
-                "database error"
-            Right val -> return val
-      where
-
-        fmt = Encodings.EncJSON Encodings.JSONCompact
-
-        -- create Producer out of database connector
-        toProducer :: Connector -> Producer E.Event
-        toProducer (Connector name connect) = mkProducer action where
-            acquire = liftIO $ do
-                logM DEBUG $ "open database " ++ show name
+        -- connect to databases and run select
+        candidates <- forM connectors $ \(Connector name connect) -> do
+            Control.Exception.try $ do
                 conn <- ConnWrapper <$> connect
                 select <- prepare conn
                     "SELECT * from events ORDER BY ch, sesId, monoTime ASC;"
                 _ <- execute select []
-                return (conn, select)
-            release (conn, _) = liftIO $ do
-                logM DEBUG $ "closing database " ++ show name
-                disconnect conn
-            action produce = bracket acquire release $ \(_, sel) -> loop sel
-              where
-                loop sel = do
-                    mRow <- liftIO $ fetchRow sel
-                    case mRow of
-                        Nothing -> return ()
-                        Just row -> do
-                            case toEvent row of
-                                Left e -> do
-                                    liftIO $ logM NOTICE $
-                                        "error converting data from database "
-                                        ++ show e
-                                Right val -> produce val >> return ()
-                            loop sel
+                return (name, conn, select)
+
+        let inactive :: [SomeException]
+            inactive = lefts candidates
+
+        -- all active databases must be able to return values
+        case rights candidates of
+            [] -> do
+                logM NOTICE $ "no database is accessible"
+                    ++ ", " ++ show (length inactive) ++ " inactive databases"
+                respond $ responseLBS
+                    status503
+                    [("Content-Type", "text/plain")]
+                    "database error"
+            active -> do
+                let getName (name,_,_) = name
+                    getCon (_,con,_) = con
+                    getSelect (_,_,select) = select
+                logM DEBUG $
+                    "active databases: " ++ show (getName <$> active)
+                    ++ ", inactive: " ++ show (length inactive)
+                let src = mergeOrdStreams (toProducer . getSelect <$> active)
+                    action = respond $ responseStream
+                        status200
+                        [("Content-Type", "text/plain")]
+                        $ \write flush -> do
+                            runStream $
+                                src
+                                >-> Encodings.toByteString fmt
+                                >-> sender write
+                            flush
+                            logM DEBUG $
+                                "closing database " ++ show (getName <$> active)
+                            mapM_ disconnect (getCon <$> active)
+                    cleanup = do
+                        logM NOTICE "streaming error"
+                        logM DEBUG $
+                            "closing database " ++ show (getName <$> active)
+                        mapM_ disconnect (getCon <$> active)
+                        respond $ responseLBS
+                            status503
+                            [("Content-Type", "text/plain")]
+                            "streaming error"
+                Control.Exception.onException action cleanup
+
+      where
+
+        fmt = Encodings.EncJSON Encodings.JSONCompact
+
+        toProducer select = mkProducer loop where
+            loop produce = do
+                mRow <- liftIO $ fetchRow select
+                case mRow of
+                    Nothing -> return ()    -- all done
+                    Just row -> do
+                        case toEvent row of
+                            Left e -> do
+                                liftIO $ logM NOTICE $
+                                    "error converting data from database "
+                                    ++ show e
+                                fail $ show e
+                            Right val -> do
+                                _ <- produce val
+                                return ()
+                        loop produce
 
         sender tx = mkConsumer $ \consume -> forever $ do
             consume >>= liftIO . tx . fromByteString
@@ -285,7 +312,7 @@ app connectors _replicas request respond = withLog go where
             >-> Encodings.fromByteString maxSize fmt
             >-> forkStreams [writer c | c <- connectors]
         case rv of
-            Left (_ :: Control.Exception.SomeException) -> respond $ responseLBS
+            Left (_ :: SomeException) -> respond $ responseLBS
                 status503
                 [("Content-Type", "text/plain")]
                 "database error"
@@ -316,7 +343,7 @@ app connectors _replicas request respond = withLog go where
             release conn = liftIO $ do
                 rv <- Control.Exception.try $ commit conn
                 case rv of
-                    Left (e :: Control.Exception.SomeException) -> logM NOTICE $
+                    Left (e :: SomeException) -> logM NOTICE $
                         "unable to commit messages to "
                         ++ show name
                         ++ ": " ++ show e

@@ -2,6 +2,15 @@
 
 ## Development
 
+To update revision of `nixpkgs`, (re)run (with new git release):
+
+```bash
+# select branch
+# check info on https://github.com/NixOS/nixpkgs-channels/branches
+# select revision (git log...)
+nix-prefetch-git https://github.com/NixOS/nixpkgs-channels.git <rev> > nixpkgs.json
+```
+
 ### Default build
 
 ```bash

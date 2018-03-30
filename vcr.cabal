@@ -2,7 +2,7 @@
 -- see http://haskell.org/cabal/users-guide/
 
 name:                vcr
-version:             0.2.3.0
+version:             0.3.0
 -- synopsis:
 -- description:
 license:             GPL-3

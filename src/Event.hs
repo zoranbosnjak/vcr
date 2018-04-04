@@ -28,6 +28,9 @@ import           Data.Monoid ((<>))
 import           Database.HDBC
 import           Data.Convertible
 import qualified Data.Time
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import           Data.Text (Text)
 import           GHC.Generics (Generic)
 import qualified Options.Applicative as Opt
 import qualified System.Clock
@@ -94,16 +97,20 @@ instance Data.Aeson.FromJSON Event where
 
     parseJSON invalid    = typeMismatch "Event" invalid
 
-newtype Channel = Channel String deriving (Generic, Eq, Ord, Show, Read)
-instance Bin.Serialize Channel
+newtype Channel = Channel Text deriving (Generic, Eq, Ord, Show, Read)
+instance Bin.Serialize Channel where
+    put (Channel c) = Bin.put $ TE.encodeUtf8 c
+    get = Channel . TE.decodeUtf8 <$> Bin.get
 instance Data.Aeson.ToJSON Channel
 instance Data.Aeson.FromJSON Channel
 instance Arbitrary Channel where
-    arbitrary = Channel <$> arbitrary
+    arbitrary = Channel . T.pack <$> arbitrary
+    {-
 instance Convertible Channel SqlValue where
     safeConvert (Channel val) = Right $ SqlString val
 instance Convertible SqlValue Channel where
     safeConvert val = Channel <$> safeConvert val
+    -}
 
 channelOptions :: Opt.Parser Channel
 channelOptions = Channel <$> Opt.strOption
@@ -112,18 +119,22 @@ channelOptions = Channel <$> Opt.strOption
    <> Opt.help "Channel identifier"
     )
 
-newtype SourceId = SourceId String deriving (Generic, Eq, Show, Read)
-instance Bin.Serialize SourceId
+newtype SourceId = SourceId Text deriving (Generic, Eq, Show, Read)
+instance Bin.Serialize SourceId where
+    put (SourceId c) = Bin.put $ TE.encodeUtf8 c
+    get = SourceId . TE.decodeUtf8 <$> Bin.get
 instance Data.Aeson.ToJSON SourceId
 instance Data.Aeson.FromJSON SourceId
 instance Arbitrary SourceId where
-    arbitrary = SourceId <$> arbitrary
+    arbitrary = SourceId . T.pack <$> arbitrary
+    {-
 instance Convertible SourceId SqlValue where
     safeConvert (SourceId val) = Right $ SqlString val
 instance Convertible SqlValue SourceId where
     safeConvert val = SourceId <$> safeConvert val
+    -}
 
-sourceId :: String -> SourceId
+sourceId :: Text -> SourceId
 sourceId = SourceId
 
 sourceIdOptions :: Opt.Parser SourceId
@@ -190,8 +201,6 @@ instance Bin.Serialize MonoTime where
         b <- Bin.get
         return $ MonoTime $ System.Clock.TimeSpec a b
 
--- | Sequence number that wraps around.
-
 newtype SessionId = SessionId String deriving (Generic, Eq, Ord, Show, Read)
 instance Bin.Serialize SessionId
 instance Data.Aeson.ToJSON SessionId
@@ -207,6 +216,7 @@ instance Convertible SqlValue SessionId where
 sessionId :: String -> SessionId
 sessionId = SessionId
 
+-- | Sequence number that wraps around.
 newtype SequenceNum = SequenceNum Integer
     deriving (Generic, Eq, Show, Read)
 instance Bin.Serialize SequenceNum

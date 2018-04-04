@@ -16,7 +16,8 @@ mkDerivation {
   libraryHaskellDepends = [
     aeson aeson-pretty async attoparsec base binary bytestring cereal
     clock containers convertible directory filepath HDBC hslogger
-    hsyslog optparse-applicative QuickCheck stm time transformers unix
+    hsyslog optparse-applicative QuickCheck stm text time transformers
+    unix
   ];
   executableHaskellDepends = [
     aeson aeson-pretty async attoparsec base binary bytestring cereal

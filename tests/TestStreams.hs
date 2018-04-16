@@ -22,10 +22,6 @@ testStreams = testGroup "Streams"
     [ testGroup "basic"
         [ testProperty "basic" propBasic
         ]
-    , testGroup "merge/fork"
-        [ testProperty "merge" propMerge
-        , testProperty "fork" propFork
-        ]
     , testGroup "encode/decode"
         [ testProperty "file" propFileEncodeDecode
         ]
@@ -56,43 +52,6 @@ propBasic n = ioProperty $ do
     src = fromFoldable orig
     pipe = mkPipe $ \consume produce -> forever $ do
         consume >>= produce
-
--- | TODO: make arbitrary many sources
-propMerge :: NonNegative Int -> NonNegative Int -> NonNegative Int -> Property
-propMerge (NonNegative a) (NonNegative b) (NonNegative c) = ioProperty $ do
-    buffer <- newIORef DS.empty
-    runStream $ src >-> toBuffer buffer
-    result <- toList <$> readIORef buffer
-    return $ length result === (a + b + c)
-  where
-    src1 = take a [1..] :: [Int]
-    src2 = take b [a..] :: [Int]
-    src3 = take c [(a+b)..] :: [Int]
-    src = mergeStreams
-        [ fromFoldable src1
-        , fromFoldable src2
-        , fromFoldable src3
-        ]
-
--- | TODO: make arbitrary many forks
-propFork :: NonNegative Int -> Property
-propFork (NonNegative n) = ioProperty $ do
-    buf1 <- newIORef DS.empty
-    buf2 <- newIORef DS.empty
-    buf3 <- newIORef DS.empty
-    runStream $
-        fromFoldable src
-        >-> forkStreams [toBuffer buf1, toBuffer buf2, toBuffer buf3]
-    result1 <- toList <$> readIORef buf1
-    result2 <- toList <$> readIORef buf2
-    result3 <- toList <$> readIORef buf3
-    return $ conjoin
-        [ length result1 === length src
-        , length result2 === length src
-        , length result3 === length src
-        ]
-  where
-    src = take n [1..] :: [Int]
 
 propFileEncodeDecode :: EncodeFormat -> [Event] -> Property
 propFileEncodeDecode fmt orig = ioProperty $ withTempFile $ \fn -> do

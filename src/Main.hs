@@ -17,18 +17,18 @@ import qualified System.Environment
 
 -- local imports
 import qualified Common as C
-import           CmdRecord    (cmdRecord)
-import           CmdReplay    (cmdReplay)
+--import           CmdRecord    (cmdRecord)
+--import           CmdReplay    (cmdReplay)
 import           CmdArchive   (cmdArchive)
-import           CmdServe     (cmdServe)
+--import           CmdServe     (cmdServe)
 
 -- | Available commands.
 commands :: [(String, Opt.ParserInfo (C.VcrOptions -> IO ()))]
 commands =
-    [ ("record",    cmdRecord)
-    , ("replay",    cmdReplay)
-    , ("archive",   cmdArchive)
-    , ("serve",     cmdServe)
+    [ --("record",    cmdRecord)
+    --, ("replay",    cmdReplay)
+    ("archive",   cmdArchive)
+    --, ("serve",     cmdServe)
     ]
 
 -- | Toplevel command line options.

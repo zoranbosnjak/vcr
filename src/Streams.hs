@@ -36,14 +36,14 @@
 --
 -- >    pip :: Pipe a a
 -- >    pip = mkPipe $ \consume produce -> forever $ do
--- >        msg <- consume
+-- >        msg <- consume Clear
 -- >        liftIO $ threadDelay 1000000
 -- >        produce msg
 --
 --      * create consumer
 --
 -- >    cons :: Consumer Char
--- >    cons = mkConsumer $ \consume -> do
+-- >    cons = mkConsumer $ \consume Clear -> do
 -- >        replicateM_ 10 (consume >>= (liftIO . print))
 --
 --      * run the chain
@@ -63,8 +63,13 @@ import           Control.Concurrent.Async
                     (withAsync, cancel, wait, waitEitherCatch)
 import           Control.Monad.Trans.Except
 
+data Checkpoint
+    = MoreData  -- consumer needs more data, do not cancel
+    | Clear     -- it is safe to cancel consumer at this point
+    deriving (Eq, Show)
+
 type StreamT = ExceptT () IO
-type ConsumeFunc a = StreamT a
+type ConsumeFunc a = Checkpoint -> StreamT a
 type ProduceFunc b = b -> StreamT ()
 
 -- | General streaming component.
@@ -96,10 +101,12 @@ forever act = act >> forever act
             -- In case of "end of data" - Nothing, the consumer
             -- shall terminate gracefully, that is: only on the next
             -- call to 'consume' function.
-            consume2 = do
+            consume2 = \checkpoint -> do
                 mVal <- liftIO $ atomically $ readTBQueue chan
                 case mVal of
-                    Nothing -> throwE ()
+                    Nothing -> case checkpoint of
+                        MoreData -> fail "broken pipe"
+                        Clear -> throwE ()
                     Just val -> return val
         liftIO $ do
             -- run left and right actions and wait for any to terminate
@@ -160,12 +167,12 @@ mkConsumer f = Streaming action where
 -- | map function over each element
 map :: (a -> b) -> Streaming a b
 map f = mkPipe $ \consume produce -> forever $ do
-    consume >>= produce . f
+    consume Clear >>= produce . f
 
 -- | filter stream elements
 filter :: (a -> Bool) -> Streaming a a
 filter f = mkPipe $ \consume produce -> forever $ do
-    msg <- consume
+    msg <- consume Clear
     when (f msg) $ produce msg
 
 -- | Producer that produces nothing.
@@ -175,35 +182,10 @@ empty = mkProducer $ \_ -> return ()
 -- | Consumer that just consumes all input.
 drain :: Consumer a
 drain = mkConsumer $ \consume -> forever $ do
-    consume >> return ()
+    consume Clear >> return ()
 
 -- | Produce each element from foldable.
 fromFoldable :: Foldable t => t a -> Producer a
 fromFoldable lst = mkProducer $ \produce -> do
     mapM_ produce lst
-
--- | Stream version of bracket.
-bracket ::
-    StreamT a
-    -> (a -> StreamT b)
-    -> (a -> StreamT c)
-    -> StreamT c
-bracket acquire release act =
-    liftIO $ Control.Exception.bracket acquire' release' act'
-  where
-    acquire' = do
-        rv <- runExceptT acquire
-        case rv of
-            Left _ -> fail "acquire exception"
-            Right val -> return val
-    release' res = do
-        rv <- runExceptT $ release res
-        case rv of
-            Left _ -> fail "release exception"
-            Right val -> return val
-    act' res = do
-        rv <- runExceptT $ act res
-        case rv of
-            Left _ -> fail "action exception"
-            Right val -> return val
 

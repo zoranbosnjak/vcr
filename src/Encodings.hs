@@ -262,7 +262,10 @@ fromByteString :: (Data.Aeson.FromJSON a, Bin.Serialize a, Read a) =>
     -> Pipe BS.ByteString (Either (String, BS.ByteString) a)
 fromByteString maxSize fmt = mkPipe $ go BS.empty where
     go acc consume produce = do
-        s <- consume
+        let method = case BS.null acc of
+                True -> Clear
+                False -> MoreData
+        s <- consume method
         let (lst, leftover) = decodeStream maxSize fmt (acc <> s)
         mapM_ produce lst
         go leftover consume produce

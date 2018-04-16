@@ -9,13 +9,13 @@
 
 module File where
 
-import           Control.Exception (try, SomeException)
+--import           Control.Exception (try, SomeException)
 import           Control.Monad hiding (forever)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Options.Applicative as Opt
 import           Data.Monoid ((<>))
 import qualified Data.ByteString as BS
-import qualified System.IO as IO
+--import qualified System.IO as IO
 import qualified Data.Time as Time
 import           Data.List (isPrefixOf, sort)
 import qualified Data.Time.Clock.POSIX
@@ -88,7 +88,7 @@ fileWriter :: FileStore -> Maybe Rotate -> Pipe BS.ByteString String
 fileWriter fs mRotate = mkPipe action
   where
     action consume produce = forever $ do
-        consume >>= liftIO . appendToFile fs
+        consume Clear >>= liftIO . appendToFile fs
         rotateResult <- maybe
             (return Nothing)
             (\rot -> liftIO $ rotateFile fs rot)
@@ -143,7 +143,9 @@ fileWriter fs mRotate = mkPipe action
 
 -- | Read chunks from file.
 fileReaderChunks :: Int -> FileStore -> Producer BS.ByteString
-fileReaderChunks chunkSize fs = mkProducer action where
+fileReaderChunks _chunkSize _fs = mkProducer action where
+    action = undefined
+    {-
     acquire = case filePath fs of
         "-" -> return IO.stdin
         f -> liftIO $ IO.openFile f IO.ReadMode
@@ -159,10 +161,13 @@ fileReaderChunks chunkSize fs = mkProducer action where
                         _ <- produce val
                         loop
         loop
+    -}
 
 -- | Read lines from file.
 fileReaderLines :: FileStore -> Producer BS.ByteString
-fileReaderLines fs = mkProducer action where
+fileReaderLines _fs = mkProducer action where
+    action = undefined
+    {-
     acquire = do
         h <- case filePath fs of
             "-" -> return IO.stdin
@@ -181,4 +186,5 @@ fileReaderLines fs = mkProducer action where
                         _ <- produce val
                         loop
         loop
+    -}
 

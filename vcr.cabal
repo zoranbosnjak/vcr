@@ -24,6 +24,9 @@ library
         Streams
         File
         Common
+    other-modules:
+        CmdArchive
+        Server
     ghc-options:        -O2 -Wall -funbox-strict-fields
     default-extensions: StrictData
     build-depends:
@@ -57,6 +60,14 @@ executable vcr
     main-is:            Main.hs
     ghc-options:        -O2 -Wall -rtsopts -funbox-strict-fields -threaded
     default-extensions: StrictData
+    other-modules:
+        CmdArchive
+        , Common
+        , Encodings
+        , Event
+        , File
+        , Server
+        , Streams
     build-depends:
         vcr
         , base < 5

@@ -130,7 +130,7 @@ runCmd opts vcrOpts = do
 
     -- log errors and progress
     trace = mkPipe $ \consume produce -> forever $ do
-        result <- consume
+        result <- consume Clear
         case result of
             Left e -> do
                 liftIO $ C.logM NOTICE $ "Cannot decode an event." ++ show e

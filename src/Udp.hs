@@ -5,9 +5,14 @@
 -- This module provides common UDP definitions.
 --
 
+{-# LANGUAGE DeriveGeneric #-}
+
 module Udp where
 
 import           Control.Monad.IO.Class (liftIO)
+import qualified Data.Aeson
+import           Data.Aeson (ToJSON, FromJSON, toJSON, parseJSON)
+import           Data.Aeson.Types (typeMismatch)
 import qualified Data.ByteString as BS
 import           Data.Monoid ((<>))
 import qualified Network.Socket as Net
@@ -15,15 +20,53 @@ import qualified Network.Socket.ByteString as NB
 import qualified Network.Multicast as Mcast
 import qualified Options.Applicative as Opt
 import           Streams
+import           GHC.Generics (Generic)
+import           Data.Text (unpack)
 
 type Ip = String
 type Port = String
 type Mcast = String
 type TTL = Int
 
+skipWords :: Int -> String -> String
+skipWords n y
+    | n <= 0 = y
+    | otherwise = skipWords (pred n) $
+        (dropWhile (/= ' ') . dropWhile (== ' ') $ y)
+
 -- | UDP (unicast or multicast)
-data UdpIn = UdpIn Ip Port (Maybe Mcast) deriving (Eq, Show)
-data UdpOut = UdpOut Ip Port (Maybe (Mcast, Maybe TTL)) deriving (Eq, Show)
+
+data UdpIn = UdpIn Ip Port (Maybe Mcast) deriving (Generic, Eq)
+
+instance Show UdpIn where
+    show (UdpIn ip port Nothing) = "Unicast " ++ ip ++ " " ++ port
+    show (UdpIn localIp port (Just mcast)) =
+        "Multicast " ++ mcast ++ " " ++ port ++ " " ++ localIp
+
+instance Read UdpIn where
+    readsPrec _ s = case words s of
+        ("Unicast":ip:port:_) -> [(UdpIn ip port Nothing, skipWords 3 s)]
+        ("Multicast":mcast:port:localIp:_) ->
+            [(UdpIn localIp port (Just mcast), skipWords 4 s)]
+        _ -> []
+
+instance ToJSON UdpIn where
+    toJSON (UdpIn ip port Nothing) = toJSON $ "Unicast " ++ ip ++ " " ++ port
+    toJSON (UdpIn localIp port (Just mcast)) = toJSON $
+        "Multicast " ++ mcast ++ " " ++ port ++ " " ++ localIp
+
+instance FromJSON UdpIn where
+    parseJSON (Data.Aeson.String s) = case (words $ unpack s) of
+        ("Unicast":ip:port:[]) -> return $ UdpIn ip port Nothing
+        ("Multicast":mcast:port:localIp:[]) -> return $
+            UdpIn localIp port (Just mcast)
+        _ -> typeMismatch "UdpIn" (Data.Aeson.String s)
+    parseJSON t = typeMismatch "UdpIn" t
+
+data UdpOut = UdpOut Ip Port (Maybe (Mcast, Maybe TTL))
+    deriving (Generic, Eq, Show)
+instance ToJSON UdpOut
+instance FromJSON UdpOut
 
 newtype RxSocket = RxSocket Net.Socket
 data TxSocket = TxSocket Net.Socket Net.SockAddr
@@ -102,8 +145,8 @@ rxUdp (RxSocket sock) = NB.recvFrom sock (2^(16::Int))
 -- | UDP bytestring producer.
 udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr)
 udpReader addr = mkProducer action where
-    acquire = liftIO $ rxSocket addr
-    release = liftIO . closeRxSock
+    acquire = rxSocket addr
+    release = closeRxSock
     action produce = bracket acquire release $ \sock -> forever $ do
         msg <- liftIO $ rxUdp sock
         produce msg
@@ -137,10 +180,10 @@ txUdp (TxSocket sock dst) s = NB.sendAllTo sock s dst
 udpWriter :: UdpOut -> Consumer BS.ByteString
 udpWriter addr = mkConsumer action where
     action consume = bracket acquire release $ \sock -> forever $ do
-        s <- consume
+        s <- consume Clear
         liftIO $ txUdp sock s
-    acquire = liftIO $ txSocket addr
-    release = liftIO . closeTxSock
+    acquire = txSocket addr
+    release = closeTxSock
 
 -- | Close Tx socket.
 closeTxSock :: TxSocket -> IO ()

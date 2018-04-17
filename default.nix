@@ -5,7 +5,7 @@
 , network, network-multicast, optparse-applicative, QuickCheck
 , scotty, stdenv, stm, test-framework, test-framework-hunit
 , test-framework-quickcheck2, text, text-format, time, transformers
-, unix, uuid, wai, warp
+, unix, unordered-containers, uuid, wai, warp
 }:
 mkDerivation {
   pname = "vcr";
@@ -17,7 +17,7 @@ mkDerivation {
     aeson aeson-pretty async attoparsec base binary bytestring cereal
     clock containers convertible directory filepath HDBC hslogger
     hsyslog optparse-applicative QuickCheck stm text time transformers
-    unix
+    unix unordered-containers
   ];
   executableHaskellDepends = [
     aeson aeson-pretty async attoparsec base binary bytestring cereal
@@ -25,7 +25,7 @@ mkDerivation {
     HDBC-postgresql HDBC-sqlite3 hslogger hsyslog http-client
     http-conduit http-types network network-multicast
     optparse-applicative QuickCheck scotty stm text text-format time
-    transformers unix uuid wai warp
+    transformers unix unordered-containers uuid wai warp
   ];
   testHaskellDepends = [
     aeson base bytestring cereal containers directory HUnit QuickCheck

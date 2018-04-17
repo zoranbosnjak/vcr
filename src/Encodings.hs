@@ -5,6 +5,7 @@
 -- This module defines encoding/decding.
 --
 
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE RankNTypes #-}
 
@@ -27,6 +28,8 @@ import           Data.Word (Word8)
 import qualified Data.Attoparsec.ByteString as ATP
 
 import qualified Data.Aeson
+import           Data.Aeson (ToJSON, FromJSON, toJSON, parseJSON)
+import           Data.Aeson.Types (typeMismatch)
 import qualified Data.Aeson.Encode.Pretty as AP
 
 import qualified Data.Serialize as Bin
@@ -72,6 +75,20 @@ data EncodeFormat
     | EncBin                -- binary encoding
     | EncJSON JSONFormat    -- JSON encoding
     deriving (Generic, Eq, Show)
+
+instance ToJSON EncodeFormat where
+    toJSON EncText = toJSON ("text" :: String)
+    toJSON EncBin = toJSON ("bin" :: String)
+    toJSON (EncJSON JSONCompact) = undefined -- toJSON ("jsonCompact" :: String)
+    toJSON (EncJSON (JSONPretty _n)) = undefined -- toJSON ("jsonCompact" :: String)
+
+instance FromJSON EncodeFormat where
+    parseJSON (Data.Aeson.String s) = case s of
+        "text" -> return EncText
+        "bin" -> return EncBin
+        -- TODO
+        _ -> typeMismatch "EncodeFormat" (Data.Aeson.String s)
+    parseJSON t = typeMismatch "EncodeFormat" t
 
 instance QC.Arbitrary EncodeFormat where
     arbitrary = QC.oneof

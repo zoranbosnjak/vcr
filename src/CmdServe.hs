@@ -9,28 +9,29 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ExistentialQuantification #-}
 
-module CmdServe (cmdServe) where
+--module CmdServe (cmdServe) where
+module CmdServe where
 
 -- Standard imports.
 import           Control.Concurrent.Async
 import qualified Control.Exception
-import           Control.Exception (SomeException)
+--import           Control.Exception (SomeException)
 import           Control.Monad hiding (forever)
 import           Control.Monad.IO.Class (liftIO)
 import           Options.Applicative ((<**>))
 import qualified Options.Applicative as Opt
-import           System.Log.Logger (Priority(DEBUG, INFO, NOTICE))
-import           Control.Concurrent (threadDelay)
-import           Data.Binary.Builder (fromByteString)
+import           System.Log.Logger (Priority(DEBUG, INFO))
+--import           Control.Concurrent (threadDelay)
+--import           Data.Binary.Builder (fromByteString)
 import           Data.Monoid
 import           Data.Convertible
 import           Database.HDBC as DB
 import           Database.HDBC.Sqlite3 (connectSqlite3)
 import           Database.HDBC.PostgreSQL (connectPostgreSQL)
-import           Data.Either
-import qualified Data.Text
-import qualified Data.ByteString as BS
-import           Text.Read (readMaybe)
+--import           Data.Either
+--import qualified Data.Text
+--import qualified Data.ByteString as BS
+--import           Text.Read (readMaybe)
 import           Network.Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import           Network.HTTP.Types
@@ -41,8 +42,8 @@ import qualified Common as C
 import qualified Event as E
 --import qualified Server
 --import qualified File
-import qualified Encodings
-import           Streams
+--import qualified Encodings
+--import           Streams
 
 cmdServe :: Opt.ParserInfo (C.VcrOptions -> IO ())
 cmdServe = Opt.info ((runCmd <$> CmdServe.options) <**> Opt.helper)
@@ -197,9 +198,9 @@ toEvent [ch, src, utc, mono, ses, sn, val] = E.Event
 toEvent val = convError "unexpected number of columns" val
 
 app :: [Connector] -> Int -> Application
-app connectors _replicas request respond = withLog go where
+app _connectors _replicas request respond = withLog go where
 
-    threadDelaySec = threadDelay . round . (1000000*)
+    --threadDelaySec = threadDelay . round . (1000000*)
 
     -- response check
     go ["ping"] GET = respond $ responseLBS
@@ -207,7 +208,8 @@ app connectors _replicas request respond = withLog go where
         [("Content-Type", "text/plain")]
         "pong"
 
-   -- simulate processing delay
+    {-
+    -- simulate processing delay
     go ["delay", s] GET = case readMaybe (Data.Text.unpack s) of
         Nothing -> respond $ responseLBS
             status400
@@ -361,6 +363,7 @@ app connectors _replicas request respond = withLog go where
                             ++ " saved."
 
     go ["events"] DELETE = undefined
+    -}
 
     -- not found
     go _ _ = respond $ responseLBS

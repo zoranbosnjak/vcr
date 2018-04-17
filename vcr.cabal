@@ -39,6 +39,7 @@ library
         , aeson-pretty
         , time
         , containers
+        , unordered-containers
         , QuickCheck
         , stm
         , optparse-applicative
@@ -79,6 +80,7 @@ executable vcr
         , bytestring
         , time
         , containers
+        , unordered-containers
         , cereal
         , aeson
         , aeson-pretty

@@ -5,14 +5,15 @@
 -- 'replay' command
 --
 
-module CmdReplay (cmdReplay) where
+--module CmdReplay (cmdReplay) where
+module CmdReplay where
 
 -- Standard imports.
-import           Control.Monad.IO.Class (liftIO)
+--import           Control.Monad.IO.Class (liftIO)
 import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
-import           System.Log.Logger (Priority(INFO, NOTICE))
-import           Control.Concurrent (threadDelay)
+import           System.Log.Logger (Priority(INFO))
+--import           Control.Concurrent (threadDelay)
 import           Data.Monoid
 
 -- local imports
@@ -23,7 +24,7 @@ import qualified Server
 import qualified File
 import qualified Encodings
 import qualified Udp
-import           Streams
+--import           Streams
 
 {-
     - GUI or txt
@@ -110,10 +111,11 @@ runCmd opts vcrOpts = do
     logM INFO $
         "replay, opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
 
-    runStream $ source >-> cleanup >-> forkStreams (toOutput <$> optOutput opts)
+    -- runStream $ source >-> cleanup >-> forkStreams (toOutput <$> optOutput opts)
 
   where
 
+    {-
     -- read from file, decode data
     source = case optInput opts of
         IFile enc fs ->
@@ -164,4 +166,6 @@ runCmd opts vcrOpts = do
         DstUdp udp -> onTerminate
             (liftIO $ logM NOTICE $ "Output error: " ++ show udp)
             (Udp.udpWriter udp)
+
+    -}
 

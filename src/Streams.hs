@@ -189,3 +189,8 @@ fromFoldable :: Foldable t => t a -> Producer a
 fromFoldable lst = mkProducer $ \produce -> do
     mapM_ produce lst
 
+-- | Stream version of 'bracket'.
+bracket :: IO a -> (a -> IO b)  -> (a -> StreamT c) -> StreamT c
+bracket acquire release action = ExceptT $
+    Control.Exception.bracket acquire release (runExceptT . action)
+

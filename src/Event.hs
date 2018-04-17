@@ -103,14 +103,14 @@ instance Bin.Serialize Channel where
     get = Channel . TE.decodeUtf8 <$> Bin.get
 instance Data.Aeson.ToJSON Channel
 instance Data.Aeson.FromJSON Channel
+instance Data.Aeson.ToJSONKey Channel
+instance Data.Aeson.FromJSONKey Channel
 instance Arbitrary Channel where
     arbitrary = Channel . T.pack <$> arbitrary
-    {-
 instance Convertible Channel SqlValue where
-    safeConvert (Channel val) = Right $ SqlString val
+    safeConvert (Channel val) = safeConvert val
 instance Convertible SqlValue Channel where
     safeConvert val = Channel <$> safeConvert val
-    -}
 
 channelOptions :: Opt.Parser Channel
 channelOptions = Channel <$> Opt.strOption
@@ -127,12 +127,10 @@ instance Data.Aeson.ToJSON SourceId
 instance Data.Aeson.FromJSON SourceId
 instance Arbitrary SourceId where
     arbitrary = SourceId . T.pack <$> arbitrary
-    {-
 instance Convertible SourceId SqlValue where
-    safeConvert (SourceId val) = Right $ SqlString val
+    safeConvert (SourceId val) = safeConvert val
 instance Convertible SqlValue SourceId where
     safeConvert val = SourceId <$> safeConvert val
-    -}
 
 sourceId :: Text -> SourceId
 sourceId = SourceId

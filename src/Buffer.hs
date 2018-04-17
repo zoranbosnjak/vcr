@@ -80,7 +80,7 @@ holdBuffer th = mkPipe action
   where
     action consume produce = case thresholdValid th of
       False -> forever $ do
-        msg <- consume
+        msg <- consume Clear
         produce [msg]
       True -> liftIO $ do
         buffer <- newTVarIO DS.empty
@@ -89,7 +89,7 @@ holdBuffer th = mkPipe action
 
         -- read using consume and put to intermediate buffer
         let readerLoop = do
-                eMsg <- runExceptT consume
+                eMsg <- runExceptT (consume Clear)
                 case eMsg of
                     Left _ -> return ()
                     Right msg -> do
@@ -136,7 +136,7 @@ holdBuffer th = mkPipe action
 -- | Concatinate incomming items.
 concatinated :: (Monoid a) => Pipe [a] a
 concatinated = mkPipe $ \consume produce -> forever $ do
-    consume >>= produce . mconcat
+    consume Clear >>= produce . mconcat
 
 -- dropBuffer
 -- TODO

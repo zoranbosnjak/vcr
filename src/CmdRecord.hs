@@ -13,15 +13,14 @@
 
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module CmdRecord (cmdRecord) where
+--module CmdRecord (cmdRecord) where
+module CmdRecord where
 
 -- standard imports
 import           Control.Monad.IO.Class (liftIO)
 import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
-import           System.Log.Logger (Priority(INFO, DEBUG, NOTICE))
-import           Data.Maybe (fromMaybe)
-import           Network.BSD (getHostName)
+import           System.Log.Logger (Priority(INFO, DEBUG))
 import qualified Data.ByteString as BS
 import qualified Data.UUID
 import           Data.UUID.V4 (nextRandom)
@@ -32,7 +31,7 @@ import qualified System.Posix.Syslog as SL
 -}
 
 -- local imports
-import           Common (logM, check)
+import           Common (logM)
 import qualified Common as C
 import qualified Buffer
 import qualified Encodings as Enc
@@ -165,7 +164,7 @@ toEvents ch recId = mkPipe $ \consume produce -> do
     -- numbers can be independant between readers.
     sessionId <- liftIO $ Event.sessionId . Data.UUID.toString <$> nextRandom
     let loop seqNum = do
-            msg <- consume
+            msg <- consume Clear
             (t1,t2) <- liftIO $ Event.now
             produce $ Event.Event
                 { Event.eChannel = ch
@@ -182,7 +181,7 @@ toEvents ch recId = mkPipe $ \consume produce -> do
 -- | Log every messages.
 debugP :: (Show a) => String -> Pipe a a
 debugP prefix = mkPipe $ \consume produce -> forever $ do
-    msg <- consume
+    msg <- consume Clear
     liftIO $ logM DEBUG $ prefix ++ ": " ++ show msg
     produce msg
 
@@ -192,6 +191,7 @@ runCmd opts vcrOpts = do
     logM INFO $
         "command 'record', opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
 
+    {-
     check (Buffer.thresholdValid $ optLimitSend opts)
         "Some limit on send size is required."
 
@@ -243,7 +243,7 @@ runCmd opts vcrOpts = do
                 >-> dumpRotateMessages
 
         dumpRotateMessages = mkConsumer $ \consume -> forever $ do
-            msg <- consume
+            msg <- consume Clear
             liftIO $ logM INFO msg
 
         webOutput :: Consumer Event.Event
@@ -254,4 +254,5 @@ runCmd opts vcrOpts = do
         mergeStreams inputs
         >-> debugP "events"
         >-> forkStreams [fileOutput, webOutput]
+    -}
 

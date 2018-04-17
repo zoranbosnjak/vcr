@@ -9,18 +9,18 @@
 
 module File where
 
---import           Control.Exception (try, SomeException)
+import           Control.Exception (try, SomeException)
 import           Control.Monad hiding (forever)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Options.Applicative as Opt
 import           Data.Monoid ((<>))
 import qualified Data.ByteString as BS
---import qualified System.IO as IO
+import qualified System.IO as IO
 import qualified Data.Time as Time
 import           Data.List (isPrefixOf, sort)
 import qualified Data.Time.Clock.POSIX
 import           System.Directory (renameFile, listDirectory, removeFile)
-import           System.FilePath ((</>), takeDirectory)
+import           System.FilePath ((</>), takeDirectory, takeFileName)
 import           System.Posix (getFileStatus, fileSize, accessTimeHiRes)
 
 -- local imports
@@ -134,24 +134,23 @@ fileWriter fs mRotate = mkPipe action
 
         cleanup = do
             let dirName = takeDirectory path
-            content <- fmap (dirName </>) <$> listDirectory dirName
+            content <- listDirectory dirName
             let oldFiles = drop keep . reverse . sort . filter myFiles $ content
-            mapM_ removeFile oldFiles
+
+            mapM_ removeFile (fmap (dirName </>) oldFiles)
             return oldFiles
 
-        myFiles = isPrefixOf path
+        myFiles = isPrefixOf (takeFileName path)
 
 -- | Read chunks from file.
 fileReaderChunks :: Int -> FileStore -> Producer BS.ByteString
-fileReaderChunks _chunkSize _fs = mkProducer action where
-    action = undefined
-    {-
+fileReaderChunks chunkSize fs = mkProducer action where
     acquire = case filePath fs of
         "-" -> return IO.stdin
-        f -> liftIO $ IO.openFile f IO.ReadMode
+        f -> IO.openFile f IO.ReadMode
     release h = case filePath fs of
         "-" -> return ()
-        _ -> liftIO $ IO.hClose h
+        _ -> IO.hClose h
     action produce = bracket acquire release $ \h -> do
         let loop = do
                 val <- liftIO $ BS.hGetSome h chunkSize
@@ -161,22 +160,19 @@ fileReaderChunks _chunkSize _fs = mkProducer action where
                         _ <- produce val
                         loop
         loop
-    -}
 
 -- | Read lines from file.
 fileReaderLines :: FileStore -> Producer BS.ByteString
-fileReaderLines _fs = mkProducer action where
-    action = undefined
-    {-
+fileReaderLines fs = mkProducer action where
     acquire = do
         h <- case filePath fs of
             "-" -> return IO.stdin
-            f -> liftIO $ IO.openFile f IO.ReadMode
-        liftIO $ IO.hSetBuffering h IO.LineBuffering
+            f -> IO.openFile f IO.ReadMode
+        IO.hSetBuffering h IO.LineBuffering
         return h
     release h = case filePath fs of
         "-" -> return ()
-        _ -> liftIO $ IO.hClose h
+        _ -> IO.hClose h
     action produce = bracket acquire release $ \h -> do
         let loop = do
                 rv <- liftIO $ try $ BS.hGetLine h
@@ -186,5 +182,4 @@ fileReaderLines _fs = mkProducer action where
                         _ <- produce val
                         loop
         loop
-    -}
 

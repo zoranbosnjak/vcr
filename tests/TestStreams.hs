@@ -30,13 +30,13 @@ testStreams = testGroup "Streams"
 -- | Consume data and store to buffer (helper function for tests).
 toBuffer :: IORef (DS.Seq a) -> Consumer a
 toBuffer buf = mkConsumer $ \consume -> forever $ do
-    val <- consume
+    val <- consume Clear
     liftIO $ modifyIORef buf (DS.|> val)
 
 -- | Consume data and store Right items to buffer (helper function for tests).
 rightToBuffer :: IORef (DS.Seq a) -> Consumer (Either t a)
 rightToBuffer buf = mkConsumer $ \consume -> forever $ do
-    rv <- consume
+    rv <- consume Clear
     case rv of
         Left _e -> return ()
         Right a -> liftIO $ modifyIORef buf (DS.|> a)
@@ -51,7 +51,7 @@ propBasic n = ioProperty $ do
     orig = take n [1..] :: [Int]
     src = fromFoldable orig
     pipe = mkPipe $ \consume produce -> forever $ do
-        consume >>= produce
+        consume Clear >>= produce
 
 propFileEncodeDecode :: EncodeFormat -> [Event] -> Property
 propFileEncodeDecode fmt orig = ioProperty $ withTempFile $ \fn -> do

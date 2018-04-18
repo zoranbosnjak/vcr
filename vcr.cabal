@@ -25,34 +25,51 @@ library
         File
         Common
     other-modules:
-        CmdArchive
-        Server
+        CmdRecord
+        , CmdReplay
+        , CmdArchive
+        , CmdServe
+        , Buffer
+        , Udp
+        , Server
     ghc-options:        -O2 -Wall -funbox-strict-fields
     default-extensions: StrictData
     build-depends:
         base < 5
         , text
-        , clock
+        , directory
+        , filepath
+        , uuid
+        , unix
         , bytestring
-        , cereal
-        , aeson
-        , aeson-pretty
         , time
         , containers
         , unordered-containers
+        , cereal
+        , aeson
+        , aeson-pretty
+        , hslogger
+        , text-format
+        , network
+        , network-multicast
         , QuickCheck
         , stm
-        , optparse-applicative
+        , clock
         , async
-        , attoparsec
+        , optparse-applicative
+        , scotty
+        , http-types
+        , wai
+        , warp
+        , http-conduit
+        , hsyslog
         , convertible
         , binary
         , HDBC
-        , hslogger
-        , hsyslog
-        , directory
-        , filepath
-        , unix
+        , HDBC-sqlite3
+        , HDBC-postgresql
+        , http-client
+        , attoparsec
         , transformers
 
 executable vcr
@@ -62,13 +79,18 @@ executable vcr
     ghc-options:        -O2 -Wall -rtsopts -funbox-strict-fields -threaded
     default-extensions: StrictData
     other-modules:
-        CmdArchive
+        CmdRecord
+        , CmdReplay
+        , CmdArchive
+        , CmdServe
+        , Buffer
         , Common
         , Encodings
         , Event
         , File
         , Server
         , Streams
+        , Udp
     build-depends:
         vcr
         , base < 5
@@ -115,6 +137,10 @@ test-suite test-vcr
     main-is:            Main.hs
     ghc-options:        -O2 -Wall -rtsopts -funbox-strict-fields
     default-extensions: StrictData
+    other-modules:
+        TestEncodings
+        , TestEvent
+        , TestStreams
     build-depends:
         vcr
         , base

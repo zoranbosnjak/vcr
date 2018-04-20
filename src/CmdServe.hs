@@ -145,6 +145,7 @@ createTables conn = DB.run conn (unwords
     , ", utcTime DATETIME"
     , ", monoTime BIGINT"
     , ", sesId VARCHAR(255)"
+    , ", trkId VARCHAR(255)"
     , ", seqNum INT"
     , ", value BLOB"
     , ", constraint events_pk primary key (ch, sesId, monoTime)"
@@ -154,24 +155,26 @@ createTables conn = DB.run conn (unwords
 -- | Deposit event to a database.
 deposit :: (IConnection conn) => conn -> E.Event -> IO Integer
 deposit conn event = DB.run conn
-    "INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?)"
+    "INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?,?)"
     [ toSql $ E.eChannel event
     , toSql $ E.eSourceId event
     , toSql $ E.eUtcTime event
     , toSql $ E.eMonoTime event
     , toSql $ E.eSessionId event
+    , toSql $ E.eTrackId event
     , toSql $ E.eSequence event
     , toSql $ E.eValue event
     ]
 
 -- | Convert SQL row to event.
 toEvent :: [SqlValue] -> ConvertResult E.Event
-toEvent [ch, src, utc, mono, ses, sn, val] = E.Event
+toEvent [ch, src, utc, mono, ses, trk, sn, val] = E.Event
     <$> safeFromSql ch
     <*> safeFromSql src
     <*> safeFromSql utc
     <*> safeFromSql mono
     <*> safeFromSql ses
+    <*> safeFromSql trk
     <*> safeFromSql sn
     <*> safeFromSql val
 toEvent val = convError "unexpected number of columns" val

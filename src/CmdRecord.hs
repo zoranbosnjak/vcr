@@ -163,6 +163,7 @@ toEvents ch recId = mkPipe $ \consume produce -> do
     -- Each reader has own session id, so that sequence
     -- numbers can be independant between readers.
     sessionId <- liftIO $ Event.sessionId . Data.UUID.toString <$> nextRandom
+    trackId <- liftIO $ Event.trackId . Data.UUID.toString <$> nextRandom
     let loop seqNum = do
             msg <- consume Clear
             (t1,t2) <- liftIO $ Event.now
@@ -172,6 +173,7 @@ toEvents ch recId = mkPipe $ \consume produce -> do
                 , Event.eUtcTime = t1
                 , Event.eMonoTime = t2
                 , Event.eSessionId = sessionId
+                , Event.eTrackId = trackId
                 , Event.eSequence = seqNum
                 , Event.eValue = msg
                 }

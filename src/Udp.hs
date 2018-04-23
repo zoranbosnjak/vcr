@@ -68,9 +68,6 @@ data UdpOut = UdpOut Ip Port (Maybe (Mcast, Maybe TTL))
 instance ToJSON UdpOut
 instance FromJSON UdpOut
 
-newtype RxSocket = RxSocket Net.Socket
-data TxSocket = TxSocket Net.Socket Net.SockAddr
-
 udpInOptions :: Opt.Parser UdpIn
 udpInOptions = UdpIn
     <$> Opt.strOption
@@ -115,77 +112,53 @@ udpOutOptions = UdpOut
            <> Opt.help "IP TTL value"
             ))
 
--- | Open RX socket and join to multicast if required.
-rxSocket :: UdpIn -> IO RxSocket
-rxSocket addr = do
-    let (ip, port, mclocal) = case addr of
-            UdpIn ip' port' Nothing -> (ip', port', Nothing)
-            UdpIn ip' port' (Just mcast') -> (mcast', port', Just ip')
-
-    (serveraddr:_) <- Net.getAddrInfo
-        (Just (Net.defaultHints {Net.addrFlags = [Net.AI_PASSIVE]}))
-        (Just ip)
-        (Just port)
-    sock <- Net.socket
-        (Net.addrFamily serveraddr) Net.Datagram Net.defaultProtocol
-
-    case mclocal of
-        Nothing -> return ()
-        Just _ -> do
-            Net.setSocketOption sock Net.ReuseAddr 1
-            Mcast.addMembership sock ip mclocal
-
-    Net.bind sock (Net.addrAddress serveraddr)
-    return $ RxSocket sock
-
--- | Receive data from the socket.
-rxUdp :: RxSocket -> IO (BS.ByteString, Net.SockAddr)
-rxUdp (RxSocket sock) = NB.recvFrom sock (2^(16::Int))
-
--- | UDP bytestring producer.
+-- | UDP bytestring producer (read from network).
 udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr)
 udpReader addr = mkProducer action where
-    acquire = rxSocket addr
-    release = closeRxSock
-    action produce = bracket acquire release $ \sock -> forever $ do
-        msg <- liftIO $ rxUdp sock
-        produce msg
+    acquire = do
+        let (ip, port, mclocal) = case addr of
+                UdpIn ip' port' Nothing -> (ip', port', Nothing)
+                UdpIn ip' port' (Just mcast') -> (mcast', port', Just ip')
+        (serveraddr:_) <- Net.getAddrInfo
+            (Just (Net.defaultHints {Net.addrFlags = [Net.AI_PASSIVE]}))
+            (Just ip)
+            (Just port)
+        sock <- Net.socket
+            (Net.addrFamily serveraddr) Net.Datagram Net.defaultProtocol
+        return(sock, ip, mclocal, serveraddr)
 
--- | Close Rx socket.
-closeRxSock :: RxSocket -> IO ()
-closeRxSock (RxSocket sock) = Net.close sock
+    release (sock,_,_,_) = Net.close sock
 
--- | Open TX socket.
-txSocket :: UdpOut -> IO TxSocket
-txSocket (UdpOut ip port mMcast) = do
-    sock <- Net.socket Net.AF_INET Net.Datagram Net.defaultProtocol
-    dst <- case mMcast of
-        Nothing -> do
-            (serveraddr:_) <- Net.getAddrInfo Nothing (Just ip) (Just port)
-            return (Net.addrAddress serveraddr)
-        Just (mcast, mTtl) -> do
-            (serveraddr:_) <- Net.getAddrInfo Nothing (Just mcast) (Just port)
-            Mcast.setInterface sock ip
-            case mTtl of
-                Nothing -> return ()
-                Just ttl -> Mcast.setTimeToLive sock ttl
-            return (Net.addrAddress serveraddr)
-    return $ TxSocket sock dst
+    action produce = bracket acquire release $ \(sock, ip, mc, serveraddr) -> do
+        case mc of
+            Nothing -> return ()
+            Just _ -> liftIO $ do
+                Net.setSocketOption sock Net.ReuseAddr 1
+                Mcast.addMembership sock ip mc
+        liftIO $ Net.bind sock (Net.addrAddress serveraddr)
+        forever $ do
+            msg <- liftIO $ NB.recvFrom sock (2^(16::Int))
+            produce msg
 
--- | Send data to the socket.
-txUdp :: TxSocket -> BS.ByteString -> IO ()
-txUdp (TxSocket sock dst) s = NB.sendAllTo sock s dst
-
--- | UDP bytestring consumer.
+-- | UDP bytestring consumer (write to network).
 udpWriter :: UdpOut -> Consumer BS.ByteString
-udpWriter addr = mkConsumer action where
-    action consume = bracket acquire release $ \sock -> forever $ do
-        s <- consume Clear
-        liftIO $ txUdp sock s
-    acquire = txSocket addr
-    release = closeTxSock
-
--- | Close Tx socket.
-closeTxSock :: TxSocket -> IO ()
-closeTxSock (TxSocket sock _dst) = Net.close sock
+udpWriter (UdpOut ip port mMcast) = mkConsumer action where
+    acquire = Net.socket Net.AF_INET Net.Datagram Net.defaultProtocol
+    release = Net.close
+    action consume = bracket acquire release $ \sock -> do
+        dst <- liftIO $ case mMcast of
+            Nothing -> do
+                (serveraddr:_) <- Net.getAddrInfo Nothing (Just ip) (Just port)
+                return (Net.addrAddress serveraddr)
+            Just (mcast, mTtl) -> do
+                (serveraddr:_) <-
+                    Net.getAddrInfo Nothing (Just mcast) (Just port)
+                Mcast.setInterface sock ip
+                case mTtl of
+                    Nothing -> return ()
+                    Just ttl -> Mcast.setTimeToLive sock ttl
+                return (Net.addrAddress serveraddr)
+        forever $ do
+            s <- consume Clear
+            liftIO $ NB.sendAllTo sock s dst
 

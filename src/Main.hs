@@ -8,9 +8,11 @@ module Main where
 import           Control.Exception (catch, SomeException)
 import           Options.Applicative ((<**>))
 import qualified Options.Applicative as Opt
-import           System.Log.Logger (Priority(DEBUG, INFO))
+import           System.Log.Logger (Priority(INFO))
 import qualified System.Log.Logger as Log
 import           System.Log.Handler.Simple (verboseStreamHandler)
+import           System.Log.Handler.Syslog
+                    (openlog, Option(PID), Facility(USER))
 import           System.IO (stdout, stderr, hPutStrLn)
 import           System.Exit (exitWith, ExitCode(ExitFailure, ExitSuccess))
 import qualified System.Environment
@@ -48,18 +50,28 @@ main = do
     -- parse options
     opt <- Opt.execParser (Opt.info (options <**> Opt.helper) Opt.idm)
 
-    -- update logger
+    pName <- System.Environment.getProgName
+    pArgs <- System.Environment.getArgs
+
+    -- console logger
     case C.vcrOptVerbose (optGlobal opt) of
         Nothing -> return ()
         Just level -> do
             Log.updateGlobalLogger Log.rootLoggerName
-                (Log.setLevel DEBUG . Log.removeHandler)
+                (Log.setLevel minBound . Log.removeHandler)
             hConsole <- verboseStreamHandler stdout level
             Log.updateGlobalLogger Log.rootLoggerName (Log.addHandler hConsole)
 
+    -- syslog
+    case C.vcrOptSyslog (optGlobal opt) of
+        Nothing -> return ()
+        Just level -> do
+            Log.updateGlobalLogger Log.rootLoggerName
+                (Log.setLevel minBound . Log.removeHandler)
+            sl <- openlog (pName) [PID] USER level
+            Log.updateGlobalLogger Log.rootLoggerName (Log.addHandler sl)
+
     -- run command
-    pName <- System.Environment.getProgName
-    pArgs <- System.Environment.getArgs
     C.logM INFO $ "startup " ++ show pName ++ " " ++ show pArgs
     (optCommand opt $ optGlobal opt) `catch` onError
     exitWith ExitSuccess

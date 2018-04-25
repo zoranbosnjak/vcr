@@ -7,13 +7,15 @@
 
 module Buffer where
 
-import           Control.Concurrent.Async (withAsync, waitEitherCancel)
+import           Control.Concurrent.Async (async, cancel)
 import           Control.Monad.IO.Class (liftIO)
+import           Control.Monad (when)
 import qualified Data.Sequence as DS
 import           Data.Foldable (toList)
 import           Data.Maybe (isJust)
 import           Control.Concurrent.STM as STM
 import           Control.Monad.Trans.Except
+import           Control.Exception (mask)
 import           Data.Monoid ((<>))
 import qualified Options.Applicative as Opt
 
@@ -74,33 +76,18 @@ activeThrashold (Threshold a b c) = or [isJust a, isJust b, isJust c]
 
 -- | Buffer will hold data until the threshold is reached.
 -- Then it will send all buffered data as a list.
--- Threshold must be valid, that is: some limit set.
 holdBuffer :: (Enc.HasSize a) => Threshold -> Pipe a [a]
-holdBuffer th = mkPipe action
+holdBuffer th = case thresholdValid th of
+    False -> Streams.map (\val -> [val])
+    True -> mkPipe action
   where
-    action consume produce = case thresholdValid th of
-      False -> forever $ do
-        msg <- consume Clear
-        produce [msg]
-      True -> liftIO $ do
-        buffer <- newTVarIO DS.empty
-        cnt <- newTVarIO (0::Int)
-        bytes <- newTVarIO (0::Integer)
-
-        -- read using consume and put to intermediate buffer
-        let readerLoop = do
-                eMsg <- runExceptT (consume Clear)
-                case eMsg of
-                    Left _ -> return ()
-                    Right msg -> do
-                        atomically $ do
-                            modifyTVar buffer (\s -> s DS.|> msg)
-                            modifyTVar cnt succ
-                            modifyTVar bytes (+ (Enc.sizeOf msg))
-                        readerLoop
+    action consume produce = do
+        buffer  <- liftIO $ newTVarIO DS.empty
+        cnt     <- liftIO $ newTVarIO (0::Int)
+        bytes   <- liftIO $ newTVarIO (0::Integer)
 
         -- write from intermediate buffer via produce function
-        let writerLoop = do
+        let writerLoop = forever $ do
                 timeout <- case thSeconds th of
                     Nothing -> newTVarIO False
                     Just val -> registerDelay $ (round val) * 1000000
@@ -118,26 +105,34 @@ holdBuffer th = mkPipe action
                             content <- readTVar buffer
                             case DS.null content of
                                 True -> retry
-                                False -> do
-                                    writeTVar buffer DS.empty
-                                    writeTVar cnt 0
-                                    writeTVar bytes 0
-                                    return $ toList content
-                eVal <- runExceptT $ produce items
-                case eVal of
-                    Left _ -> return ()
-                    Right _ -> writerLoop
+                                False -> return $ toList content
 
-        withAsync readerLoop $ \reader -> do
-          withAsync writerLoop $ \writer -> do
-            _ <- waitEitherCancel reader writer
-            return ()
+                _ <- mask $ \_restore -> do
+                    atomically $ do
+                        writeTVar buffer DS.empty
+                        writeTVar cnt 0
+                        writeTVar bytes 0
+                    runExceptT $ produce items
+                return ()
+
+        let readerLoop writer = do
+                mMsg <- catchE (Just <$> consume Clear) (const $ return Nothing)
+                case mMsg of
+                    Nothing -> do
+                        liftIO $ cancel writer
+                        content <- liftIO $ atomically $ readTVar buffer
+                        when (not $ DS.null content) $ do
+                            produce $ toList content
+                    Just msg -> do
+                        liftIO $ atomically $ do
+                            modifyTVar buffer (\s -> s DS.|> msg)
+                            modifyTVar cnt succ
+                            modifyTVar bytes (+ (Enc.sizeOf msg))
+                        readerLoop writer
+
+        bracket (async writerLoop) cancel readerLoop
 
 -- | Concatinate incomming items.
-concatinated :: (Monoid a) => Pipe [a] a
-concatinated = mkPipe $ \consume produce -> forever $ do
-    consume Clear >>= produce . mconcat
-
--- dropBuffer
--- TODO
+concatinate :: (Monoid a) => Pipe [a] a
+concatinate = Streams.map mconcat
 

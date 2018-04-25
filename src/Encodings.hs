@@ -57,6 +57,9 @@ class HasSize a where
 instance HasSize BS.ByteString where
     sizeOf = fromIntegral . BS.length
 
+instance HasSize [a] where
+    sizeOf = toInteger . length
+
 -- | JSON format variants
 data JSONFormat
     = JSONCompact       -- one line

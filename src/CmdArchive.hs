@@ -24,25 +24,6 @@ import           Data.Monoid ((<>))
 import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(INFO, DEBUG, NOTICE))
---import Control.Exception as CE
---import Data.Time (UTCTime(UTCTime))
---import Network.HTTP.Client.Conduit
---import qualified Data.Maybe as Maybe
---import qualified Control.Exception    as CE
---import           Control.Monad           (forM_)
---import qualified Data.ByteString.Char8 as BS8
---import qualified Data.ByteString      as BS
---import qualified Data.ByteString.Lazy as BSL
---import           Network.HTTP.Client  as NC
---import qualified Network.HTTP.Types.Method
---import           System.IO
---import           System.Log.Logger       (Priority(INFO, DEBUG, NOTICE))
---import Control.Exception as CE
---import Data.Time (UTCTime(UTCTime))
---import Network.HTTP.Client.Conduit
---import qualified Data.Maybe as Maybe
--- import Test.QuickCheck hiding (output)
--- import Control.Concurrent
 
 -- Local imports.
 import qualified Common as C
@@ -172,7 +153,7 @@ runCmd opts vcrOpts = do
     runStream $
         source
         >-> delay eventDelay
-        >-> trace
+        >-> traceDstEvents
         >-> destination
 
     C.logM INFO $
@@ -190,7 +171,7 @@ runCmd opts vcrOpts = do
             File.fileReaderChunks chunkSize inpFS
             >-> delay chunkDelay
             >-> Encodings.fromByteString maxEventSize inpEnc
-            >-> trace
+            >-> traceSrcEvents
             >-> channelFilters
             >-> sourceIdFilters
             >-> startTimeFilter
@@ -198,11 +179,12 @@ runCmd opts vcrOpts = do
         IServer _inpSC -> undefined
       where
 
-        trace :: Streams.Streaming
-                     (Either (String, Data.ByteString.Internal.ByteString)
-                             Event.Event)
-                     Event.Event
-        trace = mkPipe $ \consume produce -> forever $ do
+        traceSrcEvents ::
+            Streams.Streaming
+                (Either (String, Data.ByteString.Internal.ByteString)
+                        Event.Event)
+                Event.Event
+        traceSrcEvents = mkPipe $ \consume produce -> forever $ do
             result <- consume Clear
             case result of
                 Left (msg,_) -> do
@@ -246,8 +228,8 @@ runCmd opts vcrOpts = do
         liftIO $ threadDelay (1000 * interval)
         produce msg
 
-    trace :: Streams.Streaming Event.Event Event.Event
-    trace = mkPipe $ \consume produce -> forever $ do
+    traceDstEvents :: Streams.Streaming Event.Event Event.Event
+    traceDstEvents = mkPipe $ \consume produce -> forever $ do
         event <- consume Clear
         liftIO $ C.logM DEBUG $
             "archive: Dst event " ++ show (Event.eUtcTime event)

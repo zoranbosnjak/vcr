@@ -32,7 +32,7 @@ cabal build -j
 
 ### Running (inside nix-shell)
 ```bash
-cabal build -j && ./dist/build/vcr/vcr -h
+cabal build -j && ./dist/build/vcr/vcr +RTS -M300m -RTS {args}
 ```
 
 ## Changes in cabal file

@@ -46,6 +46,7 @@ data Event = Event
     , eMonoTime :: MonoTime             -- capture monotonic (boot) time
     , eSessionId :: SessionId           -- monotonic time is valid only within
                                         -- the same session ID
+    , eTrackId  :: TrackId              -- unique value for each channel startup
     , eSequence :: SequenceNum          -- incrementing sequence number
     , eValue    :: BS.ByteString        -- the event value
     } deriving (Generic, Eq, Show, Read)
@@ -67,16 +68,19 @@ instance Arbitrary Event where
         <*> arbitrary
         <*> arbitrary
         <*> arbitrary
+        <*> arbitrary
         <*> (BS.pack <$> arbitrary)
 
 instance Data.Aeson.ToJSON Event where
-    toJSON (Event ch src (UtcTime utcTime) (MonoTime monoTime) ses seqNum val)
+    toJSON
+        (Event ch src (UtcTime utcTime) (MonoTime monoTime) ses trk seqNum val)
       = object
         [ "channel"     .= ch
         , "recorder"    .= src
         , "utcTime"     .= utcTime
         , "monoTime"    .= System.Clock.toNanoSecs monoTime
         , "session"     .= ses
+        , "track"       .= trk
         , "sequence"    .= seqNum
         , "data"        .= Enc.hexlify val
         ]
@@ -88,6 +92,7 @@ instance Data.Aeson.FromJSON Event where
         <*> fmap UtcTime (v .: "utcTime")
         <*> fmap (MonoTime . System.Clock.fromNanoSecs) (v .: "monoTime")
         <*> v .: "session"
+        <*> v .: "track"
         <*> fmap SequenceNum (v .: "sequence")
         <*> readStr (v .: "data")
       where
@@ -213,6 +218,21 @@ instance Convertible SqlValue SessionId where
 
 sessionId :: String -> SessionId
 sessionId = SessionId
+
+newtype TrackId = TrackId String deriving (Generic, Eq, Ord, Show, Read)
+instance Bin.Serialize TrackId
+instance Data.Aeson.ToJSON TrackId
+instance Data.Aeson.FromJSON TrackId
+instance Arbitrary TrackId where
+    arbitrary = TrackId <$> arbitrary
+
+instance Convertible TrackId SqlValue where
+    safeConvert (TrackId val) = Right $ SqlString val
+instance Convertible SqlValue TrackId where
+    safeConvert val = TrackId <$> safeConvert val
+
+trackId :: String -> TrackId
+trackId = TrackId
 
 -- | Sequence number that wraps around.
 newtype SequenceNum = SequenceNum Integer

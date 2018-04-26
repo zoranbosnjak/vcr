@@ -10,7 +10,6 @@ module Common
 , Log.Priority(..)
 , VcrOptions(..)
 , vcrOptions
-, syslogOptions
 , timeOptions
 , subparserCmd
 , throw
@@ -27,7 +26,6 @@ import qualified Options.Applicative as Opt
 import qualified Options.Applicative.Builder.Internal as Opt.Int
 import Options.Applicative.Types (OptReader(CmdReader))
 import qualified System.Log.Logger as Log
-import qualified System.Posix.Syslog as SL
 
 ------------------------------------------------------------------------------
 -- Logging and error reporting.
@@ -58,6 +56,7 @@ logM = Log.logM "vcr"
 -- | General VCR command line options.
 data VcrOptions = VcrOptions
     { vcrOptVerbose :: Maybe Log.Priority
+    , vcrOptSyslog  :: Maybe Log.Priority
     } deriving (Show)
 
 -- | A parser for parsing general VCR command line options.
@@ -67,20 +66,15 @@ vcrOptions = VcrOptions
         ( Opt.short 'v'
        <> Opt.long "verbose"
        <> Opt.metavar "LEVEL"
-       <> Opt.help ("Set verbosity level, one of: " ++ show levels)
+       <> Opt.help ("Set console verbosity level, one of: " ++ show levels)
+        ))
+    <*> Opt.optional (Opt.option Opt.auto
+        ( Opt.long "syslog"
+       <> Opt.metavar "LEVEL"
+       <> Opt.help ("Set syslog verbosity level, one of: " ++ show levels)
         ))
   where
     levels = [minBound..maxBound] :: [Log.Priority]
-
--- | A parser for syslog priority options.
-syslogOptions :: Opt.Parser SL.Priority
-syslogOptions = Opt.option Opt.auto
-        ( Opt.long "level"
-       <> Opt.metavar "LEVEL"
-       <> Opt.help ("Set syslog level, one of: " ++ show levels)
-        )
-  where
-    levels = [minBound..maxBound] :: [SL.Priority]
 
 -- | Options for start/stop time.
 timeOptions :: String -> Opt.Parser UTCTime

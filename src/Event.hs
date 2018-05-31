@@ -20,6 +20,7 @@ module Event
 , now
 ) -} where
 
+import           Data.String
 import qualified Data.Aeson
 import           Data.Aeson.Types (typeMismatch, object, (.=), (.:))
 import qualified Data.Serialize as Bin
@@ -116,6 +117,8 @@ instance Convertible Channel SqlValue where
     safeConvert (Channel val) = safeConvert val
 instance Convertible SqlValue Channel where
     safeConvert val = Channel <$> safeConvert val
+instance IsString Channel where
+    fromString s = Channel $ fromString s
 
 channelOptions :: Opt.Parser Channel
 channelOptions = Channel <$> Opt.strOption
@@ -136,6 +139,8 @@ instance Convertible SourceId SqlValue where
     safeConvert (SourceId val) = safeConvert val
 instance Convertible SqlValue SourceId where
     safeConvert val = SourceId <$> safeConvert val
+instance IsString SourceId where
+    fromString s = SourceId $ fromString s
 
 sourceId :: Text -> SourceId
 sourceId = SourceId
@@ -210,6 +215,8 @@ instance Data.Aeson.ToJSON SessionId
 instance Data.Aeson.FromJSON SessionId
 instance Arbitrary SessionId where
     arbitrary = SessionId <$> arbitrary
+instance IsString SessionId where
+    fromString = SessionId
 
 instance Convertible SessionId SqlValue where
     safeConvert (SessionId val) = Right $ SqlString val
@@ -225,6 +232,8 @@ instance Data.Aeson.ToJSON TrackId
 instance Data.Aeson.FromJSON TrackId
 instance Arbitrary TrackId where
     arbitrary = TrackId <$> arbitrary
+instance IsString TrackId where
+    fromString = TrackId
 
 instance Convertible TrackId SqlValue where
     safeConvert (TrackId val) = Right $ SqlString val

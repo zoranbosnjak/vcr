@@ -245,7 +245,7 @@ app db request respond = withLog go where
                 onException action cleanup
       where
 
-        fmt = Encodings.EncJSON Encodings.JSONCompact
+        fmt = Encodings.EncJSON
 
         toProducer select = mkProducer loop where
             loop produce = do
@@ -287,7 +287,7 @@ app db request respond = withLog go where
                 [("Content-Type", "text/plain")]
                 "ok"
       where
-        fmt = Encodings.EncJSON Encodings.JSONCompact
+        fmt = Encodings.EncJSON
         maxSize = 100*1024
 
         reader :: Producer BS.ByteString

@@ -60,36 +60,27 @@ instance HasSize BS.ByteString where
 instance HasSize [a] where
     sizeOf = toInteger . length
 
--- | JSON format variants
-data JSONFormat
-    = JSONCompact       -- one line
-    | JSONPretty Int    -- multiple lines with specified indent size
-    deriving (Generic, Eq, Show)
-
-instance QC.Arbitrary JSONFormat where
-    arbitrary = QC.oneof
-        [ pure JSONCompact
-        , JSONPretty <$> QC.choose (1,8)
-        ]
-
 -- | File encoding formats.
 data EncodeFormat
     = EncText               -- text encoding, based on Show and Read
     | EncBin                -- binary encoding
-    | EncJSON JSONFormat    -- JSON encoding
+    | EncJSON               -- JSON compact encoding
+    | EncJSONPretty Int     -- JSON pretty encoding with ident spaces
     deriving (Generic, Eq, Show)
 
 instance ToJSON EncodeFormat where
     toJSON EncText = toJSON ("text" :: String)
     toJSON EncBin = toJSON ("bin" :: String)
-    toJSON (EncJSON JSONCompact) = undefined -- toJSON ("jsonCompact" :: String)
-    toJSON (EncJSON (JSONPretty _n)) = undefined -- toJSON ("jsonCompact" :: String)
+    toJSON EncJSON = toJSON ("json" :: String)
+    toJSON (EncJSONPretty _n) = undefined
+        -- toJSON (("jsonPretty " ++ show n) :: String)
 
 instance FromJSON EncodeFormat where
     parseJSON (Data.Aeson.String s) = case s of
         "text" -> return EncText
         "bin" -> return EncBin
-        -- TODO
+        "json" -> return EncJSON
+        -- TODO: jsonPretty
         _ -> typeMismatch "EncodeFormat" (Data.Aeson.String s)
     parseJSON t = typeMismatch "EncodeFormat" t
 
@@ -97,16 +88,17 @@ instance QC.Arbitrary EncodeFormat where
     arbitrary = QC.oneof
         [ pure EncText
         , pure EncBin
-        , EncJSON <$> QC.arbitrary
+        , pure EncJSON
+        , EncJSONPretty <$> QC.choose (1,8)
         ]
 
 encodeFormatOptions :: Opt.Parser EncodeFormat
 encodeFormatOptions =
     ( Opt.flag' EncText (Opt.long "text" <> Opt.help "\"text\" file encoding")
   <|> Opt.flag' EncBin (Opt.long "bin" <> Opt.help "\"binary\" file encoding")
-  <|> Opt.flag' (EncJSON JSONCompact)
-        (Opt.long "jsonCompact" <> Opt.help "Compact \"json\" file encoding")
-  <|> (EncJSON <$> JSONPretty <$> Opt.option Opt.auto
+  <|> Opt.flag' EncJSON
+        (Opt.long "json" <> Opt.help "Compact \"json\" file encoding")
+  <|> (EncJSONPretty <$> Opt.option Opt.auto
         ( Opt.long "jsonPretty"
        <> Opt.metavar "N"
        <> Opt.help "Pretty \"json\" file encoding (N indent spaces)")
@@ -183,9 +175,9 @@ encode :: (Show a, Bin.Serialize a, Data.Aeson.ToJSON a) =>
     EncodeFormat -> a -> BS.ByteString
 encode EncText val = BS.concat [BS8.pack $ show val, BS.singleton lineFeed]
 encode EncBin val = BS.concat [cobsEncode $ Bin.encode val, BS.singleton 0]
-encode (EncJSON JSONCompact) val = BS.concat
+encode EncJSON val = BS.concat
     [BSL.toStrict $ Data.Aeson.encode val, BS.singleton lineFeed]
-encode (EncJSON (JSONPretty i)) val = BS.concat
+encode (EncJSONPretty i) val = BS.concat
     [ BS.singleton recordSeparator
     , BSL.toStrict $ AP.encodePretty' cfg val
     , BS.singleton lineFeed
@@ -213,8 +205,8 @@ parse maxSize fmt s
             case Bin.decode val of
                 Left _e -> Nothing
                 Right a -> Just a
-        EncJSON JSONCompact -> withEndDelim lineFeed Data.Aeson.decodeStrict
-        EncJSON (JSONPretty _) -> ATP.parse jsonStream s
+        EncJSON -> withEndDelim lineFeed Data.Aeson.decodeStrict
+        EncJSONPretty _ -> ATP.parse jsonStream s
   where
     withEndDelim delim tryParse = case BS.elemIndex delim s of
             Nothing -> ATP.Partial (\more -> parse maxSize fmt (s <> more))

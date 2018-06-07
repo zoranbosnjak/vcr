@@ -5,6 +5,7 @@
 -- This module provides common File definitions.
 --
 
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module File where
@@ -12,6 +13,9 @@ module File where
 import           Control.Exception (try, SomeException)
 import           Control.Monad hiding (forever)
 import           Control.Monad.IO.Class (liftIO)
+import           GHC.Generics (Generic)
+import           Data.Aeson (ToJSON, FromJSON, toJSON, parseJSON, withText)
+import           Data.String
 import qualified Options.Applicative as Opt
 import           Data.Monoid ((<>))
 import qualified Data.ByteString as BS
@@ -22,6 +26,7 @@ import qualified Data.Time.Clock.POSIX
 import           System.Directory (renameFile, listDirectory, removeFile)
 import           System.FilePath ((</>), takeDirectory, takeFileName)
 import           System.Posix (getFileStatus, fileSize, accessTimeHiRes)
+import           Data.Text (unpack)
 
 -- local imports
 import qualified Common as C
@@ -30,7 +35,16 @@ import           Streams hiding (filter)
 -- | File storage.
 data FileStore = FileStore
     { filePath  :: FilePath
-    } deriving (Eq, Show)
+    } deriving (Generic, Eq, Show)
+
+instance ToJSON FileStore where
+    toJSON (FileStore s) = toJSON s
+
+instance FromJSON FileStore where
+    parseJSON = withText "FileStore" $ pure . FileStore . unpack
+
+instance IsString FileStore where
+    fromString = FileStore
 
 fileStoreOptions :: Opt.Parser FileStore
 fileStoreOptions = FileStore
@@ -45,7 +59,10 @@ data Rotate = Rotate
     { rotateKeep :: Int
     , rotateSize :: Maybe Integer
     , rotateTime :: Maybe Double
-    } deriving (Eq, Show)
+    } deriving (Generic, Eq, Show)
+
+instance ToJSON Rotate
+instance FromJSON Rotate
 
 rotateOptions :: Opt.Parser Rotate
 rotateOptions = Rotate

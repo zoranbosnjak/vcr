@@ -5,8 +5,11 @@
 -- Buffer manipulations
 --
 
+{-# LANGUAGE DeriveGeneric #-}
+
 module Buffer where
 
+import           GHC.Generics (Generic)
 import           Control.Concurrent.Async (async, cancel)
 import           Control.Monad.IO.Class (liftIO)
 import           Control.Monad (when)
@@ -18,6 +21,7 @@ import           Control.Monad.Trans.Except
 import           Control.Exception (mask)
 import           Data.Monoid ((<>))
 import qualified Options.Applicative as Opt
+import           Data.Aeson (ToJSON, FromJSON)
 
 -- import qualified Event
 import qualified Common as C
@@ -29,7 +33,10 @@ data Threshold = Threshold
     { thLength      :: Maybe Int
     , thBytes       :: Maybe Integer
     , thSeconds     :: Maybe Double
-    } deriving (Eq, Show)
+    } deriving (Generic, Eq, Show)
+
+instance ToJSON Threshold
+instance FromJSON Threshold
 
 instance Monoid Threshold where
     mempty = Threshold Nothing Nothing Nothing

@@ -5,6 +5,8 @@
 -- This module provides server access definitions.
 --
 
+{-# LANGUAGE DeriveGeneric #-}
+
 module Server
 {-
 ( ServerConnection(..)
@@ -12,27 +14,38 @@ module Server
 ) -} where
 
 -- standard imports
-import Data.Monoid ((<>))
+import           GHC.Generics (Generic)
+import           Data.Monoid ((<>))
+import           Data.String
 import qualified Options.Applicative as Opt
-
+import           Data.Aeson (ToJSON, FromJSON)
 -- import Network.HTTP.Simple
 
 -- local imports
 
-newtype URI = URI String deriving (Eq, Show)
+newtype URI = URI String deriving (Generic, Eq, Show)
+instance ToJSON URI
+instance FromJSON URI
+
+instance IsString URI where
+    fromString = URI
+
 type ConnectTimeout = Double
 type RetryTimeout = Double
 
 -- | Server connection pool.
 data ServerConnection = ServerConnection
-    { serverPool      :: [URI]
+    { serverURI       :: URI
     , connectTimeout  :: ConnectTimeout
     , retryTimeout    :: RetryTimeout
-    } deriving (Eq, Show)
+    } deriving (Generic, Eq, Show)
+
+instance ToJSON ServerConnection
+instance FromJSON ServerConnection
 
 serverConnectionOptions :: Opt.Parser ServerConnection
 serverConnectionOptions = ServerConnection
-    <$> Opt.some serverOptions
+    <$> serverOptions
     <*> connectTimeoutOptions
     <*> retryTimeoutOptions
 

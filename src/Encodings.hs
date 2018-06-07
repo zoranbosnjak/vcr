@@ -10,16 +10,16 @@
 {-# LANGUAGE RankNTypes #-}
 
 module Encodings
-{-
-( JSONFormat(..)
-, EncodeFormat(..)
-, Encodable(..)
+( EncodeFormat(..)
+, HasSize(..)
+, encode, decode
+, jsonEncode, jsonEncodePretty, jsonDecode, jsonEitherDecode
 , encodeFormatOptions
-, join, split
 , encodeList, decodeList
 , hexlify, unhexlify
 , cobsEncode, cobsDecode
-) -} where
+, toByteString, fromByteString
+) where
 
 import           Control.Monad
 import           Data.Monoid ((<>))
@@ -169,6 +169,23 @@ recordSeparator = 0x1E
 
 lineFeed :: Word8
 lineFeed = 0x0A
+
+-- | Encode to JSON.
+jsonEncode :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
+jsonEncode = Data.Aeson.encode
+
+-- | Encode (pretty) to JSON.
+jsonEncodePretty :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
+jsonEncodePretty = AP.encodePretty'
+    AP.defConfig {AP.confCompare = compare}
+
+-- | Decode from JSON.
+jsonDecode :: (Data.Aeson.FromJSON a) => BSL.ByteString -> Maybe a
+jsonDecode = Data.Aeson.decode
+
+-- | Try to decode from JSON.
+jsonEitherDecode :: (Data.Aeson.FromJSON a) => BSL.ByteString -> Either String a
+jsonEitherDecode = Data.Aeson.eitherDecode
 
 -- | Encode item to a ByteString.
 encode :: (Show a, Bin.Serialize a, Data.Aeson.ToJSON a) =>

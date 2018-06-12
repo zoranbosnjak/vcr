@@ -8,6 +8,8 @@ module Main where
 import           Control.Exception (catch, SomeException)
 import           Options.Applicative ((<**>))
 import qualified Options.Applicative as Opt
+import           Control.Monad (when)
+import           Data.Maybe (isJust)
 import           System.Log.Logger (Priority(INFO))
 import qualified System.Log.Logger as Log
 import           System.Log.Handler.Simple (verboseStreamHandler)
@@ -56,27 +58,24 @@ main = do
     pArgs <- System.Environment.getArgs
 
     -- EKG monitor
-    case C.vcrOptEkg (optGlobal opt) of
-        Nothing -> return ()
-        Just (ip, port) -> do
-            _ <- forkServer ip port
-            return ()
+    runMaybe (C.vcrOptEkg $ optGlobal opt) $ \(ip, port) -> do
+        _ <- forkServer ip port
+        return ()
 
-    -- console logger
-    case C.vcrOptVerbose (optGlobal opt) of
-        Nothing -> return ()
-        Just level -> do
-            Log.updateGlobalLogger Log.rootLoggerName
-                (Log.setLevel minBound . Log.removeHandler)
+    -- setup logging
+    when (isJust (C.vcrOptVerbose (optGlobal opt)) ||
+          isJust (C.vcrOptSyslog (optGlobal opt))) $ do
+
+        Log.updateGlobalLogger Log.rootLoggerName
+            (Log.setLevel minBound . Log.removeHandler)
+
+        -- console logger
+        runMaybe (C.vcrOptVerbose $ optGlobal opt) $ \level -> do
             hConsole <- verboseStreamHandler stdout level
             Log.updateGlobalLogger Log.rootLoggerName (Log.addHandler hConsole)
 
-    -- syslog
-    case C.vcrOptSyslog (optGlobal opt) of
-        Nothing -> return ()
-        Just level -> do
-            Log.updateGlobalLogger Log.rootLoggerName
-                (Log.setLevel minBound . Log.removeHandler)
+        -- syslog
+        runMaybe (C.vcrOptSyslog $ optGlobal opt) $ \level -> do
             sl <- openlog (pName) [PID] USER level
             Log.updateGlobalLogger Log.rootLoggerName (Log.addHandler sl)
 
@@ -92,4 +91,6 @@ main = do
         hPutStrLn stderr "VCR error:"
         hPutStrLn stderr $ show e
         exitWith $ ExitFailure 1
+
+    runMaybe mVal act = maybe (return ()) act mVal
 

@@ -26,6 +26,9 @@ import qualified Options.Applicative as Opt
 import qualified Options.Applicative.Builder.Internal as Opt.Int
 import Options.Applicative.Types (OptReader(CmdReader))
 import qualified System.Log.Logger as Log
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
+import           Text.Read (readMaybe)
 
 ------------------------------------------------------------------------------
 -- Logging and error reporting.
@@ -57,6 +60,7 @@ logM = Log.logM "vcr"
 data VcrOptions = VcrOptions
     { vcrOptVerbose :: Maybe Log.Priority
     , vcrOptSyslog  :: Maybe Log.Priority
+    , vcrOptEkg     :: Maybe (BS.ByteString, Int)
     } deriving (Show)
 
 -- | A parser for parsing general VCR command line options.
@@ -73,8 +77,18 @@ vcrOptions = VcrOptions
        <> Opt.metavar "LEVEL"
        <> Opt.help ("Set syslog verbosity level, one of: " ++ show levels)
         ))
+    <*> Opt.optional (Opt.option ekgOption
+        ( Opt.long "ekg"
+       <> Opt.metavar "IP:PORT"
+       <> Opt.help "Enable EKG monitor"
+        ))
   where
     levels = [minBound..maxBound] :: [Log.Priority]
+    ekgOption = Opt.maybeReader $ \s -> do
+        let (a,b) = break (==':') s
+            ip = BS8.pack a
+        port <- readMaybe $ drop 1 b
+        Just (ip, port)
 
 -- | Options for start/stop time.
 timeOptions :: String -> Opt.Parser UTCTime

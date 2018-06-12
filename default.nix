@@ -1,6 +1,6 @@
 { mkDerivation, aeson, aeson-pretty, async, attoparsec, base
 , binary, bytestring, cereal, clock, containers, convertible
-, directory, filepath, HDBC, HDBC-postgresql, HDBC-sqlite3
+, directory, ekg, filepath, HDBC, HDBC-postgresql, HDBC-sqlite3
 , hslogger, hsyslog, http-client, http-conduit, http-types, HUnit
 , network, network-multicast, optparse-applicative, QuickCheck
 , scotty, stdenv, stm, test-framework, test-framework-hunit
@@ -15,7 +15,7 @@ mkDerivation {
   isExecutable = true;
   libraryHaskellDepends = [
     aeson aeson-pretty async attoparsec base binary bytestring cereal
-    clock containers convertible directory filepath HDBC
+    clock containers convertible directory ekg filepath HDBC
     HDBC-postgresql HDBC-sqlite3 hslogger hsyslog http-client
     http-conduit http-types network network-multicast
     optparse-applicative QuickCheck scotty stm text text-format time
@@ -23,7 +23,7 @@ mkDerivation {
   ];
   executableHaskellDepends = [
     aeson aeson-pretty async attoparsec base binary bytestring cereal
-    clock containers convertible directory filepath HDBC
+    clock containers convertible directory ekg filepath HDBC
     HDBC-postgresql HDBC-sqlite3 hslogger hsyslog http-client
     http-conduit http-types network network-multicast
     optparse-applicative QuickCheck scotty stm text text-format time

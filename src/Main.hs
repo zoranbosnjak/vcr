@@ -16,6 +16,7 @@ import           System.Log.Handler.Syslog
 import           System.IO (stdout, stderr, hPutStrLn)
 import           System.Exit (exitWith, ExitCode(ExitFailure, ExitSuccess))
 import qualified System.Environment
+import           System.Remote.Monitoring
 
 -- local imports
 import qualified Common as C
@@ -47,11 +48,19 @@ options = Options
 
 main :: IO ()
 main = do
+
     -- parse options
     opt <- Opt.execParser (Opt.info (options <**> Opt.helper) Opt.idm)
 
     pName <- System.Environment.getProgName
     pArgs <- System.Environment.getArgs
+
+    -- EKG monitor
+    case C.vcrOptEkg (optGlobal opt) of
+        Nothing -> return ()
+        Just (ip, port) -> do
+            _ <- forkServer ip port
+            return ()
 
     -- console logger
     case C.vcrOptVerbose (optGlobal opt) of

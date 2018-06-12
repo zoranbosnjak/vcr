@@ -80,8 +80,10 @@ server = Opt.subparser $
 data Store
     = StoreSQLite3 FilePath     -- sqlite3 file
     | StorePostgreSQL String    -- postgresql database
+    {-
     -- | StoreRemote Http          -- remote server (cascade)
     -- | StoreMemory Integer       -- in memory up to N events (for test)
+    -}
     deriving (Eq, Show)
 
 data Connector = forall c. (IConnection c) => Connector String (IO c)

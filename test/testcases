@@ -1,4 +1,0 @@
-- send UDP with sequence number in payload, check dropped frames for various scenarios
-    - basic buffering, server restart
-    - recording during intensive push to server (with local buffer full)
-

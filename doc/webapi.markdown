@@ -12,12 +12,9 @@ Return all distinct channels in the recording.
 Return all distinct recorders.
 
 ## GET /info/oldest
-(array of channels to consider)
-Return UTC time of the oldest event in the recording.
-
-## GET /status/backends
-Return status about backend connectivity:
-{'name': connected (yes/no)}
+## GET /info/youngest
+(optional list of channels to consider)
+Return UTC time of the oldest/youngest event in the recording.
 
 ## HEAD, GET /events
 
@@ -30,11 +27,11 @@ Accept header:
 query params:
 
     * pretty (bool) - pretty print output (for some contents)
-    * t1 (start time) - t >= t1 (required)
-    * t2 (end time) - t < t2 (required)
+    * t1 (start time) - t >= t1 (required),     format: YYYY-MM-DDTHH:MM:SS.SSSZ
+    * t2 (end time) - t < t2 (required),        format: YYYY-MM-DDTHH:MM:SS.SSSZ
     * limit (n)     - max. number of rows returned (optional)
-    * channels (array) - channels to include (optional)
-    * recorders (array) - recorders to include (optional)
+    * channel (name) - channel(s) to include
+    * recorder (name) - recorder(s) to include
 
 ## PUT /events
 

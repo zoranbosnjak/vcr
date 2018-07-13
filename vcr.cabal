@@ -32,6 +32,7 @@ library
         , Buffer
         , Udp
         , Server
+        , Process
     ghc-options:        -O2 -Wall -funbox-strict-fields
     default-extensions: StrictData
     build-depends:
@@ -92,6 +93,7 @@ executable vcr
         , Server
         , Streams
         , Udp
+        , Process
     build-depends:
         vcr
         , base < 5

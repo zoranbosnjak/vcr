@@ -20,10 +20,9 @@ module CmdRecord (cmdRecord) where
 import           Data.Monoid ((<>))
 import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
-import           System.Log.Logger (Priority(INFO, NOTICE, ERROR))
+import           System.Log.Logger (Priority(INFO, NOTICE))
 import           Data.Text (pack)
 import           Network.BSD (getHostName)
-import           Control.Concurrent (threadDelay)
 import           Data.Maybe (fromMaybe, isJust)
 import qualified Data.UUID
 import           Data.UUID.V4 (nextRandom)
@@ -51,6 +50,7 @@ import qualified Common as C
 import qualified Event
 import           Common (logM)
 import           Streams
+import           Process
 import qualified Udp
 import qualified Encodings as Enc
 import qualified File
@@ -285,50 +285,6 @@ logP level prefix = mkPipe $ \consume produce -> forever $ do
     liftIO $ logM level $ prefix ++ ": " ++ show msg
     produce msg
 
--- | Wait forever.
-doNothing :: IO ()
-doNothing = forever $ threadDelaySec 1
-
--- | Create a pair.
-process :: a -> b -> (a, b)
-process name act = (name, act)
-
--- | Runn all processes from the list.
-runAll :: [(String, IO a)] -> IO ()
-runAll [] = doNothing
-runAll processes = do
-    lst <- mapM runProc processes
-    (a, rv) <- Async.waitAnyCatchCancel (fmap fst lst)
-    case lookup a lst of
-        Nothing -> logM ERROR "Unknown process terminated"
-        Just procName -> case rv of
-            Left e -> logM NOTICE $
-                show procName ++ " terminated with exception: " ++ show e
-            Right _ -> logM INFO $
-                show procName ++ " finisned"
-  where
-    runProc (name, act) = do
-        logM INFO $ "Starting " ++ show name
-        a <- Async.async act
-        return (a, name)
-
--- | Restart process when variable value changes.
-withVar :: (Eq t, Show t) => String -> STM t -> (t -> IO ()) -> IO ()
-withVar name getVar act = do
-    initial <- atomically getVar
-    loop initial
-  where
-    loop val = do
-        logM INFO $ "(re)starting " ++ show name ++ ", " ++ show val
-        rv <- Async.race (act val) (atomically $ do
-            newVal <- getVar
-            when (newVal == val) retry
-            return newVal
-            )
-        case rv of
-            Left _ -> return ()
-            Right newVal -> loop newVal
-
 -- | Process inputs.
 processInputs :: STM Inputs -> ((Event.Channel, Udp.UdpIn) -> IO ()) -> IO ()
 processInputs getInputs act = do
@@ -410,9 +366,6 @@ emptyConfig = AppConfig
     --, appServerOutput = Nothing
     }
 
-threadDelaySec :: Double -> IO ()
-threadDelaySec = threadDelay . round . (1000000*)
-
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
 runCmd opts vcrOpts = case optArgs opts of
@@ -493,7 +446,7 @@ runCmd opts vcrOpts = case optArgs opts of
     case bstr of
       Just val -> BSL.putStr $ Enc.jsonEncodePretty val
       Nothing -> runAll
-        [ process "uptime" $ case optUptime opts of
+        [ Process "uptime" $ case optUptime opts of
             Nothing -> doNothing
             Just t -> forever $ do
                 threadDelaySec t
@@ -505,7 +458,7 @@ runCmd opts vcrOpts = case optArgs opts of
                 logM INFO $
                     "uptime: " ++ showFFloat (Just 3) uptimeDays "" ++ " days"
 
-        , process "file output" $ do
+        , Process "file output" $ do
             ch <- atomically $ dupTChan hub
             withVar "file output" (appFileOutput <$> readTVar cfg) $ \case
                 Nothing -> runStream $ tx ch >-> drain
@@ -526,7 +479,7 @@ runCmd opts vcrOpts = case optArgs opts of
                         >-> drain
 
         {-
-        , process "server output" $ do
+        , Process "server output" $ do
             ch <- atomically $ dupTChan hub
             withVar "server output" (appServerOutput <$> readTVar cfg) $ \case
                 Nothing -> runStream $ tx ch >-> drain
@@ -535,7 +488,7 @@ runCmd opts vcrOpts = case optArgs opts of
                     runStream $ tx ch >-> drain
         -}
 
-        , process "stdin" $
+        , Process "stdin" $
             withVar "stdin" (appStdin <$> readTVar cfg) $ \case
                 Nothing -> doNothing
                 Just ch -> runStream $
@@ -543,7 +496,7 @@ runCmd opts vcrOpts = case optArgs opts of
                     >-> toEvents sessionId ch recId
                     >-> rx
 
-        , process "UDP inputs" $ do
+        , Process "UDP inputs" $ do
             let getInputs = appInputs <$> readTVar cfg
             processInputs getInputs $ \(ch, udp) -> runStream $
                 Udp.udpReader udp

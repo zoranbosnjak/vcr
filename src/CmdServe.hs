@@ -39,7 +39,7 @@ import qualified Network.Wai.Handler.Warp as Warp
 import           Network.HTTP.Types
 
 -- local imports
-import           Common (logM)
+import           Common (logM, threadDelaySec)
 import qualified Common as C
 import qualified Event as E
 import qualified Encodings

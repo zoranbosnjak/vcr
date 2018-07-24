@@ -10,15 +10,11 @@
 module Buffer where
 
 import           GHC.Generics (Generic)
-import           Control.Concurrent.Async (async, cancel)
+import qualified System.Clock
 import           Control.Monad.IO.Class (liftIO)
-import           Control.Monad (when)
 import qualified Data.Sequence as DS
 import           Data.Foldable (toList)
-import           Data.Maybe (isJust)
 import           Control.Concurrent.STM as STM
-import           Control.Monad.Trans.Except
-import           Control.Exception (mask)
 import           Data.Monoid ((<>))
 import qualified Options.Applicative as Opt
 import           Data.Aeson (ToJSON, FromJSON)
@@ -78,68 +74,91 @@ isBelow (Threshold a1 b1 c1) (Threshold a2 b2 c2) = and [a1<!a2, b1<!b2, c1<!c2]
 threshold :: (Maybe Int) -> (Maybe Integer) -> (Maybe Double) -> Threshold
 threshold = Threshold
 
-activeThrashold :: Threshold -> Bool
-activeThrashold (Threshold a b c) = or [isJust a, isJust b, isJust c]
-
--- | Buffer will hold data until the threshold is reached.
--- Then it will send all buffered data as a list.
-holdBuffer :: (Enc.HasSize a) => Threshold -> Pipe a [a]
-holdBuffer th = case thresholdValid th of
-    False -> Streams.map (\val -> [val])
-    True -> mkPipe action
-  where
-    action consume produce = do
-        buffer  <- liftIO $ newTVarIO DS.empty
-        cnt     <- liftIO $ newTVarIO (0::Int)
-        bytes   <- liftIO $ newTVarIO (0::Integer)
-
-        -- write from intermediate buffer via produce function
-        let writerLoop = forever $ do
-                timeout <- case thSeconds th of
-                    Nothing -> newTVarIO False
-                    Just val -> registerDelay $ (round val) * 1000000
-                items <- atomically $ do
-                    c1 <- case thLength th of
-                        Nothing -> return False
-                        Just val -> (>= val) <$> readTVar cnt
-                    c2 <- case thBytes th of
-                        Nothing -> return False
-                        Just val -> (>= val) <$> readTVar bytes
-                    c3 <- readTVar timeout
-                    case (c1 || c2 || c3) of
-                        False -> retry
-                        True -> do
-                            content <- readTVar buffer
-                            case DS.null content of
-                                True -> retry
-                                False -> return $ toList content
-
-                _ <- mask $ \_restore -> do
-                    atomically $ do
-                        writeTVar buffer DS.empty
-                        writeTVar cnt 0
-                        writeTVar bytes 0
-                    runExceptT $ produce items
-                return ()
-
-        let readerLoop writer = do
-                mMsg <- catchE (Just <$> consume Clear) (const $ return Nothing)
-                case mMsg of
-                    Nothing -> do
-                        liftIO $ cancel writer
-                        content <- liftIO $ atomically $ readTVar buffer
-                        when (not $ DS.null content) $ do
-                            produce $ toList content
-                    Just msg -> do
-                        liftIO $ atomically $ do
-                            modifyTVar buffer (\s -> s DS.|> msg)
-                            modifyTVar cnt succ
-                            modifyTVar bytes (+ (Enc.sizeOf msg))
-                        readerLoop writer
-
-        bracket (async writerLoop) cancel readerLoop
-
 -- | Concatinate incomming items.
 concatinate :: (Monoid a) => Pipe [a] a
 concatinate = Streams.map mconcat
+
+-- | Buffer will hold data until the threshold th1 is reached.
+-- Then it will send all buffered data as a list.
+-- It would drop all data if th2 is reached.
+holdBuffer :: (Enc.HasSize a) => Threshold -> Threshold -> ([a] -> IO ())
+    -> Pipe a [a]
+holdBuffer th1 th2 dropAct = case thresholdValid th1 of
+    False -> Streams.map (\val -> [val])
+    True -> mkBridge acquire release rx tx flush
+  where
+    now = System.Clock.toNanoSecs <$> System.Clock.getTime System.Clock.Boottime
+
+    acquire = (,,)
+        <$> newTVarIO DS.empty      -- buffer
+        <*> (now >>= newTVarIO)     -- timestamp of last transmit
+        <*> newTVarIO (0::Integer)  -- size counter
+
+    release _ = return ()
+
+    rx (buf, tOut, size) = mkConsumer $ \consume -> forever $ do
+        msg <- consume Clear
+        t0 <- liftIO now
+
+        dropped <- liftIO $ atomically $ do
+            content <- (DS.|> msg) <$> readTVar buf
+            t <- readTVar tOut
+            bytes <- (+ (Enc.sizeOf msg)) <$> readTVar size
+
+            let timeout = case thSeconds th2 of
+                    Nothing -> False
+                    Just dt ->
+                        let dtNs = round $ dt * (10^(9::Int))
+                        in (t0 - t) > dtNs
+
+                lengthOverflow = case thLength th2 of
+                    Nothing -> False
+                    Just top -> DS.length content > top
+
+                sizeOverflow = case thBytes th2 of
+                    Nothing -> False
+                    Just top -> bytes > top
+
+            case lengthOverflow || sizeOverflow || timeout of
+                False -> do
+                    writeTVar buf content
+                    writeTVar size bytes
+                    return []
+                True -> do
+                    writeTVar buf DS.empty
+                    writeTVar size 0
+                    writeTVar tOut t0
+                    return $ toList content
+        liftIO $ dropAct dropped
+
+    tx (buf, tOut, size) = mkProducer $ \produce -> forever $ do
+        timeout <- liftIO $ case thSeconds th1 of
+            Nothing -> newTVarIO False
+            Just val -> registerDelay $ (round val) * 1000000
+        items <- liftIO $ atomically $ do
+            c1 <- case thLength th1 of
+                Nothing -> return False
+                Just val -> (>= val) . DS.length <$> readTVar buf
+            c2 <- case thBytes th1 of
+                Nothing -> return False
+                Just val -> (>= val) <$> readTVar size
+            c3 <- readTVar timeout
+            case (c1 || c2 || c3) of
+                False -> retry
+                True -> do
+                    content <- readTVar buf
+                    case DS.null content of
+                        True -> retry
+                        False -> do
+                            writeTVar buf DS.empty
+                            writeTVar size 0
+                            return $ toList content
+        produce items
+        liftIO (now >>= (atomically . writeTVar tOut))
+
+    flush (buf, _tOut, _size) = mkProducer $ \produce -> do
+        items <- do
+            content <- liftIO $ atomically $ readTVar buf
+            return $ toList content
+        produce items
 

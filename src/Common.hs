@@ -7,6 +7,7 @@
 
 module Common
 ( logM
+, threadDelaySec
 , Log.Priority(..)
 , VcrOptions(..)
 , vcrOptions
@@ -17,14 +18,15 @@ module Common
 , kiloMega
 ) where
 
-import Control.Exception (throwIO, Exception)
-import Control.Monad (unless)
-import Data.Monoid ((<>))
-import Data.Time (UTCTime)
-import Data.Typeable (Typeable)
+import           Control.Concurrent (threadDelay)
+import           Control.Exception (throwIO, Exception)
+import           Control.Monad (unless)
+import           Data.Monoid ((<>))
+import           Data.Time (UTCTime)
+import           Data.Typeable (Typeable)
 import qualified Options.Applicative as Opt
 import qualified Options.Applicative.Builder.Internal as Opt.Int
-import Options.Applicative.Types (OptReader(CmdReader))
+import           Options.Applicative.Types (OptReader(CmdReader))
 import qualified System.Log.Logger as Log
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
@@ -37,6 +39,9 @@ newtype VcrError = VcrError String deriving (Eq, Typeable)
 instance Exception VcrError
 instance Show VcrError where
     show (VcrError err) = err
+
+threadDelaySec :: Double -> IO ()
+threadDelaySec = threadDelay . round . (1000000*)
 
 -- | Throw VCR exception.
 throw :: String -> IO a

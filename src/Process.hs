@@ -8,20 +8,16 @@
 module Process where
 
 import           Control.Monad (when)
-import           Control.Concurrent (threadDelay)
 import           Control.Concurrent.STM hiding (check)
 import qualified Control.Concurrent.Async as Async
 import           System.Log.Logger (Priority(INFO, NOTICE, ERROR))
 
-import           Common (logM)
+import           Common (logM, threadDelaySec)
 
 data Process = Process
     { procName :: String
     , procAction :: IO ()
     }
-
-threadDelaySec :: Double -> IO ()
-threadDelaySec = threadDelay . round . (1000000*)
 
 -- | Wait forever.
 doNothing :: IO ()

@@ -20,7 +20,7 @@ module CmdRecord (cmdRecord) where
 import           Data.Monoid ((<>))
 import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
-import           System.Log.Logger (Priority(INFO, NOTICE))
+import           System.Log.Logger (Priority(..))
 import           Data.Text (pack)
 import           Network.BSD (getHostName)
 import           Data.Maybe (fromMaybe, isJust)
@@ -55,7 +55,7 @@ import qualified Udp
 import qualified Encodings as Enc
 import qualified File
 import qualified Buffer
---import qualified Server as Srv
+import qualified Server
 
 cmdRecord :: Opt.ParserInfo (C.VcrOptions -> IO ())
 cmdRecord = Opt.info ((runCmd <$> options) <**> Opt.helper)
@@ -80,7 +80,7 @@ data CmdLine = CmdLine
     { optStdIn      :: Maybe Event.Channel
     , optUdpIn      :: Map.Map Event.Channel Udp.UdpIn
     , optOutFile    :: Maybe OutputFile
-    --, optOutServer  :: Maybe OutputServer
+    , optOutServer  :: Maybe OutputServer
     , optBootstrap  :: Bool
     } deriving (Eq, Show)
 
@@ -100,7 +100,7 @@ data AppConfig = AppConfig
     { appStdin :: Maybe Event.Channel
     , appInputs :: Inputs
     , appFileOutput :: Maybe OutputFile
-    --, appServerOutput :: Maybe OutputServer
+    , appServerOutput :: Maybe OutputServer
     } deriving (Generic, Eq, Show)
 
 instance ToJSON AppConfig
@@ -157,7 +157,7 @@ options = Options
         <$> Opt.optional stdinOptions
         <*> (Map.fromList <$> Opt.many udpInputOptions)
         <*> Opt.optional storeFileOptions
-        -- <*> Opt.optional storeServerOptions
+        <*> Opt.optional storeServerOptions
         <*> Opt.switch
             ( Opt.long "bootstrap"
             <> Opt.help "Print config file and exit"
@@ -189,10 +189,9 @@ storeFileOptions = C.subparserCmd "outfile ..." $ Opt.command "outfile" $
         <*> Opt.optional File.rotateOptions
         <*> Buffer.thresholdOptions "file"
 
-{-
 -- | Server output.
 data OutputServer = OutputServer
-    { outServerConnection   :: Srv.ServerConnection
+    { outServerConnection   :: Server.ServerConnection
     , outServerOnOverflow   :: OnOverflow
     , outServerLimitSend    :: Buffer.Threshold
     , outServerLimitDrop    :: Buffer.Threshold
@@ -200,29 +199,24 @@ data OutputServer = OutputServer
 
 instance ToJSON OutputServer
 instance FromJSON OutputServer
--}
 
 -- | Overflow handler (what to do in case of buffer overflow).
 data OnOverflow
     = OnOverflowDrop
     | OnOverflowFile File.FileStore
-    | OnOverflowSyslog
     deriving (Generic, Eq, Show)
 
 instance ToJSON OnOverflow where
     toJSON OnOverflowDrop = toJSON ("drop" :: String)
     toJSON (OnOverflowFile (File.FileStore f)) = toJSON $ "file " ++ f
-    toJSON OnOverflowSyslog = toJSON ("syslog" :: String)
 
 instance FromJSON OnOverflow where
     parseJSON (Data.Aeson.String s) = case (words $ unpack s) of
         ("drop":[]) -> return OnOverflowDrop
         ("file":f:[]) -> return $ OnOverflowFile $ File.FileStore f
-        ("syslog":[]) -> return OnOverflowSyslog
         _ -> typeMismatch "OnOverflow" (Data.Aeson.String s)
     parseJSON t = typeMismatch "OnOverflow" t
 
-{-
 storeServerOptions :: Opt.Parser OutputServer
 storeServerOptions = C.subparserCmd "server ..." $ Opt.command "server" $
     Opt.info
@@ -230,8 +224,8 @@ storeServerOptions = C.subparserCmd "server ..." $ Opt.command "server" $
         (Opt.progDesc "Store data to server")
   where
     opts = OutputServer
-        <$> Srv.serverConnectionOptions
-        <*> (onOverflowDrop <|> onOverflowFile <|> onOverflowSyslog)
+        <$> Server.serverConnectionOptions
+        <*> (onOverflowDrop <|> onOverflowFile)
         <*> Buffer.thresholdOptions "send"
         <*> Buffer.thresholdOptions "drop"
 
@@ -247,13 +241,6 @@ onOverflowFile = OnOverflowFile <$> Opt.strOption
    <> Opt.metavar "FILE"
    <> Opt.help "In case of buffer overflow, save data to a file"
     )
-
-onOverflowSyslog :: Opt.Parser OnOverflow
-onOverflowSyslog = Opt.flag' OnOverflowSyslog
-    ( Opt.long "dropSyslog"
-   <> Opt.help "In case of buffer overflow, send data to syslog"
-    )
--}
 
 -- | Convert raw data to Event.
 toEvents :: Event.SessionId -> Event.Channel -> Event.SourceId
@@ -355,7 +342,7 @@ processInputs getInputs act = do
             logM NOTICE $ "Input terminated: "
                 ++ show ch ++ ", " ++ show param ++ ", " ++ msg
                 ++ ", will auto restart in few moments..."
-            threadDelaySec 3
+            C.threadDelaySec 3
             logM INFO $ "Auto restart input: " ++ show ch ++ ", " ++ show param
 
 emptyConfig :: AppConfig
@@ -363,7 +350,7 @@ emptyConfig = AppConfig
     { appStdin = Nothing
     , appInputs = mempty
     , appFileOutput = Nothing
-    --, appServerOutput = Nothing
+    , appServerOutput = Nothing
     }
 
 -- | Run command.
@@ -433,7 +420,7 @@ runCmd opts vcrOpts = case optArgs opts of
                     { appStdin = optStdIn args
                     , appInputs = Inputs $ optUdpIn args
                     , appFileOutput = optOutFile args
-                    -- , appServerOutput = optOutServer args
+                    , appServerOutput = optOutServer args
                     }
             atomically $ writeTVar cfg app
             return $ case optBootstrap args of
@@ -449,7 +436,7 @@ runCmd opts vcrOpts = case optArgs opts of
         [ Process "uptime" $ case optUptime opts of
             Nothing -> doNothing
             Just t -> forever $ do
-                threadDelaySec t
+                C.threadDelaySec t
                 (_t1, t2) <- Event.now
                 let uptimeSec =
                         Event.monoTimeToSeconds t2
@@ -473,20 +460,32 @@ runCmd opts vcrOpts = case optArgs opts of
                     runStream $ tx ch
                         >-> Enc.toByteString (outFileEnc fo)
                         >-> Buffer.holdBuffer (outFileBuffer fo)
+                            mempty (\_ -> return ())
                         >-> Buffer.concatinate
                         >-> File.fileWriter (outFileStore fo) mRot
                         >-> logP INFO "rotate"
                         >-> drain
 
-        {-
         , Process "server output" $ do
             ch <- atomically $ dupTChan hub
             withVar "server output" (appServerOutput <$> readTVar cfg) $ \case
                 Nothing -> runStream $ tx ch >-> drain
-                Just _srv -> do
-                    -- TODO
-                    runStream $ tx ch >-> drain
-        -}
+                Just srv -> do
+                    let dropAct [] = return ()
+                        dropAct msgs = case outServerOnOverflow srv of
+                            OnOverflowDrop -> do
+                                logM NOTICE $ "dropping messages"
+                            OnOverflowFile fs -> do
+                                let fn = File.filePath fs
+                                logM NOTICE $ "dropping messages to a file "
+                                    ++ show fn
+                                BS.appendFile fn (BS.concat msgs)
+                    runStream $ tx ch
+                        >-> Enc.toByteString Enc.EncJSON
+                        >-> Buffer.holdBuffer (outServerLimitSend srv)
+                            (outServerLimitDrop srv) dropAct
+                        >-> Buffer.concatinate
+                        >-> Server.serverWriter (outServerConnection srv)
 
         , Process "stdin" $
             withVar "stdin" (appStdin <$> readTVar cfg) $ \case

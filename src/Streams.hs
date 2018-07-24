@@ -60,7 +60,7 @@ import           Control.Monad.IO.Class (liftIO)
 import qualified Control.Exception
 import           Control.Concurrent.STM
 import           Control.Concurrent.Async
-                    (withAsync, cancel, wait, waitEitherCatch)
+                    (withAsync, cancel, wait, waitEitherCatch, race)
 import           Control.Monad.Trans.Except
 
 data Checkpoint
@@ -144,33 +144,52 @@ noProduce :: t -> a
 noProduce _ = error "can not produce values"
 
 -- | Create producer. It's action can only produce values.
-mkProducer :: (ProduceFunc b -> StreamT ()) -> Streaming a b
+mkProducer :: (ProduceFunc a -> StreamT ()) -> Producer a
 mkProducer f = Streaming action where
     action _consume produce = f produce
 
 -- | Create pipe.
-mkPipe :: (ConsumeFunc a -> ProduceFunc b -> StreamT ()) -> Streaming a b
+mkPipe :: (ConsumeFunc a -> ProduceFunc b -> StreamT ()) -> Pipe a b
 mkPipe = Streaming
 
 -- | Create effect.
-mkEffect :: StreamT () -> Streaming a b
+mkEffect :: StreamT () -> Effect
 mkEffect f = Streaming action where
     action _consume _produce = f
 
 -- | Create consumer. It's action can only consume values.
-mkConsumer :: (ConsumeFunc a -> StreamT ()) -> Streaming a b
+mkConsumer :: (ConsumeFunc a -> StreamT ()) -> Consumer a
 mkConsumer f = Streaming action where
     action consume _produce = f consume
+
+-- | Connect Consumer and Producer back-to-back and form a Pipe.
+mkBridge ::
+    IO r
+    -> (r -> IO c)
+    -> (r -> Consumer a)    -- consumer
+    -> (r -> Producer b)    -- producer
+    -> (r -> Producer b)    -- final producer before release phase
+    -> Pipe a b
+mkBridge acquire release rx tx flush = Streaming action where
+    action consume produce = bracket acquire release $ \r -> liftIO $ do
+        let act1 = runExceptT $ (streamAction (rx r)) consume noProduce
+            act2 = runExceptT $ (streamAction (tx r)) noConsume produce
+            act3 = runExceptT $ (streamAction (flush r)) noConsume produce
+        -- run consumer and producer, flush if original consumer terminates
+        rv <- race act1 act2
+        case rv of
+            Left _ -> act3 >> return ()
+            Right _ -> return ()
 
 -- | Utils
 
 -- | map function over each element
-map :: (a -> b) -> Streaming a b
+map :: (a -> b) -> Pipe a b
 map f = mkPipe $ \consume produce -> forever $ do
     consume Clear >>= produce . f
 
 -- | filter stream elements
-filter :: (a -> Bool) -> Streaming a a
+filter :: (a -> Bool) -> Pipe a a
 filter f = mkPipe $ \consume produce -> forever $ do
     msg <- consume Clear
     when (f msg) $ produce msg

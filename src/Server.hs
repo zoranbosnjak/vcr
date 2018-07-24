@@ -5,23 +5,28 @@
 -- This module provides server access definitions.
 --
 
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
-module Server
-{-
-( ServerConnection(..)
-, serverConnectionOptions
-) -} where
+module Server where
 
 -- standard imports
+import           Control.Exception (SomeException, try)
+import           Control.Monad.IO.Class (liftIO)
 import           GHC.Generics (Generic)
 import           Data.Monoid ((<>))
 import           Data.String
 import qualified Options.Applicative as Opt
 import           Data.Aeson (ToJSON, FromJSON)
--- import Network.HTTP.Simple
+import qualified Data.ByteString as BS
+import           Data.ByteString.Lazy (fromStrict)
+import           Network.HTTP.Client
+import           Network.HTTP.Types.Status (statusCode)
 
 -- local imports
+import           Common
+import           Streams
 
 newtype URI = URI String deriving (Generic, Eq, Show)
 instance ToJSON URI
@@ -30,13 +35,11 @@ instance FromJSON URI
 instance IsString URI where
     fromString = URI
 
-type ConnectTimeout = Double
 type RetryTimeout = Double
 
 -- | Server connection pool.
 data ServerConnection = ServerConnection
     { serverURI       :: URI
-    , connectTimeout  :: ConnectTimeout
     , retryTimeout    :: RetryTimeout
     } deriving (Generic, Eq, Show)
 
@@ -46,7 +49,6 @@ instance FromJSON ServerConnection
 serverConnectionOptions :: Opt.Parser ServerConnection
 serverConnectionOptions = ServerConnection
     <$> serverOptions
-    <*> connectTimeoutOptions
     <*> retryTimeoutOptions
 
 serverOptions :: Opt.Parser URI
@@ -57,15 +59,6 @@ serverOptions = URI
        <> Opt.help "URI address"
         )
 
-connectTimeoutOptions :: Opt.Parser ConnectTimeout
-connectTimeoutOptions = Opt.option Opt.auto
-    ( Opt.long "connect"
-   <> Opt.metavar "SECONDS"
-   <> Opt.help "Connect timeout"
-   <> Opt.value 3
-   <> Opt.showDefault
-    )
-
 retryTimeoutOptions :: Opt.Parser RetryTimeout
 retryTimeoutOptions = Opt.option Opt.auto
     ( Opt.long "retry"
@@ -75,25 +68,38 @@ retryTimeoutOptions = Opt.option Opt.auto
    <> Opt.showDefault
     )
 
-{-
-requestMethod????
-sendHttp ip port evts = do
-    -- TODO: add proper content type
-    request <- parseRequest $ "PUT http://"++ip++":"++port++"/events"
-    let request' = setRequestBodyJSON evts $ request
-        retryWith s = do
-            tellIO NOTICE s
-            threadDelaySec 3
-            process
-        process = do
-            eResponse <- try (httpLBS request')
-            case eResponse of
-                Left (SomeException _e) ->
-                    retryWith "Unable to connect."
-                Right resp -> do
-                    case getResponseStatusCode resp of
-                        200 -> tellIO DEBUG "Request processed."
-                        _ -> do retryWith $ show resp
-    process
--}
+serverWriter :: ServerConnection -> Consumer BS.ByteString
+serverWriter sc = mkConsumer action where
+    action consume = do
+        manager <- liftIO $ newManager defaultManagerSettings
+        initialRequest <- liftIO $ parseRequest $ uri ++ "events"
+        forever $ do
+            msg <- consume Clear
+            let request = initialRequest
+                    { method = "PUT"
+                    , requestBody = RequestBodyLBS $ fromStrict msg
+                    }
+                sendToServer = do
+                    rv <- try $ httpLbs request manager
+                    let err = case rv of
+                            Left (_e :: SomeException) ->
+                                Just $ "server connection error " ++ show uri
+                            Right resp ->
+                                let rc = statusCode $ responseStatus resp
+                                in case rc of
+                                    200 -> Nothing
+                                    _ -> Just $
+                                        "unexpected response code from server "
+                                        ++ show uri
+                                        ++ ": " ++ show rc
+                    case err of
+                        Nothing -> do
+                            logM DEBUG "data sent to server"
+                        Just s -> do
+                            logM NOTICE s
+                            threadDelaySec rt
+                            sendToServer
+            liftIO $ sendToServer
+    URI uri = serverURI sc
+    rt = retryTimeout sc
 

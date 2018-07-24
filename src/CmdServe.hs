@@ -32,6 +32,7 @@ import           Database.HDBC.PostgreSQL (connectPostgreSQL)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy.Char8 as BSL8
 import qualified Data.ByteString.Lazy as BSL
 import           Text.Read (readMaybe)
 import           Network.Wai
@@ -309,25 +310,21 @@ app db request respond = withLog go where
     go ["info", "oldest"] GET = timeSpan "ASC"
     go ["info", "youngest"] GET = timeSpan "DESC"
 
-    go ["events"] HEAD = undefined
-
     go ["events"] GET = runSelect statement stream where
         statement = do
-            t1 <- maybe (fail "t1 required") return (getQueryTime request "t1")
-            t2 <- maybe (fail "t2 required") return (getQueryTime request "t2")
-            let
+            let t1 = getQueryTime request "t1"
+                t2 = getQueryTime request "t2"
                 chList = getQueryArray request ("ch", "channel")
                 recList = getQueryArray request ("srcId", "recorder")
                 limit = (getQueryValue request "limit") :: Maybe Integer
 
             return $
-                "SELECT * from events WHERE"
-                ++ " utcTime >= " ++ fmtTime t1
-                ++ " AND"
-                ++ " utcTime < "  ++ fmtTime t2
+                "SELECT * from events WHERE NULL IS NULL"
+                ++ maybe "" (\x -> " AND utcTime >= " ++ fmtTime x) t1
+                ++ maybe "" (\x -> " AND utcTime < " ++ fmtTime x) t2
                 ++ maybe "" (\x -> " AND " ++ x) chList
                 ++ maybe "" (\x -> " AND " ++ x) recList
-                ++ " ORDER BY ch, sesId, monoTime ASC"
+                ++ " ORDER BY monoTime, ch, sesId ASC"
                 ++ maybe "" (\x -> " LIMIT " ++ show x) limit
                 ++ ";"
 
@@ -356,9 +353,6 @@ app db request respond = withLog go where
         sender tx = mkConsumer $ \consume -> forever $ do
             consume Clear >>= liftIO . tx . fromByteString
 
-    -- TODO: handle different content types
-    -- TODO: maxSize param
-    -- TODO: handle database exceptions
     go ["events"] PUT = withDatabase db $ \conn -> do
         rv <- try $ runStream $
             reader
@@ -432,7 +426,7 @@ app db request respond = withLog go where
                 respond $ responseLBS
                     status503
                     [("Content-Type", "text/plain")]
-                    "database error"
+                    (BSL.concat ["database error: ",  BSL8.pack (show e)])
             Right select -> do
                 let action = respond $ responseStream
                         status200

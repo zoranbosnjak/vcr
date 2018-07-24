@@ -16,7 +16,7 @@ Return all distinct recorders.
 (optional list of channels to consider)
 Return UTC time of the oldest/youngest event in the recording.
 
-## HEAD, GET /events
+## GET /events
 
 Accept header:
 

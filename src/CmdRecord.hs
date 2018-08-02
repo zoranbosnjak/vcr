@@ -23,7 +23,7 @@ import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(..))
 import           Data.Text (pack)
 import           Network.BSD (getHostName)
-import           Data.Maybe (fromMaybe, isJust)
+import           Data.Maybe (fromMaybe)
 import qualified Data.UUID
 import           Data.UUID.V4 (nextRandom)
 import           Control.Monad.IO.Class (liftIO)
@@ -89,7 +89,7 @@ data OutputFile = OutputFile
     { outFileStore  :: File.FileStore
     , outFileEnc    :: Enc.EncodeFormat
     , outFileRotate :: (Maybe File.Rotate)
-    , outFileBuffer :: Buffer.Threshold
+    , outFileBuffer :: Maybe Int
     } deriving (Generic, Eq, Show)
 
 instance ToJSON OutputFile
@@ -187,13 +187,15 @@ storeFileOptions = C.subparserCmd "outfile ..." $ Opt.command "outfile" $
         <$> File.fileStoreOptions
         <*> Enc.encodeFormatOptions
         <*> Opt.optional File.rotateOptions
-        <*> Buffer.thresholdOptions "file"
+        <*> Opt.optional (Opt.option Opt.auto
+            ( Opt.long "buffer"
+           <> Opt.help "Internal buffer size"
+            ))
 
 -- | Server output.
 data OutputServer = OutputServer
     { outServerConnection   :: Server.ServerConnection
     , outServerOnOverflow   :: OnOverflow
-    , outServerLimitSend    :: Buffer.Threshold
     , outServerLimitDrop    :: Buffer.Threshold
     } deriving (Generic, Eq, Show)
 
@@ -226,7 +228,6 @@ storeServerOptions = C.subparserCmd "server ..." $ Opt.command "server" $
     opts = OutputServer
         <$> Server.serverConnectionOptions
         <*> (onOverflowDrop <|> onOverflowFile)
-        <*> Buffer.thresholdOptions "send"
         <*> Buffer.thresholdOptions "drop"
 
 onOverflowDrop :: Opt.Parser OnOverflow
@@ -264,13 +265,6 @@ toEvents sessionId ch recId = mkPipe $ \consume produce -> do
                 }
             loop $ Event.nextSequenceNum seqNum
     loop minBound
-
--- | Log every messages (Pipe).
-logP :: (Show a) => Priority -> String -> Pipe a a
-logP level prefix = mkPipe $ \consume produce -> forever $ do
-    msg <- consume Clear
-    liftIO $ logM level $ prefix ++ ": " ++ show msg
-    produce msg
 
 -- | Process inputs.
 processInputs :: STM Inputs -> ((Event.Channel, Udp.UdpIn) -> IO ()) -> IO ()
@@ -449,43 +443,36 @@ runCmd opts vcrOpts = case optArgs opts of
             ch <- atomically $ dupTChan hub
             withVar "file output" (appFileOutput <$> readTVar cfg) $ \case
                 Nothing -> runStream $ tx ch >-> drain
-                Just fo -> do
-                    let mRot = do
-                            rot <- outFileRotate fo
-                            let keep = File.rotateKeep rot
-                                size = File.rotateSize rot
-                                time = File.rotateTime rot
-                            guard $ isJust size || isJust time
-                            Just $ File.Rotate keep size time
-                    runStream $ tx ch
-                        >-> Enc.toByteString (outFileEnc fo)
-                        >-> Buffer.holdBuffer (outFileBuffer fo)
-                            mempty (\_ -> return ())
-                        >-> Buffer.concatinate
-                        >-> File.fileWriter (outFileStore fo) mRot
-                        >-> logP INFO "rotate"
-                        >-> drain
+                Just fo -> runStream $ tx ch
+                    >-> Enc.toByteString (outFileEnc fo)
+                    >-> buffer (outFileBuffer fo)
+                    >-> File.fileWriter
+                        (outFileStore fo)
+                        (outFileRotate fo)
+                        (logM INFO)
 
         , Process "server output" $ do
             ch <- atomically $ dupTChan hub
             withVar "server output" (appServerOutput <$> readTVar cfg) $ \case
                 Nothing -> runStream $ tx ch >-> drain
                 Just srv -> do
-                    let dropAct [] = return ()
-                        dropAct msgs = case outServerOnOverflow srv of
-                            OnOverflowDrop -> do
-                                logM NOTICE $ "dropping messages"
-                            OnOverflowFile fs -> do
-                                let fn = File.filePath fs
-                                logM NOTICE $ "dropping messages to a file "
-                                    ++ show fn
-                                BS.appendFile fn (BS.concat msgs)
+                    let dropAct s
+                            | BS.null s = return ()
+                            | otherwise = case outServerOnOverflow srv of
+                                OnOverflowDrop -> do
+                                    logM NOTICE $ "dropping messages"
+                                OnOverflowFile fs -> do
+                                    let (Event.SessionId sid) = sessionId
+                                        fn = File.filePath fs ++ "-" ++ sid
+                                    logM NOTICE $ "dropping messages to a file "
+                                        ++ show fn
+                                    BS.appendFile fn s
                     runStream $ tx ch
                         >-> Enc.toByteString Enc.EncJSON
-                        >-> Buffer.holdBuffer (outServerLimitSend srv)
-                            (outServerLimitDrop srv) dropAct
-                        >-> Buffer.concatinate
-                        >-> Server.serverWriter (outServerConnection srv)
+                        >-> Server.serverWriter
+                            (outServerConnection srv)
+                            (outServerLimitDrop srv)
+                            dropAct
 
         , Process "stdin" $
             withVar "stdin" (appStdin <$> readTVar cfg) $ \case

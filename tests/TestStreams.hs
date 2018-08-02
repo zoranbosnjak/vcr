@@ -43,9 +43,9 @@ rightToBuffer buf = mkConsumer $ \consume -> forever $ do
 
 propBasic :: Int -> Property
 propBasic n = ioProperty $ do
-    buffer <- newIORef DS.empty
-    runStream $ src >-> pipe >-> toBuffer buffer
-    result <- toList <$> readIORef buffer
+    buf <- newIORef DS.empty
+    runStream $ src >-> pipe >-> toBuffer buf
+    result <- toList <$> readIORef buf
     return $ result === orig
   where
     orig = take n [1..] :: [Int]
@@ -59,18 +59,17 @@ propFileEncodeDecode fmt orig = ioProperty $ withTempFile $ \fn -> do
     runStream $
         fromFoldable orig
         >-> toByteString fmt
-        >-> fileWriter (FileStore fn) Nothing
-        >-> drain
+        >-> fileWriter (FileStore fn) Nothing (\_ -> return ())
 
     -- read data
-    buffer <- newIORef DS.empty
+    buf <- newIORef DS.empty
     runStream $
         fileReaderChunks 32752 (FileStore fn)
         >-> Encodings.fromByteString maxBound fmt
-        >-> rightToBuffer buffer
+        >-> rightToBuffer buf
 
     -- fetch data from buffer and compare with the original
-    result <- toList <$> readIORef buffer
+    result <- toList <$> readIORef buf
     return $ result === orig
   where
     withTempFile act = Control.Exception.bracket getName removeFile act where

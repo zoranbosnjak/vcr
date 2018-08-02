@@ -52,12 +52,15 @@
 -- >    main = runStream $ prod >-> pip >-> cons
 --
 
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module Streams
 where
 
 import           Control.Monad hiding (forever)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Control.Exception
+import           Control.Exception (SomeException)
 import           Control.Concurrent.STM
 import           Control.Concurrent.Async
                     (withAsync, cancel, wait, waitEitherCatch, race)
@@ -112,23 +115,27 @@ forever act = act >> forever act
             -- run left and right actions and wait for any to terminate
             withAsync (runExceptT (act1 consume produce1)) $ \left -> do
               withAsync (runExceptT (act2 consume2 produce)) $ \right -> do
-                rv <- waitEitherCatch left right
-                result <- case rv of
-                    Left result -> do
-                        -- If a producer terminates, indicate end of
-                        -- data, then wait for the consumer to terminate
-                        -- on it's own.
-                        atomically $ writeTBQueue chan Nothing
-                        _ <- wait right
-                        return result
-                        -- If a consumer terminates, cancel the producer.
-                    Right result -> do
-                        cancel left
-                        return result
-                -- rethrow exception if any
-                case result of
-                    Left e -> Control.Exception.throw e
-                    Right _ -> return ()
+                -- in case of interrupt, terminate left action first
+                -- and the right action shall terminate on it's own
+                let onInterrupt (_e :: SomeException) = cancel left
+                (flip Control.Exception.catch) onInterrupt $ do
+                    rv <- waitEitherCatch left right
+                    result <- case rv of
+                        Left result -> do
+                            -- If a producer terminates, indicate end of
+                            -- data, then wait for the consumer to terminate
+                            -- on it's own.
+                            atomically $ writeTBQueue chan Nothing
+                            _ <- wait right
+                            return result
+                            -- If a consumer terminates, cancel the producer.
+                        Right result -> do
+                            cancel left
+                            return result
+                    -- rethrow exception if any
+                    case result of
+                        Left e -> Control.Exception.throw e
+                        Right _ -> return ()
 
 -- | Run a stream.
 runStream :: Effect -> IO ()
@@ -175,7 +182,8 @@ mkBridge acquire release rx tx flush = Streaming action where
         let act1 = runExceptT $ (streamAction (rx r)) consume noProduce
             act2 = runExceptT $ (streamAction (tx r)) noConsume produce
             act3 = runExceptT $ (streamAction (flush r)) noConsume produce
-        -- run consumer and producer, flush if original consumer terminates
+        -- run consumer and producer,
+        -- flush internal data if original consumer terminates
         rv <- race act1 act2
         case rv of
             Left _ -> act3 >> return ()
@@ -193,6 +201,22 @@ filter :: (a -> Bool) -> Pipe a a
 filter f = mkPipe $ \consume produce -> forever $ do
     msg <- consume Clear
     when (f msg) $ produce msg
+
+-- | pipe with internal buffer of size n
+buffer :: Maybe Int -> Pipe a a
+buffer mn = case mn of
+    Nothing -> Streams.map id
+    Just n -> case n <= 0 of
+        True -> Streams.map id
+        False -> mkBridge (newTBQueueIO n) (\_ -> return ()) rx tx flush
+  where
+    rx q = mkConsumer $ \consume -> forever $ do
+        consume Clear >>= liftIO . atomically . writeTBQueue q
+    tx q = mkProducer $ \produce -> forever $ do
+        liftIO (atomically (readTBQueue q)) >>= produce
+    flush q = mkProducer $ \produce -> do
+        msgs <- liftIO $ atomically $ flushTBQueue q
+        mapM_ produce msgs
 
 -- | Producer that produces nothing.
 empty :: Producer a

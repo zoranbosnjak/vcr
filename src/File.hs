@@ -10,9 +10,10 @@
 
 module File where
 
-import           Control.Exception (try, SomeException)
+import           Control.Exception (try, tryJust, SomeException, mask_)
 import           Control.Monad hiding (forever)
 import           Control.Monad.IO.Class (liftIO)
+import           Control.Concurrent.STM
 import           GHC.Generics (Generic)
 import           Data.Aeson (ToJSON, FromJSON, toJSON, parseJSON, withText)
 import           Data.String
@@ -26,6 +27,7 @@ import qualified Data.Time.Clock.POSIX
 import           System.Directory (renameFile, listDirectory, removeFile)
 import           System.FilePath ((</>), takeDirectory, takeFileName)
 import           System.Posix (getFileStatus, fileSize, accessTimeHiRes)
+import           System.IO.Error (isDoesNotExistError)
 import           Data.Text (unpack)
 
 -- local imports
@@ -101,63 +103,73 @@ humanTime = Opt.eitherReader $ \arg -> do
         _         -> Left $ "cannot parse value `" ++ arg ++ "'"
 
 -- | File writer with 'rotation' support.
-fileWriter :: FileStore -> Maybe Rotate -> Pipe BS.ByteString String
-fileWriter fs mRotate = mkPipe action
-  where
-    action consume produce = forever $ do
-        consume Clear >>= liftIO . appendToFile fs
-        rotateResult <- maybe
-            (return Nothing)
-            (\rot -> liftIO $ rotateFile fs rot)
-            mRotate
-        case rotateResult of
-            Nothing -> return ()
-            Just (new, old) -> do
-                _ <- produce $ "Output file rotated: " ++ new
-                forM_ old $ \i -> do
-                    produce $ "Old file removed: " ++ i
+fileWriter ::
+    FileStore
+    -> Maybe Rotate
+    -> (String -> IO ())
+    -> Consumer BS.ByteString
+fileWriter (FileStore "-") _ _ = mkConsumer $ \consume -> forever $ do
+    consume Clear >>= liftIO . BS.putStr
+fileWriter (FileStore fs) mRot onRotate = mkConsumer action where
 
-    appendToFile (FileStore "-") = BS.putStr
-    appendToFile (FileStore f) = BS.appendFile f
+    now = (,) <$> Time.getCurrentTime <*> Data.Time.Clock.POSIX.getPOSIXTime
 
-    -- | Rotate a file if limit reached.
-    rotateFile :: FileStore -> Rotate -> IO (Maybe (FilePath, [FilePath]))
-    rotateFile (FileStore "-") _rotate = return Nothing
-    rotateFile (FileStore path) (Rotate keep mSize mTime) = do
-        nowUtc <- Time.getCurrentTime
-        nowPosix <- Data.Time.Clock.POSIX.getPOSIXTime
-        st <- getFileStatus path
+    acquire = do
+        st <- do
+            rv <- tryJust (guard . isDoesNotExistError) (getFileStatus fs)
+            case rv of
+                Left _ -> do
+                    IO.openFile fs IO.AppendMode >>= IO.hClose
+                    getFileStatus fs
+                Right a -> return a
+        hv <- IO.openFile fs IO.AppendMode >>= newTVarIO
+        return (hv, fromIntegral $ fileSize st, accessTimeHiRes st)
 
-        let fileAge = nowPosix - accessTimeHiRes st
+    release (hv,_,_) = atomically (readTVar hv) >>= IO.hClose
 
-            sizeLimit = maybe False ((fromIntegral . fileSize) st >=) mSize
-            timeLimit = case mTime of
-                Nothing -> False
-                Just time -> (toRational fileAge) >= (toRational time)
-
-        case (sizeLimit || timeLimit) of
-            False -> return Nothing
-            True -> do
-                let newName = path ++ "-" ++ tFormat nowUtc
-                renameFile path newName
-                removed <- cleanup
-                return $ Just (newName, removed)
-
-      where
+    action consume = bracket acquire release loop where
+        loop (hv,bytes,accessTime) = do
+            h <- liftIO $ atomically $ readTVar hv
+            msg <- consume Clear
+            (nowUtc, nowPosix) <- liftIO now
+            let rotArgs = do
+                    rot <- mRot
+                    let fileAge = nowPosix - accessTime
+                        sizeLimit = maybe False (bytes >=) (rotateSize rot)
+                        timeLimit = case rotateTime rot of
+                            Nothing -> False
+                            Just t -> (toRational fileAge) >= (toRational t)
+                    guard $ sizeLimit || timeLimit
+                    Just (fs ++ "-" ++ tFormat nowUtc, rotateKeep rot)
+            (h',bytes',accessTime') <- case rotArgs of
+                Nothing -> return (h,bytes,accessTime)
+                Just (newName, keep) -> liftIO $ do
+                    h' <- mask_ $ do
+                        IO.hClose h
+                        renameFile fs newName
+                        h' <- IO.openFile fs IO.AppendMode
+                        atomically $ writeTVar hv h'
+                        return h'
+                    removed <- cleanup keep
+                    onRotate $ "Output file rotated: " ++ newName
+                    forM_ removed $ \i -> do
+                        onRotate $ "Old file removed: " ++ i
+                    return (h', 0, nowPosix)
+            liftIO $ BS.hPut h' msg
+            loop (hv, bytes' + (fromIntegral $ BS.length msg), accessTime')
 
         tFormat = Time.formatTime
             Time.defaultTimeLocale
             (Time.iso8601DateFormat (Just "%H-%M-%S"))
 
-        cleanup = do
-            let dirName = takeDirectory path
+        cleanup keep = do
+            let dirName = takeDirectory fs
             content <- listDirectory dirName
             let oldFiles = drop keep . reverse . sort . filter myFiles $ content
-
             mapM_ removeFile (fmap (dirName </>) oldFiles)
             return oldFiles
 
-        myFiles = isPrefixOf (takeFileName path)
+        myFiles = isPrefixOf $ (takeFileName fs) ++ "-"
 
 -- | Read chunks from file.
 fileReaderChunks :: Int -> FileStore -> Producer BS.ByteString

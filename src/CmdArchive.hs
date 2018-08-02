@@ -239,6 +239,5 @@ runCmd opts vcrOpts = do
     destination = case optOutput opts of
         OFile outEnc outFS ->
             Encodings.toByteString outEnc
-            >-> File.fileWriter outFS Nothing
-            >-> drain
+            >-> File.fileWriter outFS Nothing (\_ -> return ())
         OServer _outSC -> undefined

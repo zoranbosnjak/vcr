@@ -35,7 +35,7 @@ runAll processes = do
             Left e -> logM NOTICE $
                 show pn ++ " terminated with exception: " ++ show e
             Right _ -> logM INFO $
-                show pn ++ " finisned"
+                show pn ++ " finished"
   where
     runProc (Process name act) = do
         logM INFO $ "Starting " ++ show name

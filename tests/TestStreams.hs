@@ -28,13 +28,13 @@ testStreams = testGroup "Streams"
     ]
 
 -- | Consume data and store to buffer (helper function for tests).
-toBuffer :: IORef (DS.Seq a) -> Consumer a
+toBuffer :: IORef (DS.Seq a) -> Consumer a ()
 toBuffer buf = mkConsumer $ \consume -> forever $ do
     val <- consume Clear
     liftIO $ modifyIORef buf (DS.|> val)
 
 -- | Consume data and store Right items to buffer (helper function for tests).
-rightToBuffer :: IORef (DS.Seq a) -> Consumer (Either t a)
+rightToBuffer :: IORef (DS.Seq a) -> Consumer (Either t a) ()
 rightToBuffer buf = mkConsumer $ \consume -> forever $ do
     rv <- consume Clear
     case rv of
@@ -44,7 +44,7 @@ rightToBuffer buf = mkConsumer $ \consume -> forever $ do
 propBasic :: Int -> Property
 propBasic n = ioProperty $ do
     buf <- newIORef DS.empty
-    runStream $ src >-> pipe >-> toBuffer buf
+    runStream_ $ src >-> pipe >-> toBuffer buf
     result <- toList <$> readIORef buf
     return $ result === orig
   where
@@ -56,14 +56,14 @@ propBasic n = ioProperty $ do
 propFileEncodeDecode :: EncodeFormat -> [Event] -> Property
 propFileEncodeDecode fmt orig = ioProperty $ withTempFile $ \fn -> do
     -- write data to a file
-    runStream $
+    runStream_ $
         fromFoldable orig
         >-> toByteString fmt
         >-> fileWriter (FileStore fn) Nothing (\_ -> return ())
 
     -- read data
     buf <- newIORef DS.empty
-    runStream $
+    runStream_ $
         fileReaderChunks 32752 (FileStore fn)
         >-> Encodings.fromByteString maxBound fmt
         >-> rightToBuffer buf

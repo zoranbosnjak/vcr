@@ -249,7 +249,7 @@ encodeList fmt lst = BS.concat (encode fmt <$> lst)
 
 -- | Pipe from items to bytestrings.
 toByteString :: (Data.Aeson.ToJSON a, Bin.Serialize a, Show a) =>
-    EncodeFormat -> Pipe a BS.ByteString
+    EncodeFormat -> Pipe a BS.ByteString ()
 toByteString fmt = Streams.map (encode fmt)
 
 -- | Decode ByteString to list of items + some remaining.
@@ -288,7 +288,7 @@ decode fmt s = do
 fromByteString :: (Data.Aeson.FromJSON a, Bin.Serialize a, Read a) =>
     Int
     -> EncodeFormat
-    -> Pipe BS.ByteString (Either (String, BS.ByteString) a)
+    -> Pipe BS.ByteString (Either (String, BS.ByteString) a) ()
 fromByteString maxSize fmt = mkPipe $ go BS.empty where
     go acc consume produce = do
         let method = case BS.null acc of

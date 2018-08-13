@@ -19,7 +19,7 @@ module CmdArchive (cmdArchive) where
 -- Standard imports.
 import           Control.Concurrent (threadDelay)
 import           Control.Monad.IO.Class (liftIO)
-import           Data.ByteString.Internal
+import           Data.ByteString (ByteString)
 import           Data.Monoid ((<>))
 import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
@@ -150,7 +150,7 @@ runCmd opts vcrOpts = do
     C.check (0 <= eventDelay)
         "archive: Illegal event delay interval."
 
-    runStream $
+    runStream_ $
         source
         >-> delay eventDelay
         >-> traceDstEvents
@@ -165,7 +165,7 @@ runCmd opts vcrOpts = do
     chunkDelay = optChunkDelay opts
     eventDelay = optEventDelay opts
 
-    source :: Streams.Streaming () Event.Event
+    source :: Producer Event.Event ()
     source = case optInput opts of
         IFile inpEnc inpFS ->
             File.fileReaderChunks chunkSize inpFS
@@ -180,10 +180,7 @@ runCmd opts vcrOpts = do
       where
 
         traceSrcEvents ::
-            Streams.Streaming
-                (Either (String, Data.ByteString.Internal.ByteString)
-                        Event.Event)
-                Event.Event
+            Pipe (Either (String, ByteString) Event.Event) Event.Event ()
         traceSrcEvents = mkPipe $ \consume produce -> forever $ do
             result <- consume Clear
             case result of
@@ -195,47 +192,46 @@ runCmd opts vcrOpts = do
                         "archive: Src event " ++ show (Event.eUtcTime event)
                     produce event
 
-        channelFilters :: Streams.Streaming Event.Event Event.Event
+        channelFilters :: Pipe Event.Event Event.Event ()
         channelFilters =
             case channels of
                 [] -> Streams.map id
                 _  -> Streams.filter ((`elem` channels).Event.eChannel)
             where channels = optChannelFilter opts
 
-        sourceIdFilters :: Streams.Streaming Event.Event Event.Event
+        sourceIdFilters :: Pipe Event.Event Event.Event ()
         sourceIdFilters =
             case sourceIds of
                 [] -> Streams.map id
                 _  -> Streams.filter ((`elem` sourceIds).Event.eSourceId)
             where sourceIds = optSourceIdFilter opts
 
-        startTimeFilter :: Streams.Streaming Event.Event Event.Event
+        startTimeFilter :: Pipe Event.Event Event.Event ()
         startTimeFilter =
             case (optStartTime opts) of
                 Just utcTime -> Streams.filter ((>=utcTime).Event.eUtcTime)
                 Nothing -> Streams.map id
 
-        endTimeFilter :: Streams.Streaming Event.Event Event.Event
+        endTimeFilter :: Pipe Event.Event Event.Event ()
         endTimeFilter =
             case (optEndTime opts) of
                 Just utcTime -> Streams.filter ((>=utcTime).Event.eUtcTime)
                 Nothing -> Streams.map id
 
-    delay :: Int
-          -> Streams.Streaming a a
+    delay :: Int -> Pipe a a ()
     delay interval = mkPipe $ \ consume produce -> forever $ do
         msg <- consume Clear
         liftIO $ threadDelay (1000 * interval)
         produce msg
 
-    traceDstEvents :: Streams.Streaming Event.Event Event.Event
+    traceDstEvents :: Pipe Event.Event Event.Event ()
     traceDstEvents = mkPipe $ \consume produce -> forever $ do
         event <- consume Clear
         liftIO $ C.logM DEBUG $
             "archive: Dst event " ++ show (Event.eUtcTime event)
         produce event
 
-    destination :: Streams.Streaming Event.Event ()
+    destination :: Consumer Event.Event ()
     destination = case optOutput opts of
         OFile outEnc outFS ->
             Encodings.toByteString outEnc

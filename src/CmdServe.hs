@@ -373,7 +373,7 @@ app db request respond = withLog go where
         fmt = Encodings.EncJSON
         maxSize = 100*1024
 
-        reader :: Producer BS.ByteString
+        reader :: Producer BS.ByteString ()
         reader = mkProducer f where
             f produce = do
                 chunk <- liftIO $ requestBody request
@@ -384,7 +384,7 @@ app db request respond = withLog go where
                         f produce
 
         writer :: DB.ConnWrapper
-            -> Consumer (Either (String, BS.ByteString) E.Event)
+            -> Consumer (Either (String, BS.ByteString) E.Event) ()
         writer conn = mkConsumer $ \consume -> forever $ do
             eVal <- consume Clear
             case eVal of
@@ -432,7 +432,7 @@ app db request respond = withLog go where
                         status200
                         [("Content-Type", "text/plain")]
                         $ \write flush -> do
-                            runStream $ stream select write
+                            runStream_ $ stream select write
                             flush
                     cleanup = do
                         logM NOTICE "streaming error"

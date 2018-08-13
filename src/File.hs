@@ -107,7 +107,7 @@ fileWriter ::
     FileStore
     -> Maybe Rotate
     -> (String -> IO ())
-    -> Consumer BS.ByteString
+    -> Consumer BS.ByteString ()
 fileWriter (FileStore "-") _ _ = mkConsumer $ \consume -> forever $ do
     consume Clear >>= liftIO . BS.putStr
 fileWriter (FileStore fs) mRot onRotate = mkConsumer action where
@@ -172,7 +172,7 @@ fileWriter (FileStore fs) mRot onRotate = mkConsumer action where
         myFiles = isPrefixOf $ (takeFileName fs) ++ "-"
 
 -- | Read chunks from file.
-fileReaderChunks :: Int -> FileStore -> Producer BS.ByteString
+fileReaderChunks :: Int -> FileStore -> Producer BS.ByteString ()
 fileReaderChunks chunkSize fs = mkProducer action where
     acquire = case filePath fs of
         "-" -> return IO.stdin
@@ -191,7 +191,7 @@ fileReaderChunks chunkSize fs = mkProducer action where
         loop
 
 -- | Read lines from file.
-fileReaderLines :: FileStore -> Producer BS.ByteString
+fileReaderLines :: FileStore -> Producer BS.ByteString ()
 fileReaderLines fs = mkProducer action where
     acquire = do
         h <- case filePath fs of

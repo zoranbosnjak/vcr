@@ -15,13 +15,13 @@
 --
 --      * create simple producer
 --
--- >    prod :: Producer Char
+-- >    prod :: Producer Char ()
 -- >    prod = mkProducer $ \produce -> forever $ do
 -- >        produce 'x'
 --
 --      * producer with resource handling
 --
--- >    srcFile :: FileName -> Producer String
+-- >    srcFile :: FileName -> Producer String ()
 -- >    srcFile path = mkProducer action where
 -- >        acquire = liftIO $ do
 -- >            print ("open file...", path)
@@ -34,7 +34,7 @@
 --
 --      * create delay pipe
 --
--- >    pip :: Pipe a a
+-- >    pip :: Pipe a a ()
 -- >    pip = mkPipe $ \consume produce -> forever $ do
 -- >        msg <- consume Clear
 -- >        liftIO $ threadDelay 1000000
@@ -42,14 +42,15 @@
 --
 --      * create consumer
 --
--- >    cons :: Consumer Char
--- >    cons = mkConsumer $ \consume Clear -> do
--- >        replicateM_ 10 (consume >>= (liftIO . print))
+-- >    cons :: Consumer Char ()
+-- >    cons = mkConsumer $ \consume -> do
+-- >        replicateM_ 10 (consume Clear >>= (liftIO . print))
 --
 --      * run the chain
 --
 -- >    main :: IO ()
--- >    main = runStream $ prod >-> pip >-> cons
+-- >    main = do
+-- >        runStream_ $ prod >-> pip >-> cons
 --
 
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -76,8 +77,8 @@ type ConsumeFunc a = Checkpoint -> StreamT a
 type ProduceFunc b = b -> StreamT ()
 
 -- | General streaming component.
-data Streaming a b = Streaming
-    { streamAction :: ConsumeFunc a -> ProduceFunc b -> StreamT ()
+data Streaming a b c = Streaming
+    { streamAction :: ConsumeFunc a -> ProduceFunc b -> StreamT c
     }
 
 type Producer a = Streaming () a
@@ -91,7 +92,7 @@ forever :: Monad m => m a -> m b
 forever act = act >> forever act
 
 -- | Chain 2 streaming components using TBQueue and async.
-(>->) :: Streaming a b -> Streaming b c -> Streaming a c
+(>->) :: Streaming a b c -> Streaming b d c -> Streaming a d c
 (>->) a b = Streaming action where
     action consume produce = do
         -- create a channel between left and right component
@@ -117,7 +118,10 @@ forever act = act >> forever act
               withAsync (runExceptT (act2 consume2 produce)) $ \right -> do
                 -- in case of interrupt, terminate left action first
                 -- and the right action shall terminate on it's own
-                let onInterrupt (_e :: SomeException) = cancel left
+                let onInterrupt (_e :: SomeException) = do
+                        cancel left
+                        atomically $ writeTBQueue chan Nothing
+                        wait right >>= either (fail "stream error") return
                 (flip Control.Exception.catch) onInterrupt $ do
                     rv <- waitEitherCatch left right
                     result <- case rv of
@@ -135,12 +139,15 @@ forever act = act >> forever act
                     -- rethrow exception if any
                     case result of
                         Left e -> Control.Exception.throw e
-                        Right _ -> return ()
+                        Right c -> either (fail "stream error") return c
 
 -- | Run a stream.
-runStream :: Effect -> IO ()
-runStream s = runExceptT action >> return () where
+runStream :: Effect c -> IO (Either () c)
+runStream s = runExceptT action where
     action = (streamAction s) noConsume noProduce
+
+runStream_ :: Effect c -> IO ()
+runStream_ s = runStream s >> return ()
 
 -- | Consumer that fails.
 noConsume :: a
@@ -151,32 +158,32 @@ noProduce :: t -> a
 noProduce _ = error "can not produce values"
 
 -- | Create producer. It's action can only produce values.
-mkProducer :: (ProduceFunc a -> StreamT ()) -> Producer a
+mkProducer :: (ProduceFunc a -> StreamT c) -> Producer a c
 mkProducer f = Streaming action where
     action _consume produce = f produce
 
--- | Create pipe.
-mkPipe :: (ConsumeFunc a -> ProduceFunc b -> StreamT ()) -> Pipe a b
-mkPipe = Streaming
-
--- | Create effect.
-mkEffect :: StreamT () -> Effect
-mkEffect f = Streaming action where
-    action _consume _produce = f
-
 -- | Create consumer. It's action can only consume values.
-mkConsumer :: (ConsumeFunc a -> StreamT ()) -> Consumer a
+mkConsumer :: (ConsumeFunc a -> StreamT c) -> Consumer a c
 mkConsumer f = Streaming action where
     action consume _produce = f consume
 
+-- | Create pipe.
+mkPipe :: (ConsumeFunc a -> ProduceFunc b -> StreamT c) -> Pipe a b c
+mkPipe = Streaming
+
+-- | Create effect.
+mkEffect :: StreamT c -> Effect c
+mkEffect f = Streaming action where
+    action _consume _produce = f
+
 -- | Connect Consumer and Producer back-to-back and form a Pipe.
 mkBridge ::
-    IO r
-    -> (r -> IO c)
-    -> (r -> Consumer a)    -- consumer
-    -> (r -> Producer b)    -- producer
-    -> (r -> Producer b)    -- final producer before release phase
-    -> Pipe a b
+    IO r                    -- acquire
+    -> (r -> IO d)          -- release
+    -> (r -> Consumer a c)  -- consumer
+    -> (r -> Producer b c)  -- producer
+    -> (r -> Producer b c)  -- final producer before release phase
+    -> Pipe a b c
 mkBridge acquire release rx tx flush = Streaming action where
     action consume produce = bracket acquire release $ \r -> liftIO $ do
         let act1 = runExceptT $ (streamAction (rx r)) consume noProduce
@@ -186,24 +193,24 @@ mkBridge acquire release rx tx flush = Streaming action where
         -- flush internal data if original consumer terminates
         rv <- race act1 act2
         case rv of
-            Left _ -> act3 >> return ()
-            Right _ -> return ()
+            Left _ -> act3 >>= either (fail "bridge error") return
+            Right c -> either (fail "bridge error") return c
 
 -- | Utils
 
 -- | map function over each element
-map :: (a -> b) -> Pipe a b
+map :: (a -> b) -> Pipe a b c
 map f = mkPipe $ \consume produce -> forever $ do
     consume Clear >>= produce . f
 
 -- | filter stream elements
-filter :: (a -> Bool) -> Pipe a a
+filter :: (a -> Bool) -> Pipe a a c
 filter f = mkPipe $ \consume produce -> forever $ do
     msg <- consume Clear
     when (f msg) $ produce msg
 
 -- | pipe with internal buffer of size n
-buffer :: Maybe Int -> Pipe a a
+buffer :: Maybe Int -> Pipe a a ()
 buffer mn = case mn of
     Nothing -> Streams.map id
     Just n -> case n <= 0 of
@@ -219,16 +226,16 @@ buffer mn = case mn of
         mapM_ produce msgs
 
 -- | Producer that produces nothing.
-empty :: Producer a
-empty = mkProducer $ \_ -> return ()
+empty :: c -> Producer a c
+empty val = mkProducer $ \_ -> return val
 
 -- | Consumer that just consumes all input.
-drain :: Consumer a
+drain :: Consumer a c
 drain = mkConsumer $ \consume -> forever $ do
     consume Clear >> return ()
 
 -- | Produce each element from foldable.
-fromFoldable :: Foldable t => t a -> Producer a
+fromFoldable :: Foldable t => t a -> Producer a ()
 fromFoldable lst = mkProducer $ \produce -> do
     mapM_ produce lst
 

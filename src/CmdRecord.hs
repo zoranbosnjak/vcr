@@ -245,7 +245,7 @@ onOverflowFile = OnOverflowFile <$> Opt.strOption
 
 -- | Convert raw data to Event.
 toEvents :: Event.SessionId -> Event.Channel -> Event.SourceId
-    -> Streaming BS.ByteString Event.Event
+    -> Pipe BS.ByteString Event.Event ()
 toEvents sessionId ch recId = mkPipe $ \consume produce -> do
     -- Each time when this pipe starts, a new trackId is used
     trackId <- liftIO $ Event.trackId . Data.UUID.toString <$> nextRandom
@@ -442,8 +442,8 @@ runCmd opts vcrOpts = case optArgs opts of
         , Process "file output" $ do
             ch <- atomically $ dupTChan hub
             withVar "file output" (appFileOutput <$> readTVar cfg) $ \case
-                Nothing -> runStream $ tx ch >-> drain
-                Just fo -> runStream $ tx ch
+                Nothing -> runStream_ $ tx ch >-> drain
+                Just fo -> runStream_ $ tx ch
                     >-> Enc.toByteString (outFileEnc fo)
                     >-> buffer (outFileBuffer fo)
                     >-> File.fileWriter
@@ -454,7 +454,7 @@ runCmd opts vcrOpts = case optArgs opts of
         , Process "server output" $ do
             ch <- atomically $ dupTChan hub
             withVar "server output" (appServerOutput <$> readTVar cfg) $ \case
-                Nothing -> runStream $ tx ch >-> drain
+                Nothing -> runStream_ $ tx ch >-> drain
                 Just srv -> do
                     let dropAct s
                             | BS.null s = return ()
@@ -467,7 +467,7 @@ runCmd opts vcrOpts = case optArgs opts of
                                     logM NOTICE $ "dropping messages to a file "
                                         ++ show fn
                                     BS.appendFile fn s
-                    runStream $ tx ch
+                    runStream_ $ tx ch
                         >-> Enc.toByteString Enc.EncJSON
                         >-> Server.serverWriter
                             (outServerConnection srv)
@@ -477,14 +477,14 @@ runCmd opts vcrOpts = case optArgs opts of
         , Process "stdin" $
             withVar "stdin" (appStdin <$> readTVar cfg) $ \case
                 Nothing -> doNothing
-                Just ch -> runStream $
+                Just ch -> runStream_ $
                     File.fileReaderLines (File.FileStore "-")
                     >-> toEvents sessionId ch recId
                     >-> rx
 
         , Process "UDP inputs" $ do
             let getInputs = appInputs <$> readTVar cfg
-            processInputs getInputs $ \(ch, udp) -> runStream $
+            processInputs getInputs $ \(ch, udp) -> runStream_ $
                 Udp.udpReader udp
                 >-> Streams.map fst
                 >-> toEvents sessionId ch recId

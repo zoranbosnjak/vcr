@@ -75,7 +75,7 @@ retryTimeoutOptions = Opt.option Opt.auto
     )
 
 serverWriter :: ServerConnection -> Buffer.Threshold
-    -> (BS.ByteString -> IO ()) -> Consumer BS.ByteString
+    -> (BS.ByteString -> IO ()) -> Consumer BS.ByteString ()
 serverWriter sc th dropAct = mkConsumer action where
     URI uri = serverURI sc
     rt = retryTimeout sc

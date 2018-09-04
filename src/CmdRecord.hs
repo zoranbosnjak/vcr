@@ -26,7 +26,6 @@ import           Network.BSD (getHostName)
 import           Data.Maybe (fromMaybe)
 import qualified Data.UUID
 import           Data.UUID.V4 (nextRandom)
-import           Control.Monad.IO.Class (liftIO)
 import           Control.Concurrent.STM hiding (check)
 import qualified Data.Map as Map
 import           GHC.Generics (Generic)

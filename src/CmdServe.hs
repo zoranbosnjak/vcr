@@ -13,9 +13,8 @@
 module CmdServe (cmdServe) where
 
 -- Standard imports.
-import           Control.Exception (SomeException, bracket, try, onException)
+import           Control.Exception (bracket, onException)
 import           Control.Monad (forM_)
-import           Control.Monad.IO.Class (liftIO)
 import           Options.Applicative ((<**>))
 import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(DEBUG, INFO, NOTICE))
@@ -32,7 +31,6 @@ import           Database.HDBC.PostgreSQL (connectPostgreSQL)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy.Char8 as BSL8
 import qualified Data.ByteString.Lazy as BSL
 import           Text.Read (readMaybe)
 import           Network.Wai
@@ -101,15 +99,9 @@ server = Opt.subparser $
             (Opt.metavar "PORT" <> Opt.help "UDP port number")
 
 data Store
-    = StoreSQLite3 FilePath     -- sqlite3 file
-    | StorePostgreSQL String    -- postgresql database
-    {-
-    -- | StoreRemote Http          -- remote server (cascade)
-    -- | StoreMemory Integer       -- in memory up to N events (for test)
-    -}
+    = StoreSQLite3 FilePath     -- sqlite3 (file)
+    | StorePostgreSQL String    -- postgresql (connection string)
     deriving (Eq, Show)
-
-data Connector = forall c. (DB.IConnection c) => Connector String (IO c)
 
 store :: Opt.Parser Store
 store = Opt.subparser $
@@ -126,12 +118,10 @@ store = Opt.subparser $
         <$> Opt.argument Opt.str
             (Opt.metavar "STRING" <> Opt.help "Connection string.")
 
-connector :: Store -> Connector
-connector = \case
-    StoreSQLite3 path ->
-        Connector ("sqlite " ++ path) (connectSqlite3 path)
-    StorePostgreSQL addr ->
-        Connector ("postgreSQL " ++ addr) (connectPostgreSQL addr)
+connect :: Store -> IO DB.ConnWrapper
+connect = \case
+    StoreSQLite3 path -> DB.ConnWrapper <$> connectSqlite3 path
+    StorePostgreSQL addr -> DB.ConnWrapper <$> connectPostgreSQL addr
 
 -- | Run command.
 runCmd :: CmdServe.Options -> C.VcrOptions -> IO ()
@@ -139,29 +129,30 @@ runCmd opts vcrOpts = do
     logM INFO $
         "serve, opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
 
-    let db = connector $ optStore opts
-
-    case optPrepare opts of
-        -- (re)create tables
+    let dbType = optStore opts
+    Control.Exception.bracket (connect dbType) disconnect $ \conn ->
+      case optPrepare opts of
+        -- create tables and exit
         True -> do
             logM INFO "preparing database..."
-            _ <- withDatabase db createTables
-            return ()
+            DB.withTransaction conn $ \_ -> do
+                _ <- DB.run conn (createTables dbType) []
+                return ()
         -- normal operation (assume tables are prepared)
         False -> do
             runAll
                 [ Process "cleanup" $ case optCleanup opts of
                     Nothing -> doNothing
                     Just (Period period, age) -> forever $ do
-                        dbCleanup db age
+                        dbCleanup conn age
                         threadDelaySec period
                 , Process "http" $ case optServe opts of
-                    ServerHttp _ip port -> Warp.run port $ app db
+                    ServerHttp _ip port -> Warp.run port $ app dbType conn
                 ]
 
 -- | Remove old events from database
-dbCleanup :: Connector -> Age -> IO ()
-dbCleanup db (Age age) = withDatabase db $ \conn -> do
+dbCleanup :: DB.IConnection conn => conn -> Age -> IO ()
+dbCleanup conn (Age age) = do
     t1 <- do
         now <- getCurrentTime
         let delta = nominalDay * fromRational (toRational age)
@@ -174,66 +165,74 @@ dbCleanup db (Age age) = withDatabase db $ \conn -> do
             ]
 
     logM DEBUG cmd
-    n <- DB.run conn cmd []
+    n <- DB.withTransaction conn $ \_ -> DB.run conn cmd []
     logM INFO $
         show n ++ " item(s) removed"
         ++ ", utcTime < " ++ show t1
         ++ ", " ++ show age ++ " day(s)"
 
--- | Connect to a database, run some action, auto commit and disconnect.
-withDatabase :: Connector -> (DB.ConnWrapper -> IO a) -> IO a
-withDatabase (Connector _name connect) f =
-    Control.Exception.bracket acquire disconnect action
-  where
-    acquire = DB.ConnWrapper <$> connect
-    action conn = DB.withTransaction conn f
-
 -- | Create database tables.
-createTables :: (DB.IConnection conn) => conn -> IO Integer
-createTables conn = DB.run conn (unwords
-    [ "CREATE TABLE IF NOT EXISTS events"
+createTables :: Store -> String
+createTables _dbType = unwords
+    [ "CREATE TABLE events"
     , "( ch VARCHAR(255)"
     , ", srcId VARCHAR(255)"
-    , ", utcTime DATETIME"
+    , ", utcTime timestamp with time zone"
+    , ", utcTimePico BIGINT"    -- store picoseconds separately
     , ", monoTime BIGINT"
     , ", sesId VARCHAR(255)"
     , ", trkId VARCHAR(255)"
     , ", seqNum INT"
-    , ", value BLOB"
+    , ", value TEXT"
     , ", constraint events_pk primary key (ch, sesId, monoTime)"
     , ")"
-    ]) []
+    ]
 
 -- | Deposit event to a database.
-deposit :: (DB.IConnection conn) => conn -> E.Event -> IO Integer
-deposit conn event = DB.run conn
-    "INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?,?)"
+deposit :: (DB.IConnection conn) => Store -> conn -> E.Event -> IO Integer
+deposit dbType conn event = DB.run conn
+    insertStatement
     [ toSql $ E.eChannel event
     , toSql $ E.eSourceId event
     , toSql $ E.eUtcTime event
+    , toSql $ E.getUtcPicos $ E.eUtcTime event
     , toSql $ E.eMonoTime event
     , toSql $ E.eSessionId event
     , toSql $ E.eTrackId event
     , toSql $ E.eSequence event
-    , toSql $ E.eValue event
+    , toSql $ Encodings.hexlify $ E.eValue event
     ]
+  where
+    insertStatement = case dbType of
+        StoreSQLite3 _ ->
+            "INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?,?,?)"
+        StorePostgreSQL _ ->
+            "INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING"
+
+utcPrecise :: DB.SqlValue -> DB.SqlValue -> Either ConvertError E.UtcTime
+utcPrecise utc utcP = E.replaceUtcPicos <$> safeFromSql utcP <*> safeFromSql utc
 
 -- | Convert SQL row to event.
 toEvent :: [DB.SqlValue] -> ConvertResult E.Event
-toEvent [ch, src, utc, mono, ses, trk, sn, val] = E.Event
+toEvent [ch, src, utc, utcP, mono, ses, trk, sn, val] = E.Event
     <$> safeFromSql ch
     <*> safeFromSql src
-    <*> safeFromSql utc
+    <*> utcPrecise utc utcP
     <*> safeFromSql mono
     <*> safeFromSql ses
     <*> safeFromSql trk
     <*> safeFromSql sn
-    <*> safeFromSql val
+    <*> converted
+  where
+    converted = do
+        x <- safeFromSql val
+        maybe (fail "unable to decode") return (Encodings.unhexlify x)
+
 toEvent val = convError "unexpected number of columns" val
 
 -- | Format UTC time for SQL (YYYY-MM-DD HH:MM:SS.SSS)
 fmtTime :: UTCTime -> String
-fmtTime t = "\"" ++ (unwords $ take 2 $ words $ show t) ++ "\""
+fmtTime t = "'" ++ show t ++ "'"
 
 -- | get time from query string
 getQueryTime :: Request -> BS.ByteString -> Maybe UTCTime
@@ -260,18 +259,27 @@ getQueryArray request (name1, name2) = case argList of
   where
     argList = mapMaybe check $ queryString request
     check (a, Just b)
-        | a == name2 = Just $ show $ T.unpack $ TE.decodeUtf8 b
+        | a == name2 = Just $ "'" ++ (T.unpack $ TE.decodeUtf8 b) ++ "'"
         | otherwise = Nothing
     check _ = Nothing
 
-app :: Connector -> Application
-app db request respond = withLog go where
+app :: DB.IConnection c => Store -> c -> Application
+app db conn request respond = withLog go where
+
+    withLog act = case parseMethod (requestMethod request) of
+        Left _ -> respond $ responseLBS
+            status400
+            [("Content-Type", "text/plain")]
+            "400 - unknown request method\n"
+        Right mtd -> do
+            logM DEBUG $ show request
+            act (pathInfo request) mtd
 
     -- response check
     go ["ping"] GET = respond $ responseLBS
         status200
         [("Content-Type", "text/plain")]
-        "pong"
+        "pong\n"
 
    -- to simulate processing delay, visit /delay/{seconds}
    -- this url is just to confirm, that server is responding to
@@ -280,17 +288,17 @@ app db request respond = withLog go where
         Nothing -> respond $ responseLBS
             status400
             [("Content-Type", "text/plain")]
-            "unable to decode delay value"
+            "unable to decode delay value\n"
         Just (val::Double) -> do
             threadDelaySec val
             respond $ responseLBS
                 status200
                 [("Content-Type", "text/plain")]
-                "ok"
+                "ok\n"
 
     -- find list of distinct channels (within optional time interval)
     go ["info", "channels"] GET = runSelect sel stream where
-        sel = return $ "SELECT DISTINCT ch from events"
+        sel = "SELECT DISTINCT ch from events"
             ++ optionalTimeInterval ++ " ORDER BY ch;"
         stream select write = mkEffect $ do
             rows <- liftIO $ DB.fetchAllRows' select
@@ -299,7 +307,7 @@ app db request respond = withLog go where
 
     -- find list of distinct recorders (within optional time interval)
     go ["info", "recorders"] GET = runSelect sel stream where
-        sel = return $ "SELECT DISTINCT srcId from events"
+        sel = "SELECT DISTINCT srcId from events"
             ++ optionalTimeInterval ++ " ORDER BY srcId;"
         stream select write = mkEffect $ do
             rows <- liftIO $ DB.fetchAllRows' select
@@ -310,15 +318,17 @@ app db request respond = withLog go where
     go ["info", "oldest"] GET = timeSpan "ASC"
     go ["info", "youngest"] GET = timeSpan "DESC"
 
-    go ["events"] GET = runSelect statement stream where
-        statement = do
+    go ["events"] GET = DB.withTransaction conn $ \_ ->
+        runSelect statement stream
+      where
+        statement =
             let t1 = getQueryTime request "t1"
                 t2 = getQueryTime request "t2"
                 chList = getQueryArray request ("ch", "channel")
                 recList = getQueryArray request ("srcId", "recorder")
                 limit = (getQueryValue request "limit") :: Maybe Integer
 
-            return $
+            in
                 "SELECT * from events WHERE NULL IS NULL"
                 ++ maybe "" (\x -> " AND utcTime >= " ++ fmtTime x) t1
                 ++ maybe "" (\x -> " AND utcTime < " ++ fmtTime x) t2
@@ -353,94 +363,73 @@ app db request respond = withLog go where
         sender tx = mkConsumer $ \consume -> forever $ do
             consume Clear >>= liftIO . tx . fromByteString
 
-    go ["events"] PUT = withDatabase db $ \conn -> do
-        rv <- try $ runStream $
+    go ["events"] PUT = DB.withTransaction conn $ \_ -> do
+        rv <- runStream $
             reader
             >-> Encodings.fromByteString maxSize fmt
-            >-> writer conn
+            >-> writer
         case rv of
-            Left (e :: SomeException) -> do
-                liftIO $ logM NOTICE $ "error: " ++ show e
+            Just e -> do
+                liftIO $ logM NOTICE $ "error: " ++ e
                 respond $ responseLBS
                     status503
                     [("Content-Type", "text/plain")]
-                    "error"
-            Right _ -> respond $ responseLBS
+                    "error\n"
+            Nothing -> respond $ responseLBS
                 status200
                 [("Content-Type", "text/plain")]
-                "ok"
+                "ok\n"
       where
         fmt = Encodings.EncJSON
         maxSize = 100*1024
 
-        reader :: Producer BS.ByteString ()
+        reader :: Producer BS.ByteString (Maybe String)
         reader = mkProducer f where
             f produce = do
                 chunk <- liftIO $ requestBody request
                 case BS.null chunk of
-                    True -> return ()
+                    True -> return Nothing
                     False -> do
                         _ <- produce chunk
                         f produce
 
-        writer :: DB.ConnWrapper
-            -> Consumer (Either (String, BS.ByteString) E.Event) ()
-        writer conn = mkConsumer $ \consume -> forever $ do
-            eVal <- consume Clear
-            case eVal of
-                Left (msg, _bs) -> fail msg
-                Right evt -> liftIO $ do
-                    _ <- deposit conn evt
-                    logM DEBUG $
-                        show (E.eChannel evt, E.eUtcTime evt)
-                        ++ " saved."
-
-    go ["events"] DELETE = undefined
+        writer ::
+            Consumer (Either (String, BS.ByteString) E.Event) (Maybe String)
+        writer = mkConsumer loop where
+            loop consume = do
+                eVal <- consume Clear
+                case eVal of
+                    Left (msg, _bs) -> return $ Just msg
+                    Right evt -> do
+                        _ <- liftIO $ deposit db conn evt
+                        liftIO $ logM DEBUG $
+                            show (E.eChannel evt, E.eUtcTime evt)
+                            ++ " saved."
+                        loop consume
 
     -- not found
     go _ _ = respond $ responseLBS
         status404
         [("Content-Type", "text/plain")]
-        "404 - Not Found"
+        "404 - Not Found\n"
 
-    withLog act = case parseMethod (requestMethod request) of
-        Left _ -> respond $ responseLBS
-            status400
-            [("Content-Type", "text/plain")]
-            "400 - unknown request method"
-        Right mtd -> do
-            logM DEBUG $ show request
-            act (pathInfo request) mtd
-
-    runSelect getStatement stream = withDatabase db $ \conn -> do
-        eSelect <- Control.Exception.try $ do
-            statement <- getStatement
-            logM DEBUG statement
-            select <- DB.prepare conn statement
-            _ <- DB.execute select []
-            return select
-
-        case eSelect of
-            Left (e :: SomeException) -> do
-                logM NOTICE $ "database error: " ++ show e
+    runSelect statement stream = do
+        logM DEBUG statement
+        select <- DB.prepare conn statement
+        _ <- DB.execute select []
+        let action = respond $ responseStream
+                status200
+                [("Content-Type", "text/plain")]
+                $ \write flush -> do
+                    runStream_ $ stream select write
+                    flush
+            cleanup = do
+                logM NOTICE "streaming error"
                 respond $ responseLBS
                     status503
                     [("Content-Type", "text/plain")]
-                    (BSL.concat ["database error: ",  BSL8.pack (show e)])
-            Right select -> do
-                let action = respond $ responseStream
-                        status200
-                        [("Content-Type", "text/plain")]
-                        $ \write flush -> do
-                            runStream_ $ stream select write
-                            flush
-                    cleanup = do
-                        logM NOTICE "streaming error"
-                        respond $ responseLBS
-                            status503
-                            [("Content-Type", "text/plain")]
-                            "streaming error"
-                onException action cleanup
+                    "streaming error\n"
+        onException action cleanup
 
     optionalTimeInterval = case (t1, t2) of
         (Nothing, Nothing) -> ""
@@ -454,19 +443,21 @@ app db request respond = withLog go where
     timeSpan order = runSelect sel stream where
         chList = maybe "" (" WHERE " ++) $
             getQueryArray request ("ch", "channel")
-        sel = return $
-            "SELECT utcTime from events"
+        sel =
+            "SELECT utcTime, utcTimePico from events"
             ++ chList
             ++ " ORDER BY utcTime " ++ order
             ++ " LIMIT 1;"
-        stream select write = mkEffect $ do
-            rows <- liftIO $ DB.fetchAllRows' select
-            case concat rows of
-                [] -> fail "no records found"
-                [t] ->
-                    let t' :: UTCTime
-                        t' = DB.fromSql t :: UTCTime
-                    in liftIO $ write $ fromByteString $ BS.concat
-                        [ BSL.toStrict $ Encodings.jsonEncode t', "\n" ]
-                _ -> fail "multiple records found"
+        stream select write = mkEffect $ liftIO $ do
+            rows <- DB.fetchAllRows' select
+            write $ fromByteString $ BS.concat
+                [ BSL.toStrict $ Encodings.jsonEncode $ val rows
+                , "\n"
+                ]
+          where
+            val rows = case concat rows of
+                [] -> Nothing :: Maybe E.UtcTime    -- "no records found"
+                [utc, utcP] -> either (error "unable to decode") Just
+                    (utcPrecise utc utcP)
+                _ -> error "multiple records found"
 

@@ -154,6 +154,8 @@ sourceIdOptions = SourceId <$> Opt.strOption
 
 newtype UtcTime = UtcTime Data.Time.UTCTime
     deriving (Generic, Eq, Ord, Show, Read)
+instance Data.Aeson.ToJSON UtcTime
+instance Data.Aeson.FromJSON UtcTime
 
 instance Arbitrary UtcTime where
     arbitrary = do
@@ -173,6 +175,14 @@ instance Convertible UtcTime SqlValue where
 
 instance Convertible SqlValue UtcTime where
     safeConvert val = UtcTime <$> safeConvert val
+
+getUtcPicos :: UtcTime -> Integer
+getUtcPicos (UtcTime t) =
+    Data.Time.diffTimeToPicoseconds $ Data.Time.utctDayTime t
+
+replaceUtcPicos :: Integer -> UtcTime -> UtcTime
+replaceUtcPicos p (UtcTime t) = UtcTime $ t { Data.Time.utctDayTime = dt } where
+    dt = Data.Time.picosecondsToDiffTime p
 
 newtype MonoTime = MonoTime System.Clock.TimeSpec
     deriving (Generic, Eq, Ord, Show, Read)

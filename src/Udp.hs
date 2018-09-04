@@ -9,7 +9,6 @@
 
 module Udp where
 
-import           Control.Monad.IO.Class (liftIO)
 import qualified Data.Aeson
 import           Data.Aeson (ToJSON, FromJSON, toJSON, parseJSON)
 import           Data.Aeson.Types (typeMismatch)
@@ -113,7 +112,7 @@ udpOutOptions = UdpOut
             ))
 
 -- | UDP bytestring producer (read from network).
-udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr) ()
+udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr) c
 udpReader addr = mkProducer action where
     acquire = do
         let (ip, port, mclocal) = case addr of
@@ -141,7 +140,7 @@ udpReader addr = mkProducer action where
             produce msg
 
 -- | UDP bytestring consumer (write to network).
-udpWriter :: UdpOut -> Consumer BS.ByteString ()
+udpWriter :: UdpOut -> Consumer BS.ByteString c
 udpWriter (UdpOut ip port mMcast) = mkConsumer action where
     acquire = Net.socket Net.AF_INET Net.Datagram Net.defaultProtocol
     release = Net.close

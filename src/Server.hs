@@ -13,7 +13,6 @@ module Server where
 
 -- standard imports
 import           Control.Exception (SomeException, try)
-import           Control.Monad.IO.Class (liftIO)
 import           GHC.Generics (Generic)
 import           Data.Monoid ((<>))
 import           Data.String
@@ -75,7 +74,7 @@ retryTimeoutOptions = Opt.option Opt.auto
     )
 
 serverWriter :: ServerConnection -> Buffer.Threshold
-    -> (BS.ByteString -> IO ()) -> Consumer BS.ByteString ()
+    -> (BS.ByteString -> IO ()) -> Consumer BS.ByteString c
 serverWriter sc th dropAct = mkConsumer action where
     URI uri = serverURI sc
     rt = retryTimeout sc

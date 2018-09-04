@@ -18,7 +18,6 @@ module CmdArchive (cmdArchive) where
 
 -- Standard imports.
 import           Control.Concurrent (threadDelay)
-import           Control.Monad.IO.Class (liftIO)
 import           Data.ByteString (ByteString)
 import           Data.Monoid ((<>))
 import           Options.Applicative ((<**>), (<|>))

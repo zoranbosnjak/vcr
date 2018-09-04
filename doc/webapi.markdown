@@ -27,8 +27,8 @@ Accept header:
 query params:
 
     * pretty (bool) - pretty print output (for some contents)
-    * t1 (start time) - t >= t1 (required),     format: YYYY-MM-DDTHH:MM:SS.SSSZ
-    * t2 (end time) - t < t2 (required),        format: YYYY-MM-DDTHH:MM:SS.SSSZ
+    * t1 (start time) - t >= t1,    format: YYYY-MM-DDTHH:MM:SS.SSSZ
+    * t2 (end time) - t < t2,       format: YYYY-MM-DDTHH:MM:SS.SSSZ
     * limit (n)     - max. number of rows returned (optional)
     * channel (name) - channel(s) to include
     * recorder (name) - recorder(s) to include

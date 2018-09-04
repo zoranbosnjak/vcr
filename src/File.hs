@@ -12,7 +12,6 @@ module File where
 
 import           Control.Exception (try, tryJust, SomeException, mask_)
 import           Control.Monad hiding (forever)
-import           Control.Monad.IO.Class (liftIO)
 import           Control.Concurrent.STM
 import           GHC.Generics (Generic)
 import           Data.Aeson (ToJSON, FromJSON, toJSON, parseJSON, withText)
@@ -107,7 +106,7 @@ fileWriter ::
     FileStore
     -> Maybe Rotate
     -> (String -> IO ())
-    -> Consumer BS.ByteString ()
+    -> Consumer BS.ByteString c
 fileWriter (FileStore "-") _ _ = mkConsumer $ \consume -> forever $ do
     consume Clear >>= liftIO . BS.putStr
 fileWriter (FileStore fs) mRot onRotate = mkConsumer action where

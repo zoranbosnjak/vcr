@@ -23,6 +23,7 @@ import           Data.Monoid
 import           Data.Maybe
 import           Data.Time (UTCTime, getCurrentTime, addUTCTime, nominalDay)
 import           Data.Convertible
+import           Data.String (fromString)
 import qualified Data.Aeson
 import qualified Database.HDBC as DB
 import           Database.HDBC (disconnect, toSql, safeFromSql)
@@ -147,7 +148,12 @@ runCmd opts vcrOpts = do
                         dbCleanup conn age
                         threadDelaySec period
                 , Process "http" $ case optServe opts of
-                    ServerHttp _ip port -> Warp.run port $ app dbType conn
+                    ServerHttp ip port -> do
+                        let settings =
+                                Warp.setPort port $
+                                Warp.setHost (fromString ip) $
+                                Warp.defaultSettings
+                        Warp.runSettings settings $ app dbType conn
                 ]
 
 -- | Remove old events from database

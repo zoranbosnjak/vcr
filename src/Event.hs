@@ -35,7 +35,8 @@ import           Data.Text (Text)
 import           GHC.Generics (Generic)
 import qualified Options.Applicative as Opt
 import qualified System.Clock
-import           Test.QuickCheck (Arbitrary, arbitrary, getPositive, choose)
+import           Test.QuickCheck
+                    (Arbitrary, arbitrary, getPositive, choose, resize)
 
 -- local imports
 import qualified Encodings as Enc
@@ -70,7 +71,7 @@ instance Arbitrary Event where
         <*> arbitrary
         <*> arbitrary
         <*> arbitrary
-        <*> (BS.pack <$> arbitrary)
+        <*> (BS.pack <$> resize 1000 arbitrary)
 
 instance Data.Aeson.ToJSON Event where
     toJSON
@@ -164,7 +165,7 @@ instance Arbitrary UtcTime where
         return $ UtcTime $ Data.Time.UTCTime a b
       where
         day = Data.Time.fromGregorian
-            <$> fmap getPositive arbitrary
+            <$> choose (1000, 9999)
             <*> choose (1,12)
             <*> choose (1,31)
         diffT = Data.Time.picosecondsToDiffTime

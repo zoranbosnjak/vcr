@@ -17,7 +17,6 @@
 module CmdRecord (cmdRecord) where
 
 -- standard imports
-import           Data.Monoid ((<>))
 import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(..))
@@ -108,9 +107,12 @@ instance FromJSON AppConfig
 newtype Inputs = Inputs (Map.Map Event.Channel Udp.UdpIn)
     deriving (Generic, Eq, Show)
 
+instance Semigroup Inputs where
+    (Inputs i1) <> (Inputs i2) = Inputs (mappend i1 i2)
+
 instance Monoid Inputs where
     mempty = Inputs mempty
-    mappend (Inputs i1) (Inputs i2) = Inputs (mappend i1 i2)
+    mappend = (<>)
 
 instance ToJSON Inputs where
     toJSON (Inputs val) = object

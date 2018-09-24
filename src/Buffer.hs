@@ -27,7 +27,10 @@ instance FromJSON Threshold
 
 instance Monoid Threshold where
     mempty = Threshold Nothing Nothing
-    Threshold a1 b1 `mappend` Threshold a2 b2 = Threshold
+    mappend = (<>)
+
+instance Semigroup Threshold where
+    Threshold a1 b1 <> Threshold a2 b2 = Threshold
         (lower a1 a2)
         (lower b1 b2)
       where

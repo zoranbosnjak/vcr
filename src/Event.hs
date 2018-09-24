@@ -9,22 +9,15 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 
-module Event
-{-
-( Event(..)
-, Channel, channelOptions
-, SourceId, sourceId, sourceIdOptions
-, SessionId, sessionId
-, sequenceNum
-, nextSequenceNum
-, now
-) -} where
+module Event where
 
 import           Data.String
 import qualified Data.Aeson
 import           Data.Aeson.Types (typeMismatch, object, (.=), (.:))
 import qualified Data.Serialize as Bin
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
+import qualified Data.ByteString.Base64 as B64
 import           Data.Monoid ((<>))
 import           Database.HDBC
 import           Data.Convertible
@@ -304,4 +297,31 @@ now = (,)
 monoTimeToSeconds :: MonoTime -> Double
 monoTimeToSeconds (MonoTime t) =
     (/ (10^(9::Int))) $ fromInteger $ System.Clock.toNanoSecs t
+
+-- | Infinite list of pseudo random events for test purposes.
+randomEvents :: Rational -> Channel -> SourceId -> Data.Time.UTCTime
+    -> SessionId -> TrackId -> Int -> [Event]
+randomEvents dt ch rec startTime sid tid lnLimit = loop e0 where
+    loop e = e:loop next where
+        UtcTime utc = eUtcTime e
+        MonoTime mono = eMonoTime e
+        nextMono =
+            let dtNano = round $ ((fromRational $ dt * 1000000000)::Double)
+            in System.Clock.fromNanoSecs $ (+ dtNano) $
+                System.Clock.toNanoSecs mono
+        next = e
+            { eUtcTime = UtcTime $ Data.Time.addUTCTime (fromRational dt) utc
+            , eMonoTime = MonoTime nextMono
+            , eSequence = nextSequenceNum $ eSequence e
+            , eValue = BS.take lnLimit $ B64.encode $ BS8.pack $ show e
+            }
+    e0 = Event
+        ch
+        rec
+        (UtcTime startTime)
+        (MonoTime $ System.Clock.TimeSpec 0 0)
+        sid
+        tid
+        minBound
+        (B64.encode "testData")
 

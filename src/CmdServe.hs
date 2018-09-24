@@ -19,7 +19,6 @@ import           Options.Applicative ((<**>))
 import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(DEBUG, INFO, NOTICE))
 import           Data.Binary.Builder (fromByteString)
-import           Data.Monoid
 import           Data.Maybe
 import           Data.Time (UTCTime, getCurrentTime, addUTCTime, nominalDay)
 import           Data.Convertible

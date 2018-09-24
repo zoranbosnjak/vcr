@@ -14,7 +14,6 @@ import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(INFO))
 --import           Control.Concurrent (threadDelay)
-import           Data.Monoid
 
 -- local imports
 import           Common (logM)

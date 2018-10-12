@@ -21,17 +21,14 @@ library
     exposed-modules:
         Event
         Encodings
-        Streams
         File
+        Database
         Common
     other-modules:
         CmdRecord
         , CmdReplay
         , CmdArchive
-        , CmdServe
-        , Buffer
         , Udp
-        , Server
         , Process
     ghc-options:        -O2 -Wall -funbox-strict-fields
     default-extensions: StrictData
@@ -43,6 +40,8 @@ library
         , uuid
         , unix
         , bytestring
+        , base16-bytestring
+        , base64-bytestring
         , time
         , containers
         , unordered-containers
@@ -69,6 +68,7 @@ library
         , HDBC
         , HDBC-sqlite3
         , HDBC-postgresql
+        , postgresql-simple
         , http-client
         , attoparsec
         , transformers
@@ -84,14 +84,11 @@ executable vcr
         CmdRecord
         , CmdReplay
         , CmdArchive
-        , CmdServe
-        , Buffer
         , Common
         , Encodings
         , Event
         , File
-        , Server
-        , Streams
+        , Database
         , Udp
         , Process
     build-depends:
@@ -103,6 +100,8 @@ executable vcr
         , uuid
         , unix
         , bytestring
+        , base16-bytestring
+        , base64-bytestring
         , time
         , containers
         , unordered-containers
@@ -129,6 +128,7 @@ executable vcr
         , HDBC
         , HDBC-sqlite3
         , HDBC-postgresql
+        , postgresql-simple
         , http-client
         , attoparsec
         , transformers
@@ -144,13 +144,14 @@ test-suite test-vcr
     other-modules:
         TestEncodings
         , TestEvent
-        , TestStreams
     build-depends:
         vcr
         , base
         , cereal
         , aeson
         , bytestring
+        , base16-bytestring
+        , base64-bytestring
         , time
         , HUnit
         , QuickCheck

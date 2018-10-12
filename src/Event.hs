@@ -20,6 +20,11 @@ import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Base64 as B64
 import           Data.Monoid ((<>))
 import           Database.HDBC
+import Database.PostgreSQL.Simple as PGSimple
+import Database.PostgreSQL.Simple.ToRow as PGSTR
+import Database.PostgreSQL.Simple.FromRow as PGSFR
+import Database.PostgreSQL.Simple.ToField as PGSTF
+import Database.PostgreSQL.Simple.FromField as PGSFF
 import           Data.Convertible
 import qualified Data.Time
 import qualified Data.Text as T
@@ -45,6 +50,37 @@ data Event = Event
     , eSequence :: SequenceNum          -- incrementing sequence number
     , eValue    :: BS.ByteString        -- the event value
     } deriving (Generic, Eq, Show, Read)
+
+instance PGSTR.ToRow Event where
+    toRow evt =
+        [ toField $ eChannel evt
+        , toField $ eSourceId evt
+        , toField $ eUtcTime evt
+        , toField (getUtcPicos $ eUtcTime evt)
+        , toField $ (System.Clock.sec $ getMonoTime $ eMonoTime evt)
+        , toField $ (System.Clock.nsec $ getMonoTime $ eMonoTime evt)
+        , toField $ eSessionId evt
+        , toField $ eTrackId  evt
+        , toField $ eSequence evt
+        , toField $ PGSimple.Binary $ eValue evt
+        ]
+
+instance PGSFR.FromRow Event where
+    fromRow = Event
+        <$> field
+        <*> field
+        <*> do
+            a <- field
+            b <- field
+            return $ replaceUtcPicos b a
+        <*> do
+            a <- field
+            b <- field
+            return $ MonoTime $ System.Clock.TimeSpec a b
+        <*> field
+        <*> field
+        <*> field
+        <*> field
 
 instance Bin.Serialize Event
 
@@ -113,6 +149,10 @@ instance Convertible SqlValue Channel where
     safeConvert val = Channel <$> safeConvert val
 instance IsString Channel where
     fromString s = Channel $ fromString s
+instance PGSTF.ToField Channel where
+    toField (Channel val) = toField val
+instance PGSFF.FromField Channel where
+    fromField f mdata = Channel <$> fromField f mdata
 
 channelOptions :: Opt.Parser Channel
 channelOptions = Channel <$> Opt.strOption
@@ -135,6 +175,10 @@ instance Convertible SqlValue SourceId where
     safeConvert val = SourceId <$> safeConvert val
 instance IsString SourceId where
     fromString s = SourceId $ fromString s
+instance PGSTF.ToField SourceId where
+    toField (SourceId val) = toField val
+instance PGSFF.FromField SourceId where
+    fromField f mdata = SourceId <$> fromField f mdata
 
 sourceId :: Text -> SourceId
 sourceId = SourceId
@@ -150,6 +194,12 @@ newtype UtcTime = UtcTime Data.Time.UTCTime
     deriving (Generic, Eq, Ord, Show, Read)
 instance Data.Aeson.ToJSON UtcTime
 instance Data.Aeson.FromJSON UtcTime
+
+instance PGSTF.ToField UtcTime where
+    toField (UtcTime val) = toField val
+
+instance PGSFF.FromField UtcTime where
+    fromField f mdata = UtcTime <$> fromField f mdata
 
 instance Arbitrary UtcTime where
     arbitrary = do
@@ -170,6 +220,17 @@ instance Convertible UtcTime SqlValue where
 instance Convertible SqlValue UtcTime where
     safeConvert val = UtcTime <$> safeConvert val
 
+instance Bin.Serialize UtcTime where
+    put (UtcTime t) = do
+        Bin.put $ Data.Time.toGregorian $ Data.Time.utctDay t
+        Bin.put $ Data.Time.diffTimeToPicoseconds $ Data.Time.utctDayTime t
+
+    get = do
+        (a,b,c) <- Bin.get
+        ps <- Bin.get
+        return $ UtcTime $ Data.Time.UTCTime
+            (Data.Time.fromGregorian a b c) (Data.Time.picosecondsToDiffTime ps)
+
 getUtcPicos :: UtcTime -> Integer
 getUtcPicos (UtcTime t) =
     Data.Time.diffTimeToPicoseconds $ Data.Time.utctDayTime t
@@ -178,7 +239,7 @@ replaceUtcPicos :: Integer -> UtcTime -> UtcTime
 replaceUtcPicos p (UtcTime t) = UtcTime $ t { Data.Time.utctDayTime = dt } where
     dt = Data.Time.picosecondsToDiffTime p
 
-newtype MonoTime = MonoTime System.Clock.TimeSpec
+newtype MonoTime = MonoTime { getMonoTime :: System.Clock.TimeSpec }
     deriving (Generic, Eq, Ord, Show, Read)
 
 instance Arbitrary MonoTime where
@@ -192,16 +253,14 @@ instance Convertible MonoTime SqlValue where
 instance Convertible SqlValue MonoTime where
     safeConvert val = (MonoTime . System.Clock.fromNanoSecs) <$> safeConvert val
 
-instance Bin.Serialize UtcTime where
-    put (UtcTime t) = do
-        Bin.put $ Data.Time.toGregorian $ Data.Time.utctDay t
-        Bin.put $ Data.Time.diffTimeToPicoseconds $ Data.Time.utctDayTime t
+{-
+instance PGSTF.ToField MonoTime where
+    toField (MonoTime val) = toField $ System.Clock.toNanoSecs val
 
-    get = do
-        (a,b,c) <- Bin.get
-        ps <- Bin.get
-        return $ UtcTime $ Data.Time.UTCTime
-            (Data.Time.fromGregorian a b c) (Data.Time.picosecondsToDiffTime ps)
+instance PGSFF.FromField MonoTime where
+    fromField f mdata =
+        MonoTime . System.Clock.fromNanoSecs <$> fromField f mdata
+-}
 
 instance Bin.Serialize MonoTime where
     put (MonoTime t) = do
@@ -227,6 +286,12 @@ instance Convertible SessionId SqlValue where
 instance Convertible SqlValue SessionId where
     safeConvert val = SessionId <$> safeConvert val
 
+instance PGSTF.ToField SessionId where
+    toField (SessionId val) = toField val
+
+instance PGSFF.FromField SessionId where
+    fromField f mdata = SessionId <$> fromField f mdata
+
 sessionId :: String -> SessionId
 sessionId = SessionId
 
@@ -244,6 +309,12 @@ instance Convertible TrackId SqlValue where
 instance Convertible SqlValue TrackId where
     safeConvert val = TrackId <$> safeConvert val
 
+instance PGSTF.ToField TrackId where
+    toField (TrackId val) = toField val
+
+instance PGSFF.FromField TrackId where
+    fromField f mdata = TrackId <$> fromField f mdata
+
 trackId :: String -> TrackId
 trackId = TrackId
 
@@ -253,6 +324,12 @@ newtype SequenceNum = SequenceNum Integer
 instance Bin.Serialize SequenceNum
 instance Data.Aeson.ToJSON SequenceNum
 instance Data.Aeson.FromJSON SequenceNum
+
+instance PGSTF.ToField SequenceNum where
+    toField (SequenceNum val) = toField val
+
+instance PGSFF.FromField SequenceNum where
+    fromField f mdata = SequenceNum <$> fromField f mdata
 
 instance Bounded SequenceNum where
     minBound = SequenceNum 0

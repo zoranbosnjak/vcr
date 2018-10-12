@@ -8,6 +8,7 @@
 --module CmdReplay (cmdReplay) where
 module CmdReplay where
 
+{-
 -- Standard imports.
 --import           Control.Monad.IO.Class (liftIO)
 import           Options.Applicative ((<**>), (<|>))
@@ -167,4 +168,5 @@ runCmd opts vcrOpts = do
             (Udp.udpWriter udp)
 
     -}
+-}
 

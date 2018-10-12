@@ -9,6 +9,9 @@
 
 module Udp where
 
+import           Control.Monad
+import           Control.Exception (bracket)
+import           Control.Concurrent.STM
 import qualified Data.Aeson
 import           Data.Aeson (ToJSON, FromJSON, toJSON, parseJSON)
 import           Data.Aeson.Types (typeMismatch)
@@ -18,9 +21,10 @@ import qualified Network.Socket as Net
 import qualified Network.Socket.ByteString as NB
 import qualified Network.Multicast as Mcast
 import qualified Options.Applicative as Opt
-import           Streams
 import           GHC.Generics (Generic)
 import           Data.Text (unpack)
+
+import           Process
 
 type Ip = String
 type Port = String
@@ -111,9 +115,11 @@ udpOutOptions = UdpOut
            <> Opt.help "IP TTL value"
             ))
 
--- | UDP bytestring producer (read from network).
-udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr) c
-udpReader addr = mkProducer action where
+-- | UDP network reader.
+udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr)
+udpReader addr = Producer $ \produce -> do
+    bracket acquire release (action produce)
+  where
     acquire = do
         let (ip, port, mclocal) = case addr of
                 UdpIn ip' port' Nothing -> (ip', port', Nothing)
@@ -124,21 +130,21 @@ udpReader addr = mkProducer action where
             (Just port)
         sock <- Net.socket
             (Net.addrFamily serveraddr) Net.Datagram Net.defaultProtocol
-        return(sock, ip, mclocal, serveraddr)
-
-    release (sock,_,_,_) = Net.close sock
-
-    action produce = bracket acquire release $ \(sock, ip, mc, serveraddr) -> do
-        case mc of
+        case mclocal of
             Nothing -> return ()
-            Just _ -> liftIO $ do
+            Just _ -> do
                 Net.setSocketOption sock Net.ReuseAddr 1
-                Mcast.addMembership sock ip mc
-        liftIO $ Net.bind sock (Net.addrAddress serveraddr)
-        forever $ do
-            msg <- liftIO $ NB.recvFrom sock (2^(16::Int))
-            produce msg
+                Mcast.addMembership sock ip mclocal
+        Net.bind sock (Net.addrAddress serveraddr)
+        return sock
 
+    release sock = Net.close sock
+
+    action produce sock = forever $ do
+        msg <- NB.recvFrom sock (2^(16::Int))
+        atomically $ produce msg
+
+{-
 -- | UDP bytestring consumer (write to network).
 udpWriter :: UdpOut -> Consumer BS.ByteString c
 udpWriter (UdpOut ip port mMcast) = mkConsumer action where
@@ -160,4 +166,5 @@ udpWriter (UdpOut ip port mMcast) = mkConsumer action where
         forever $ do
             s <- consume Clear
             liftIO $ NB.sendAllTo sock s dst
+-}
 

@@ -14,6 +14,9 @@
 --
 -- TODO: WRITE COMPREHENSIVE DOCUMENTATION OF THE ARCHIVER
 
+module CmdArchive where
+
+{-
 module CmdArchive (cmdArchive) where
 
 -- Standard imports.
@@ -236,3 +239,4 @@ runCmd opts vcrOpts = do
             Encodings.toByteString outEnc
             >-> File.fileWriter outFS Nothing (\_ -> return ())
         OServer _outSC -> undefined
+-}

@@ -13,7 +13,7 @@
 module File where
 
 import           Control.Monad
-import           Control.Exception (bracket, try, tryJust, SomeException, mask_)
+import           Control.Exception as Ex
 import           Control.Monad.Fix
 import           Control.Concurrent.STM
 import           GHC.Generics (Generic)
@@ -34,7 +34,7 @@ import           Data.Text (unpack)
 
 -- local imports
 import qualified Common as C
-import           Process
+import           Streams
 
 -- | File storage.
 data FileStore = FileStore
@@ -106,9 +106,9 @@ humanTime = Opt.eitherReader $ \arg -> do
 
 -- | File writer with 'rotation' support.
 fileWriter :: FileStore -> Maybe Rotate -> (String -> IO ())
-    -> Consumer BS.ByteString
-fileWriter (FileStore "-") _ _ = Consumer $ untilData BS.putStr
-fileWriter (FileStore fs) mRot onRotate = Consumer $ \consume -> do
+    -> Consumer BS.ByteString c
+fileWriter (FileStore "-") _ _ = consumeToIO BS.putStr
+fileWriter (FileStore fs) mRot onRotate = mkConsumer $ \consume -> do
     -- get file status and make sure it exists
     (h, bytes, t) <- do
         st <- tryJust (guard . isDoesNotExistError) (getFileStatus fs) >>= \case
@@ -126,7 +126,9 @@ fileWriter (FileStore fs) mRot onRotate = Consumer $ \consume -> do
         (Time.iso8601DateFormat (Just "%H-%M-%S"))
 
     loop consume h t !bytes = atomically consume >>= \case
-        EndOfData -> IO.hClose h
+        EndOfData rv -> do
+            IO.hClose h
+            return rv
         Message msg -> do
             (nowUtc, nowPosix) <- now
             BS.hPut h msg
@@ -156,34 +158,33 @@ fileWriter (FileStore fs) mRot onRotate = Consumer $ \consume -> do
     cleanup keep = do
         let dirName = takeDirectory fs
         content <- listDirectory dirName
-        let oldFiles = drop keep . reverse . sort . filter myFiles $ content
+        let oldFiles =
+                drop keep . reverse . sort . Prelude.filter myFiles $ content
         mapM_ removeFile (fmap (dirName </>) oldFiles)
         return oldFiles
 
-{-
 -- | Read chunks from file.
 fileReaderChunks :: Int -> FileStore -> Producer BS.ByteString ()
-fileReaderChunks chunkSize fs = mkProducer action where
+fileReaderChunks chunkSize fs = mkProducer $ \produce -> do
+    bracket acquire release (action produce)
+  where
     acquire = case filePath fs of
         "-" -> return IO.stdin
         f -> IO.openFile f IO.ReadMode
     release h = case filePath fs of
         "-" -> return ()
         _ -> IO.hClose h
-    action produce = bracket acquire release $ \h -> do
-        let loop = do
-                val <- BS.hGetSome h chunkSize
-                case BS.null val of
-                    True -> return ()
-                    False -> do
-                        _ <- produce val
-                        loop
-        loop
--}
+    action produce h = fix $ \loop -> do
+        val <- BS.hGetSome h chunkSize
+        case BS.null val of
+            True -> return ()
+            False -> do
+                _ <- atomically $ produce val
+                loop
 
 -- | Read lines from file.
-fileReaderLines :: FileStore -> Producer BS.ByteString
-fileReaderLines fs = Producer $ \produce -> do
+fileReaderLines :: FileStore -> Producer BS.ByteString ()
+fileReaderLines fs = mkProducer $ \produce -> do
     bracket acquire release (action produce)
   where
     acquire = do

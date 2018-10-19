@@ -15,7 +15,6 @@ module CmdRecord (cmdRecord) where
 
 -- standard imports
 import           Control.Monad
-import           Control.Monad.Fix
 import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(..))
@@ -46,6 +45,7 @@ import qualified Common as C
 import qualified Event
 import           Common (logM)
 import           Process
+import           Streams
 import qualified Udp
 import qualified Encodings as Enc
 import qualified File
@@ -274,10 +274,36 @@ bufferDropAt :: Opt.Parser Int
 bufferDropAt = Opt.option Opt.auto
     ( Opt.long "dropAt"
    <> Opt.metavar "N"
-   <> Opt.help "Size of buffer in terms of 'sendEvents' size"
+   <> Opt.help "Drop events when buffer size reaches N"
    <> Opt.value 100
    <> Opt.showDefault
     )
+
+emptyConfig :: AppConfig
+emptyConfig = AppConfig
+    { appStdin = Nothing
+    , appInputs = mempty
+    , appStdout = False
+    , appFileOutput = Nothing
+    , appDatabaseOutput = Nothing
+    }
+
+stdInInput :: STM (Maybe Event.Channel) -> Event.SourceId -> Event.SessionId
+    -> Producer Event.Event ()
+stdInInput cfg recId sessionId = mkProducer $ \produce -> do
+  withVar "stdin" cfg $ \case
+    Nothing -> doNothing
+    Just ch -> do
+        trackId <- Event.trackId . Data.UUID.toString <$> nextRandom
+        logM INFO $ show ch ++ " -> " ++ show trackId
+        let gen = mkGenPipeIO minBound $ \s sn -> do
+                (tUtc, tMono) <- Event.now
+                return
+                    ( Event.Event ch recId tUtc tMono sessionId trackId sn s
+                    , Event.nextSequenceNum sn
+                    )
+            p = File.fileReaderLines (File.FileStore "-") >-> gen
+        (streamAction p) noConsume produce
 
 -- | Process inputs.
 processInputs :: STM Inputs -> ((Event.Channel, Udp.UdpIn) -> IO ()) -> IO ()
@@ -352,91 +378,69 @@ processInputs getInputs act = do
             C.threadDelaySec 3
             logM INFO $ "Auto restart input: " ++ show ch ++ ", " ++ show param
 
-emptyConfig :: AppConfig
-emptyConfig = AppConfig
-    { appStdin = Nothing
-    , appInputs = mempty
-    , appStdout = False
-    , appFileOutput = Nothing
-    , appDatabaseOutput = Nothing
-    }
-
-stdInInput :: STM (Maybe Event.Channel) -> Event.SourceId -> Event.SessionId
-    -> Producer Event.Event
-stdInInput cfg recId sessionId = Producer $ \produce -> do
-  withVar "stdin" cfg $ \case
-    Nothing -> doNothing
-    Just ch -> do
-        trackId <- Event.trackId . Data.UUID.toString <$> nextRandom
-        logM INFO $ show ch ++ " -> " ++ show trackId
-        let consumer = Consumer $ \consume -> (fix $ \loop sn -> do
-                atomically consume >>= \case
-                    EndOfData -> return ()
-                    Message val -> do
-                        (tUtc, tMono) <- Event.now
-                        atomically $ produce $ Event.Event
-                            ch recId tUtc tMono sessionId trackId sn val
-                        loop $ Event.nextSequenceNum sn
-                ) minBound
-        (File.fileReaderLines (File.FileStore "-")) >-> consumer
-
-udpInput :: STM Inputs -> Event.SourceId -> Event.SessionId
-    -> Producer Event.Event
-udpInput getInputs recId sessionId = Producer $ \produce -> do
+udpInputs :: STM Inputs -> Event.SourceId -> Event.SessionId
+    -> Producer Event.Event ()
+udpInputs getInputs recId sessionId = mkProducer $ \produce -> do
     processInputs getInputs $ \(ch, udp) -> do
         trackId <- Event.trackId . Data.UUID.toString <$> nextRandom
         logM INFO $ show ch ++ " -> " ++ show trackId
-        let consumer = Consumer $ \consume -> (fix $ \loop sn -> do
-                atomically consume >>= \case
-                    EndOfData -> return ()
-                    Message (val, _addr) -> do
-                        (tUtc, tMono) <- Event.now
-                        _ <- atomically $ produce $ Event.Event
-                            ch recId tUtc tMono sessionId trackId sn val
-                        loop $ Event.nextSequenceNum sn
-                ) minBound
-        (Udp.udpReader udp) >-> consumer
+        let gen = mkGenPipeIO minBound $ \(val, _addr) sn -> do
+                (tUtc, tMono) <- Event.now
+                return
+                    ( Event.Event ch recId tUtc tMono sessionId trackId sn val
+                    , Event.nextSequenceNum sn
+                    )
+            p = Udp.udpReader udp >-> gen
+        (streamAction p) noConsume produce
 
-stdOutOutput :: (Show a, Bin.Serialize a, ToJSON a) => STM Bool -> Consumer a
-stdOutOutput cfg = Consumer $ \consume ->
+stdOutOutput :: (Show a, Bin.Serialize a, ToJSON a) => STM Bool -> Consumer a ()
+stdOutOutput cfg = mkConsumer $ \consume ->
     withVar "stdout" cfg $ \case
-        False -> drain consume
-        True -> getConsumer consumer $ consume
+        False -> (streamAction drain) consume noProduce
+        True -> (streamAction consumer) consume noProduce
   where
-    consumer = mapConsumer (Enc.encode Enc.EncText) $
-        File.fileWriter (File.FileStore "-") Nothing (\_ -> return ())
+    consumer =
+        Streams.map (Enc.encode Enc.EncText)
+        >-> File.fileWriter (File.FileStore "-") Nothing (\_ -> return ())
 
 fileOutput :: (Show a, Bin.Serialize a, ToJSON a) =>
-    STM (Maybe FileOutput) -> Consumer a
-fileOutput cfg = Consumer $ \consume ->
+    STM (Maybe FileOutput) -> Consumer a ()
+fileOutput cfg = mkConsumer $ \consume ->
     withVar "file output" cfg $ \case
-        Nothing -> drain consume
-        Just fo -> getConsumer (consumer fo) $ consume
+        Nothing -> (streamAction drain) consume noProduce
+        Just fo -> (streamAction (consumer fo)) consume noProduce
   where
-    consumer fo = mapConsumer (Enc.encode $ outFileEnc fo) $
-        File.fileWriter (outFileStore fo) (outFileRotate fo) (logM INFO)
+    consumer fo =
+        Streams.map (Enc.encode $ outFileEnc fo)
+        >-> File.fileWriter (outFileStore fo) (outFileRotate fo) (logM INFO)
 
 databaseOutput :: STM (Maybe DatabaseOutput) -> Event.SessionId
-    -> Consumer Event.Event
-databaseOutput cfg sessionId = Consumer $ \consume ->
+    -> Consumer Event.Event ()
+databaseOutput cfg sessionId = mkConsumer $ \consume ->
     withVar "database output" cfg $ \case
-        Nothing -> drain consume
+        Nothing -> (streamAction drain) consume noProduce
         Just dbo -> do
             let conn = outDatabase dbo
                 bufSend = outDatabaseBufferSend dbo
                 bufDropAt = outDatabaseBufferDrop dbo
-                dropAct events = case outDatabaseOnOverflow dbo of
-                    OnOverflowDrop -> do
-                        logM NOTICE $ "buffer overflow, dropping messages"
-                    OnOverflowFile fs -> do
+                dropEvents = case outDatabaseOnOverflow dbo of
+                    OnOverflowDrop -> \_events -> return ()
+                    OnOverflowFile fs ->
                         let (Event.SessionId sid) = sessionId
                             fn = File.filePath fs ++ "-" ++ sid
-                        logM NOTICE $
-                            "buffer overflow, saving messages to a file "
-                            ++ show fn
-                        BS.appendFile fn $ Enc.encodeList Enc.EncJSON events
-                consumer = Db.databaseWriter bufSend bufDropAt dropAct conn
-            getConsumer consumer consume
+                        in BS.appendFile fn . Enc.encodeList Enc.EncJSON
+                consumer = Db.databaseWriter bufSend bufDropAt dropEvents conn
+            (streamAction consumer) consume noProduce
+
+logUptime :: Event.MonoTime -> Double -> IO b
+logUptime startTimeMono t = forever $ do
+    C.threadDelaySec t
+    (_t1, t2) <- Event.now
+    let uptimeSec =
+            Event.monoTimeToSeconds t2 - Event.monoTimeToSeconds startTimeMono
+        uptimeDays = uptimeSec / (24*3600)
+    logM INFO $
+        "uptime: " ++ showFFloat (Just 3) uptimeDays "" ++ " days"
 
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
@@ -513,27 +517,18 @@ runCmd opts vcrOpts = case optArgs opts of
     case doBootstrap of
       Just val -> BSL.putStr $ Enc.jsonEncodePretty val
       Nothing -> runAll
-        [ process_ "uptime" $ case optUptime opts of
-            Nothing -> doNothing
-            Just t -> forever $ do
-                C.threadDelaySec t
-                (_t1, t2) <- Event.now
-                let uptimeSec =
-                        Event.monoTimeToSeconds t2
-                        - Event.monoTimeToSeconds startTimeMono
-                    uptimeDays = uptimeSec / (24*3600)
-                logM INFO $
-                    "uptime: " ++ showFFloat (Just 3) uptimeDays "" ++ " days"
-
-        , process_ "data flow" $ runFlow
-            -- inputs
-            [ stdInInput (appStdin <$> readTVar cfg) recId sessionId
-            , udpInput (appInputs <$> readTVar cfg) recId sessionId
-            ]
-            -- outputs
-            [ stdOutOutput (appStdout <$> readTVar cfg)
-            , fileOutput (appFileOutput <$> readTVar cfg)
-            , databaseOutput (appDatabaseOutput <$> readTVar cfg) sessionId
-            ]
+        [ process_ "uptime" $
+            maybe doNothing (logUptime startTimeMono) (optUptime opts)
+        , process_ "data flow" $ runStream_ $
+            mergeProducers  -- inputs
+                [ stdInInput (appStdin <$> readTVar cfg) recId sessionId
+                , udpInputs (appInputs <$> readTVar cfg) recId sessionId
+                ]
+            >->
+            forkConsumers   -- outputs
+                [ stdOutOutput (appStdout <$> readTVar cfg)
+                , fileOutput (appFileOutput <$> readTVar cfg)
+                , databaseOutput (appDatabaseOutput <$> readTVar cfg) sessionId
+                ]
         ]
 

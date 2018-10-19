@@ -18,6 +18,7 @@ module Encodings
 , encodeList, decodeList
 , hexlify, unhexlify
 , cobsEncode, cobsDecode
+, toByteString, fromByteString
 ) where
 
 import           Control.Monad
@@ -43,6 +44,8 @@ import           Options.Applicative ((<|>))
 import qualified Options.Applicative as Opt
 import qualified Test.QuickCheck as QC
 import           Text.Read (readMaybe)
+
+import           Streams
 
 class HasSize a where
     sizeOf :: a -> Integer
@@ -264,4 +267,16 @@ decode fmt s = do
     case result of
         [a] -> Just a
         _ -> Nothing
+
+-- | Pipe from items to bytestrings.
+toByteString :: (Data.Aeson.ToJSON a, Bin.Serialize a, Show a) =>
+    EncodeFormat -> Pipe a BS.ByteString c
+toByteString fmt = Streams.map (encode fmt)
+
+-- | Pipe from ByteString to item.
+fromByteString :: (Data.Aeson.FromJSON a, Bin.Serialize a, Read a) =>
+    Int
+    -> EncodeFormat
+    -> Pipe BS.ByteString (Either (String, BS.ByteString) a) c
+fromByteString maxSize fmt = mkAccumulator BS.empty (decodeStream maxSize fmt)
 

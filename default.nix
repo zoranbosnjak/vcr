@@ -34,7 +34,7 @@ mkDerivation {
   ];
   testHaskellDepends = [
     aeson base base16-bytestring base64-bytestring bytestring cereal
-    containers directory HUnit QuickCheck test-framework
+    containers directory HUnit QuickCheck stm test-framework
     test-framework-hunit test-framework-quickcheck2 time
   ];
   license = stdenv.lib.licenses.gpl3;

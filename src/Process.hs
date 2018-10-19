@@ -11,35 +11,12 @@
 module Process where
 
 import           Control.Monad
-import           Control.Monad.Fix
 import qualified Control.Exception as Ex
 import           Control.Concurrent.STM hiding (check)
 import qualified Control.Concurrent.Async as Async
 import           System.Log.Logger (Priority(INFO, NOTICE, ERROR))
 
 import           Common (logM, threadDelaySec)
-
-data Message a
-    = Message a
-    | EndOfData
-    deriving (Eq, Show)
-
-data Producer a = Producer { getProducer :: (a -> STM ()) -> IO () }
-
-mapProducer :: (a -> b) -> Producer a -> Producer b
-mapProducer f producer = Producer $ \produce -> do
-    let consumer = Consumer $ untilData (atomically . produce . f)
-    producer >-> consumer
-
-data Consumer a = Consumer { getConsumer :: (STM (Message a)) -> IO () }
-
-mapConsumer :: (b -> a) -> Consumer a -> Consumer b
-mapConsumer f consumer = Consumer $ \consume -> do
-    let producer = Producer $ \produce -> fix $ \loop -> do
-            atomically consume >>= \case
-                EndOfData -> return ()
-                Message x -> (atomically $ produce $ f x) >> loop
-    producer >-> consumer
 
 data Process = forall a. Process
     { procName :: String
@@ -103,60 +80,4 @@ withVar name getVar act = do
         case rv of
             Left _ -> return ()
             Right newVal -> loop newVal
-
--- | Run flow of producers and consumers.
-runFlow :: [Producer a] -> [Consumer a] -> IO ()
-runFlow producers consumers = do
-    -- common broadcast channel
-    hub <- newBroadcastTChanIO
-    let produce = writeTChan hub . Message
-
-    -- start consumers first
-    consumers' <- forM consumers $ \consumer -> do
-        ch <- atomically $ dupTChan hub
-        let consume = readTChan ch
-        Async.async (getConsumer consumer $ consume)
-
-    -- then start producers
-    producers' <- forM producers $ \producer -> do
-        Async.async (getProducer producer $ produce)
-
-    let flushAndWait = do
-            mapM_ Async.cancel producers'
-            atomically $ writeTChan hub EndOfData
-            Async.mapConcurrently_ Async.wait consumers'
-        forceStop e = do
-            mapM_ Async.cancel producers'
-            mapM_ Async.cancel consumers'
-            Ex.throw e
-
-    -- run until something happen
-    leftSide <- Async.async $ Async.waitAnyCatchCancel producers'
-    rightSide <- Async.async $ Async.waitAnyCatch consumers'
-    Async.waitEitherCatch leftSide rightSide >>= \case
-        Left rv -> do
-            logM INFO "Producer finished"
-            case rv of
-                Left e -> forceStop e
-                Right _ -> flushAndWait
-        Right rv -> do
-            logM INFO "Consumer finished"
-            case rv of
-                Left e -> forceStop e
-                Right _ -> flushAndWait
-
-connect :: Producer a -> Consumer a -> IO ()
-connect a b = runFlow [a] [b]
-
-(>->) :: Producer a -> Consumer a -> IO ()
-(>->) = connect
-
-untilData :: (t -> IO a) -> STM (Message t) -> IO ()
-untilData act consume = fix $ \loop -> do
-    atomically consume >>= \case
-        EndOfData -> return ()
-        Message msg -> act msg >> loop
-
-drain :: STM (Message t) -> IO ()
-drain = untilData (\_ -> return ())
 

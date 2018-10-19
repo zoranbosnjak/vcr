@@ -24,7 +24,7 @@ import qualified Options.Applicative as Opt
 import           GHC.Generics (Generic)
 import           Data.Text (unpack)
 
-import           Process
+import           Streams
 
 type Ip = String
 type Port = String
@@ -116,8 +116,8 @@ udpOutOptions = UdpOut
             ))
 
 -- | UDP network reader.
-udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr)
-udpReader addr = Producer $ \produce -> do
+udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr) c
+udpReader addr = mkProducer $ \produce -> do
     bracket acquire release (action produce)
   where
     acquire = do

@@ -11,19 +11,20 @@ import           Control.Monad.Fix
 import           Data.Foldable (toList)
 import           GHC.Generics (Generic)
 import           Options.Applicative as Opt hiding (action)
+import           Data.Bool
 import           Data.Aeson
 import           Data.Aeson.Types (typeMismatch)
 import           Control.Concurrent.STM
 import           Control.Concurrent.Async
 import           Control.Exception
 import qualified Data.HashMap.Strict as HMS
---import qualified Data.ByteString as BS
 import qualified Database.PostgreSQL.Simple as PG
 import           Data.String (fromString)
 import           Data.Sequence as DS
+import qualified System.Clock as Clk
 
 import qualified Common as C
-import           Process
+import           Streams
 import qualified Event
 
 type RetryTimeout = Double
@@ -90,8 +91,6 @@ retryTimeout = Opt.option Opt.auto
 indices :: [String]
 indices =
     [ "CREATE INDEX ON events (utcTime DESC)"
-    -- , "CREATE INDEX ON events (ch DESC)"
-    -- , "CREATE INDEX ON "events"(srcId DESC)"
     , "CREATE INDEX ON events (ch, utcTime DESC)"
     , "CREATE INDEX ON events (trkId, monoTimeSec, monoTimeNSec)"
     ]
@@ -123,129 +122,119 @@ prepareDatabase (DbPostgreSQL s _to) = do
 
 prepareDatabase (DbSQLite3 _filename) = undefined
 
-data LoopEvent a
-    = Input (Message a)
-    | BufferOverflow [a]
-    | SenderFinished [a]
-
 -- | Database writer.
 databaseWriter :: (Int,Double) -> Int -> ([Event.Event] -> IO ()) -> Db
-    -> Consumer Event.Event
+    -> Consumer Event.Event c
 
 -- postgres database writer
-databaseWriter (sendAt,sendTime) m dropAct (DbPostgreSQL connStr connectTime) =
-  Consumer $ \consume -> do
-    when (dropAt > (maxBound `div` 2)) $ fail "database buffer too big"
-    stage1 consume DS.empty
+databaseWriter (thSend, dt) thDrop dropEvents
+  (DbPostgreSQL connStr connectTime) = mkConsumer $ \consume -> do
+    when (thDrop > (maxBound `div` 2)) $ fail "drop threshold too big"
+    when (thDrop <= thSend) $ fail "drop threshond <= send threshold"
+    bufV <- newTVarIO DS.empty  -- buffer variable
+    connV <- newTVarIO Nothing  -- database connection variable
+    withAsync (reader bufV consume) $ \rd ->
+        withAsync (connector connV) $ \_ -> fix $ \loop -> do
+            timeout <- do
+                mEl <- DS.lookup 0 <$> atomically (readTVar bufV)
+                case mEl of
+                    Nothing -> newTVarIO False  -- empty buffer
+                    Just (t1', _) -> do
+                        t <- Clk.toNanoSecs <$> Clk.getTime Clk.Boottime
+                        let t1 = Clk.toNanoSecs t1'
+                            t2 = t1 + round (dt * 1000 * 1000 * 1000)
+                            d = t2 - t
+                        case d <= 0 of  -- expire now or setup timer
+                            True -> newTVarIO True
+                            False -> registerDelay $ fromInteger (d `div` 1000)
+            join $ atomically $ getNext bufV timeout connV rd >>= \case
+                -- send some events to database or put them back to buffer
+                Right (Right (chunk, conn)) -> return $ do
+                    let events = snd <$> toList chunk
+                    try (writeEvents conn events) >>= \case
+                        Right () -> return ()
+                        Left (_e :: IOException) -> atomically $ do
+                            modifyTVar bufV (chunk ><)
+                            writeTVar connV Nothing
+                    loop
+
+                -- drop some events
+                Right (Left chunk) -> return $ do
+                    let events = snd <$> toList chunk
+                    dropEvents events
+                    loop
+
+                -- end of data, empty buffer
+                Left rv -> return (return rv)
 
   where
-
-    sendTimer = registerDelay $ round (sendTime * 1000 * 1000)
-
-    inChunks act s = case DS.null s of
-        True -> return ()
-        False -> do
-            let (a,b) = DS.splitAt sendAt s
-            _ <- act $ toList a
-            inChunks act b
-
-    dropEvents = inChunks dropAct
-
-    writeEvents conn = inChunks $ \events -> do
-        _ <- PG.withTransaction conn $ PG.executeMany conn insertString events
-        return ()
-
-    done s = writeToDb `onException` dropEvents s where
-        writeToDb = do
-            conn <- connectDb
-            writeEvents conn s
-
-    appendThen buf msg act = do
-        let buf' = buf |> msg
-        case DS.length buf' >= dropAt of
-            False -> act buf'
-            True -> do
-                dropEvents buf'
-                act DS.empty
-
-    dropAt = m*sendAt
+    connectDb = PG.connectPostgreSQL $ fromString connStr
 
     insertString = fromString
         "INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING"
 
-    connectDb = PG.connectPostgreSQL $ fromString connStr
+    writeEvents conn events = do
+        _ <- PG.withTransaction conn $ PG.executeMany conn insertString events
+        return ()
 
-    -- try to connect, while consuming data
-    stage1 consume s = do
-        a <- async $ fix $ \reconnect -> do
-            C.logM C.INFO $ "(re)connecting to database " ++ show connStr
-            try connectDb >>= \case
-                Right conn -> return conn
-                Left (_e :: IOException) -> do
-                    C.threadDelaySec connectTime
-                    reconnect
-        loop a s
+    getNext bufV timeout connV rd =
+        fmap (Right . Left) dropSome    -- check this first to prevent overflow
+        `orElse` fmap (Right . Right) sendSome
+        `orElse` eof
       where
-        loop a buf = do
-            rv <- atomically (fmap Left consume `orElse` fmap Right (waitSTM a))
-            case rv of
-                Left EndOfData -> cancel a >> done buf
-                Left (Message msg) -> appendThen buf msg (loop a)
-                Right conn -> do
-                    C.logM C.INFO "database connection established"
-                    pending <- case DS.null buf of
-                        True -> return Nothing
-                        False -> do
-                            -- fake send timer has expired
-                            d <- newTVarIO True
-                            return $ Just (Left d)
-                    stage2 consume conn pending buf
+        dropSome = atThreshold thDrop
+        sendSome = do
+            conn <- readTVar connV >>= maybe retry return -- requires connection
+            values <- expired `orElse` atThreshold thSend
+            return (values, conn)
+        expired = do
+            _ <- readTVar timeout >>= bool retry (return ())
+            buf <- readTVar bufV
+            let (a,b) = DS.splitAt thSend buf
+            when (DS.null a) retry
+            writeTVar bufV b
+            return a
+        atThreshold th = do
+            buf <- readTVar bufV
+            case DS.length buf >= th of
+                False -> retry
+                True -> do
+                    let (a,b) = DS.splitAt thSend buf
+                    writeTVar bufV b
+                    return a
+        eof = do
+            rv <- waitSTM rd
+            buf <- readTVar bufV
+            let (a,b) = DS.splitAt thSend buf
+            writeTVar bufV b
+            case DS.null a of
+                True -> return $ Left rv    -- end of data, empty buffer
+                False -> readTVar connV >>= \case
+                    Nothing -> return $ Right $ Left a
+                    Just conn -> return $ Right $ Right (a, conn)
 
-    -- with active database connection
-    stage2 consume conn pending buf = case pending of
-
-        -- empty buffer, no pending operation
-        Nothing -> atomically consume >>= \case
-            EndOfData -> done buf
+    -- consume data to buffer, add timestamp to each message
+    reader bufV consume = fix $ \loop -> do
+        x <- atomically consume
+        t <- Clk.getTime Clk.Boottime
+        case x of
+            EndOfData rv -> return rv
             Message msg -> do
-                d <- sendTimer
-                appendThen buf msg (stage2 consume conn (Just $ Left d))
+                atomically $ modifyTVar bufV (\val -> (val |> (t,msg)))
+                loop
 
-        -- some data in buffer to be sent when delay expires or cnt >= sendAt
-        Just (Left d) -> do
-            let expired = readTVar d >>= check
-            atomically (fmap Left consume `orElse` fmap Right expired) >>= \case
-                Left EndOfData -> done buf
-                Left (Message msg) -> appendThen buf msg $ \buf' -> do
-                    case DS.length buf' >= sendAt of
-                        False -> stage2 consume conn (Just $ Left d) buf'
-                        True -> do
-                            a <- async $ try $ writeEvents conn buf'
-                            stage2 consume conn (Just $ Right (a, buf)) DS.empty
-                Right () -> do
-                    a <- async $ try $ writeEvents conn buf
-                    stage2 consume conn (Just $ Right (a, buf)) DS.empty
-
-        -- sending of buf1 in progress
-        Just (Right (a,buf1)) -> do
-            let task = waitSTM a
-            atomically (fmap Left consume `orElse` fmap Right task) >>= \case
-                Left EndOfData -> do
-                    cancel a
-                    done $ buf1 >< buf
-                Left (Message msg) -> appendThen buf msg
-                    (stage2 consume conn (Just $ Right (a,buf1)))
-                Right (Left (e :: IOException)) -> do
-                    C.logM C.NOTICE $ "database error: " ++ show e
-                    stage1 consume $ buf1 >< buf
-                Right (Right _)
-                    | DS.null buf -> stage2 consume conn Nothing buf
-                    | DS.length buf >= sendAt -> do
-                        b <- async $ try $ writeEvents conn buf
-                        stage2 consume conn (Just $ Right (b, buf)) DS.empty
-                    | otherwise -> do
-                        d <- sendTimer
-                        stage2 consume conn (Just $ Left d) buf
+    -- try to (re)connect to the database (when disconnected)
+    connector connV = fix $ \reconnect -> do
+        _ <- atomically $ readTVar connV >>= \case
+            Just _ -> retry     -- block until disconnected
+            Nothing -> return ()
+        C.logM C.INFO $ "(re)connecting to database " ++ show connStr
+        try connectDb >>= \case
+            Right conn -> do
+                C.logM C.INFO $ "connected to database " ++ show connStr
+                atomically $ writeTVar connV $ Just conn
+            Left (_e :: IOException) -> C.threadDelaySec connectTime
+        reconnect
 
 databaseWriter _ _ _ (DbSQLite3 _filename) = undefined
 

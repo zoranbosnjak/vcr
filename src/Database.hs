@@ -29,6 +29,13 @@ import qualified Event
 
 type RetryTimeout = Double
 
+data Status
+    = StatusPostgreSQL Int Int      -- (current buffer level, drop threshold)
+    deriving (Generic, Eq, Show)
+
+instance ToJSON Status
+instance FromJSON Status
+
 data Db
     = DbPostgreSQL String RetryTimeout -- postgresql (connection string)
     | DbSQLite3 FilePath    -- sqlite3 (file)
@@ -123,22 +130,22 @@ prepareDatabase (DbPostgreSQL s _to) = do
 prepareDatabase (DbSQLite3 _filename) = undefined
 
 -- | Database writer.
-databaseWriter :: (Int,Double) -> Int -> ([Event.Event] -> IO ()) -> Db
-    -> Consumer Event.Event c
+databaseWriter :: (Status -> STM ()) -> (Int,Double) -> Int -> ([Event.Event] -> IO ()) -> Db -> Consumer Event.Event c
 
 -- postgres database writer
-databaseWriter (thSend, dt) thDrop dropEvents
+databaseWriter setStat (thSend, dt) thDrop dropEvents
   (DbPostgreSQL connStr connectTime) = mkConsumer $ \consume -> do
     when (thDrop > (maxBound `div` 2)) $ fail "drop threshold too big"
     when (thDrop <= thSend) $ fail "drop threshond <= send threshold"
     bufV <- newTVarIO DS.empty  -- buffer variable
+    atomically $ setStat $ StatusPostgreSQL 0 thDrop
     connV <- newTVarIO Nothing  -- database connection variable
     withAsync (reader bufV consume) $ \rd ->
         withAsync (connector connV) $ \_ -> fix $ \loop -> do
             timeout <- do
                 mEl <- DS.lookup 0 <$> atomically (readTVar bufV)
                 case mEl of
-                    Nothing -> newTVarIO False  -- empty buffer
+                    Nothing -> registerDelay $ round $ dt * 1000 * 1000
                     Just (t1', _) -> do
                         t <- Clk.toNanoSecs <$> Clk.getTime Clk.Boottime
                         let t1 = Clk.toNanoSecs t1'
@@ -147,7 +154,10 @@ databaseWriter (thSend, dt) thDrop dropEvents
                         case d <= 0 of  -- expire now or setup timer
                             True -> newTVarIO True
                             False -> registerDelay $ fromInteger (d `div` 1000)
-            join $ atomically $ getNext bufV timeout connV rd >>= \case
+            join $ atomically $ do
+              buf <- readTVar bufV
+              setStat $ StatusPostgreSQL (DS.length buf) thDrop
+              getNext bufV timeout connV rd >>= \case
                 -- send some events to database or put them back to buffer
                 Right (Right (chunk, conn)) -> return $ do
                     let events = snd <$> toList chunk
@@ -164,10 +174,14 @@ databaseWriter (thSend, dt) thDrop dropEvents
                     dropEvents events
                     loop
 
+                -- tick
+                Left (Left ()) -> return loop
+
                 -- end of data, empty buffer
-                Left rv -> return (return rv)
+                Left (Right rv) -> return (return rv)
 
   where
+
     connectDb = PG.connectPostgreSQL $ fromString connStr
 
     insertString = fromString
@@ -181,6 +195,7 @@ databaseWriter (thSend, dt) thDrop dropEvents
         fmap (Right . Left) dropSome    -- check this first to prevent overflow
         `orElse` fmap (Right . Right) sendSome
         `orElse` eof
+        `orElse` tick
       where
         dropSome = atThreshold thDrop
         sendSome = do
@@ -202,13 +217,16 @@ databaseWriter (thSend, dt) thDrop dropEvents
                     let (a,b) = DS.splitAt thSend buf
                     writeTVar bufV b
                     return a
+        tick = do
+            _ <- readTVar timeout >>= bool retry (return ())
+            return $ Left (Left ())
         eof = do
             rv <- waitSTM rd
             buf <- readTVar bufV
             let (a,b) = DS.splitAt thSend buf
             writeTVar bufV b
             case DS.null a of
-                True -> return $ Left rv    -- end of data, empty buffer
+                True -> return $ Left (Right rv)    -- end of data, empty buffer
                 False -> readTVar connV >>= \case
                     Nothing -> return $ Right $ Left a
                     Just conn -> return $ Right $ Right (a, conn)
@@ -236,5 +254,5 @@ databaseWriter (thSend, dt) thDrop dropEvents
             Left (_e :: IOException) -> C.threadDelaySec connectTime
         reconnect
 
-databaseWriter _ _ _ (DbSQLite3 _filename) = undefined
+databaseWriter _ _ _ _ (DbSQLite3 _filename) = undefined
 

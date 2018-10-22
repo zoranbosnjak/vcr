@@ -26,6 +26,7 @@ import Database.PostgreSQL.Simple.FromRow as PGSFR
 import Database.PostgreSQL.Simple.ToField as PGSTF
 import Database.PostgreSQL.Simple.FromField as PGSFF
 import           Data.Convertible
+import           Text.Read
 import qualified Data.Time
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -191,7 +192,11 @@ sourceIdOptions = SourceId <$> Opt.strOption
     )
 
 newtype UtcTime = UtcTime Data.Time.UTCTime
-    deriving (Generic, Eq, Ord, Show, Read)
+    deriving (Generic, Eq, Ord)
+instance Show UtcTime where
+    show (UtcTime t) = show t
+instance Read UtcTime where
+    readPrec = UtcTime <$> readPrec
 instance Data.Aeson.ToJSON UtcTime
 instance Data.Aeson.FromJSON UtcTime
 

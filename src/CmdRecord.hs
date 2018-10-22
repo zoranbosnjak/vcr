@@ -7,9 +7,10 @@
 -- TODO:
 --  - IPv6 support on unicast/multicast input "[ipv6]", "ip" syntax
 
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE LambdaCase #-}
 
 module CmdRecord (cmdRecord) where
 
@@ -27,18 +28,24 @@ import           Control.Concurrent.STM hiding (check)
 import qualified Data.Map as Map
 import           GHC.Generics (Generic)
 import qualified Data.Aeson
+import           Data.String (fromString)
 import           Data.Aeson (ToJSON, FromJSON, toJSON, parseJSON, (.=), object)
 import           Data.Aeson.Types (typeMismatch)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString.Lazy.Char8 as BSL8
 import qualified Data.HashMap.Strict as HMS
 import qualified Control.Concurrent.Async as Async
+import qualified System.Clock as Clk
 import           System.Posix.Signals (installHandler, sigHUP, Handler(Catch))
 import qualified Control.Exception as Ex
 import qualified Data.Set as Set
 import           Numeric (showFFloat)
 import           Data.Text (unpack)
 import qualified Data.Serialize as Bin
+import           Network.Wai
+import qualified Network.Wai.Handler.Warp as Warp
+import           Network.HTTP.Types
 
 -- local imports
 import qualified Common as C
@@ -55,6 +62,9 @@ cmdRecord :: Opt.ParserInfo (C.VcrOptions -> IO ())
 cmdRecord = Opt.info ((runCmd <$> options) <**> Opt.helper)
     (Opt.progDesc "Event recorder")
 
+type Ip = String
+type Port = Int
+
 -- | Top level commands.
 data TopCommand
     = TopFile FilePath
@@ -67,6 +77,7 @@ data TopCommand
 data Options = Options
     { optIdent      :: Maybe Event.SourceId
     , optUptime     :: Maybe Double
+    , optHttp       :: Maybe (Ip, Port)
     , optArgs       :: TopCommand
     } deriving (Eq, Show)
 
@@ -132,6 +143,7 @@ options = Options
        <> Opt.help "Log uptime every N seconds"
        <> Opt.metavar "N"
         ))
+    <*> Opt.optional httpOptions
     <*> parseConfig
   where
     parseConfig =
@@ -279,6 +291,30 @@ bufferDropAt = Opt.option Opt.auto
    <> Opt.showDefault
     )
 
+httpOptions :: Opt.Parser (Ip, Port)
+httpOptions = C.subparserCmd "http ..." $
+    Opt.command "http" $ Opt.info
+        (opts <**> Opt.helper)
+        (Opt.progDesc "Enable http server")
+  where
+    opts = (,)
+        <$> parseIp
+        <*> parsePort
+    parseIp = Opt.strOption
+        ( Opt.long "ip"
+       <> Opt.metavar "IP"
+       <> Opt.help "Ip address"
+       <> Opt.value "127.0.0.1"
+       <> Opt.showDefault
+        )
+    parsePort = Opt.option Opt.auto
+        ( Opt.long "port"
+       <> Opt.metavar "PORT"
+       <> Opt.help "TCP port number"
+       <> Opt.value 8080
+       <> Opt.showDefault
+        )
+
 emptyConfig :: AppConfig
 emptyConfig = AppConfig
     { appStdin = Nothing
@@ -414,9 +450,9 @@ fileOutput cfg = mkConsumer $ \consume ->
         Streams.map (Enc.encode $ outFileEnc fo)
         >-> File.fileWriter (outFileStore fo) (outFileRotate fo) (logM INFO)
 
-databaseOutput :: STM (Maybe DatabaseOutput) -> Event.SessionId
-    -> Consumer Event.Event ()
-databaseOutput cfg sessionId = mkConsumer $ \consume ->
+databaseOutput :: Event.SessionId -> (Db.Status -> STM ())
+    -> STM (Maybe DatabaseOutput) -> Consumer Event.Event ()
+databaseOutput sessionId setStat cfg = mkConsumer $ \consume ->
     withVar "database output" cfg $ \case
         Nothing -> (streamAction drain) consume noProduce
         Just dbo -> do
@@ -429,7 +465,8 @@ databaseOutput cfg sessionId = mkConsumer $ \consume ->
                         let (Event.SessionId sid) = sessionId
                             fn = File.filePath fs ++ "-" ++ sid
                         in BS.appendFile fn . Enc.encodeList Enc.EncJSON
-                consumer = Db.databaseWriter bufSend bufDropAt dropEvents conn
+                consumer =
+                    Db.databaseWriter setStat bufSend bufDropAt dropEvents conn
             (streamAction consumer) consume noProduce
 
 logUptime :: Event.MonoTime -> Double -> IO b
@@ -441,6 +478,58 @@ logUptime startTimeMono t = forever $ do
         uptimeDays = uptimeSec / (24*3600)
     logM INFO $
         "uptime: " ++ showFFloat (Just 3) uptimeDays "" ++ " days"
+
+startHttp :: Event.UtcTime -> Event.MonoTime -> TVar (Maybe Db.Status)
+    -> (String, Warp.Port) -> IO ()
+startHttp startTimeUtc startTimeMono dbStatV (ip, port) = do
+    let settings =
+            Warp.setPort port $
+            Warp.setHost (fromString ip) $
+            Warp.defaultSettings
+    logM INFO $ "http server, ip: " ++ show ip ++ ", port: " ++ show port
+    Warp.runSettings settings $ app
+  where
+    app request respond = withLog go
+      where
+        withLog act = case parseMethod (requestMethod request) of
+            Left _ -> respond $ responseLBS
+                status400
+                [("Content-Type", "text/plain")]
+                "400 - unknown request method\n"
+            Right mtd -> do
+                logM DEBUG $ show request
+                act (pathInfo request) mtd
+
+        go ["startTime"] GET = respond $ responseLBS
+            status200
+            [("Content-Type", "text/plain")]
+            (BSL8.pack $ show startTimeUtc ++ "\n")
+
+        go ["uptime"] GET = do
+            (_tUtc, tMono) <- Event.now
+            let uptimeNsec = Clk.toNanoSecs $ Clk.diffTimeSpec
+                        (Event.getMonoTime tMono)
+                        (Event.getMonoTime startTimeMono)
+                uptimeSec = uptimeNsec `div` (10^(9::Int))
+                uptimeDays :: Double
+                uptimeDays = fromIntegral uptimeSec / (24*3600)
+                uptimeDaysStr = showFFloat (Just 3) uptimeDays "" ++ " days\n"
+            respond $ responseLBS status200 [("Content-Type", "text/plain")]
+                (BSL8.pack $ uptimeDaysStr)
+
+        go ["status"] GET = do
+            dbStat <- atomically $ readTVar dbStatV
+            let stat = object
+                    [ "database"    .= dbStat
+                    ]
+            respond $ responseLBS status200 [("Content-Type", "text/plain")]
+                (Enc.jsonEncodePretty stat <> "\n")
+
+        -- not found
+        go _ _ = respond $ responseLBS
+            status404
+            [("Content-Type", "text/plain")]
+            "404 - Not Found\n"
 
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
@@ -516,19 +605,26 @@ runCmd opts vcrOpts = case optArgs opts of
 
     case doBootstrap of
       Just val -> BSL.putStr $ Enc.jsonEncodePretty val
-      Nothing -> runAll
-        [ process_ "uptime" $
-            maybe doNothing (logUptime startTimeMono) (optUptime opts)
-        , process_ "data flow" $ runStream_ $
-            mergeProducers  -- inputs
-                [ stdInInput (appStdin <$> readTVar cfg) recId sessionId
-                , udpInputs (appInputs <$> readTVar cfg) recId sessionId
-                ]
-            >->
-            forkConsumers   -- outputs
-                [ stdOutOutput (appStdout <$> readTVar cfg)
-                , fileOutput (appFileOutput <$> readTVar cfg)
-                , databaseOutput (appDatabaseOutput <$> readTVar cfg) sessionId
-                ]
-        ]
+      Nothing -> do
+        dbStat <- newTVarIO Nothing
+        let updateDbStatus = writeTVar dbStat . Just
+        runAll
+            [ process_ "uptime" $
+                maybe doNothing (logUptime startTimeMono) (optUptime opts)
+            , process_ "http" $ maybe doNothing
+                (startHttp startTimeUtc startTimeMono dbStat)
+                (optHttp opts)
+            , process_ "data flow" $ runStream_ $
+                mergeProducers  -- inputs
+                    [ stdInInput (appStdin <$> readTVar cfg) recId sessionId
+                    , udpInputs (appInputs <$> readTVar cfg) recId sessionId
+                    ]
+                >->
+                forkConsumers   -- outputs
+                    [ stdOutOutput (appStdout <$> readTVar cfg)
+                    , fileOutput (appFileOutput <$> readTVar cfg)
+                    , databaseOutput sessionId updateDbStatus
+                        (appDatabaseOutput <$> readTVar cfg)
+                    ]
+            ]
 

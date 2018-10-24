@@ -24,14 +24,14 @@ import           System.Remote.Monitoring
 import qualified Common as C
 import           CmdRecord    (cmdRecord)
 --import           CmdReplay    (cmdReplay)
---import           CmdArchive   (cmdArchive)
+import           CmdArchive   (cmdArchive)
 
 -- | Available commands.
 commands :: [(String, Opt.ParserInfo (C.VcrOptions -> IO ()))]
 commands =
     [ ("record",    cmdRecord)
     --, ("replay",    cmdReplay)
-    --, ("archive",   cmdArchive)
+    , ("archive",   cmdArchive)
     ]
 
 -- | Toplevel command line options.

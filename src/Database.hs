@@ -22,6 +22,7 @@ import qualified Database.PostgreSQL.Simple as PG
 import           Data.String (fromString)
 import           Data.Sequence as DS
 import qualified System.Clock as Clk
+import qualified Data.Text as Text
 
 import qualified Common as C
 import           Streams
@@ -129,8 +130,82 @@ prepareDatabase (DbPostgreSQL s _to) = do
 
 prepareDatabase (DbSQLite3 _filename) = undefined
 
+-- | Format UTC time for SQL (YYYY-MM-DD HH:MM:SS.SSS)
+fmtTime :: Show a => a -> String
+fmtTime t = "'" ++ show t ++ "'"
+
+-- | Database reader.
+databaseReaderTask :: Db
+    -> Maybe (Event.UtcTime)
+    -> Maybe (Event.UtcTime)
+    -> [Event.Channel]
+    -> [Event.SourceId]
+    -> Producer Event.Event ()
+
+-- postgres database reader
+databaseReaderTask (DbPostgreSQL connStr _) mStart mEnd channels sources =
+  mkProducer $ \produce -> do
+    conn <- PG.connectPostgreSQL $ fromString connStr
+    C.logM C.DEBUG $ selectEvents
+    PG.forEach_ conn (fromString selectEvents) $ atomically . produce
+  where
+    selectEvents =
+        "SELECT * FROM events WHERE NULL IS NULL"
+        ++ maybe "" (\x -> " AND utcTime >= " ++ fmtTime x) mStart
+        ++ maybe "" (\x -> " AND utcTime < " ++ fmtTime x) mEnd
+        ++ maybe "" (\x -> " AND " ++ x) chList
+        ++ maybe "" (\x -> " AND " ++ x) recList
+        ++ " ORDER BY monoTimeSec, monoTimeNSec, ch, sesId ASC"
+    chList = do
+        guard $ channels /= []
+        let lst = Prelude.map
+                (\(Event.Channel ch) -> "'" ++ Text.unpack ch ++ "'") channels
+        return $ "ch in (" ++ foldl1 (\a b -> a ++ "," ++ b) lst ++ ")"
+    recList = do
+        guard $ sources /= []
+        let lst = Prelude.map
+                (\(Event.SourceId src) -> "'" ++ Text.unpack src ++ "'") sources
+        return $ "srcId in (" ++ foldl1 (\a b -> a ++ "," ++ b) lst ++ ")"
+
+
+-- sqlite database reader
+databaseReaderTask _ _ _ _ _ = undefined
+
+writeEventsPG :: PG.ToRow q => PG.Connection -> [q] -> IO ()
+writeEventsPG conn events = do
+    _ <- PG.withTransaction conn $ PG.executeMany conn insertString events
+    return ()
+  where
+    insertString = fromString
+        "INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING"
+
+-- | Database writer task.
+databaseWriterTask :: Int -> Db -> Consumer Event.Event c
+
+-- postgres writer task
+databaseWriterTask thSend (DbPostgreSQL connStr _) =
+  mkConsumer $ \consume -> do
+    conn <- PG.connectPostgreSQL $ fromString connStr
+    loop consume conn []
+  where
+    loop consume conn events = atomically consume >>= \case
+        EndOfData rv -> do
+            writeEventsPG conn events
+            return rv
+        Message event -> do
+            let events' = event:events
+            case Prelude.length events' >= thSend of
+                True -> do
+                    writeEventsPG conn events
+                    loop consume conn []
+                False ->
+                    loop consume conn events'
+
+databaseWriterTask _ _ = undefined
+
 -- | Database writer.
-databaseWriter :: (Status -> STM ()) -> (Int,Double) -> Int -> ([Event.Event] -> IO ()) -> Db -> Consumer Event.Event c
+databaseWriter :: (Status -> STM ()) -> (Int,Double) -> Int
+    -> ([Event.Event] -> IO ()) -> Db -> Consumer Event.Event c
 
 -- postgres database writer
 databaseWriter setStat (thSend, dt) thDrop dropEvents
@@ -161,7 +236,7 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents
                 -- send some events to database or put them back to buffer
                 Right (Right (chunk, conn)) -> return $ do
                     let events = snd <$> toList chunk
-                    try (writeEvents conn events) >>= \case
+                    try (writeEventsPG conn events) >>= \case
                         Right () -> return ()
                         Left (_e :: IOException) -> atomically $ do
                             modifyTVar bufV (chunk ><)
@@ -183,13 +258,6 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents
   where
 
     connectDb = PG.connectPostgreSQL $ fromString connStr
-
-    insertString = fromString
-        "INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING"
-
-    writeEvents conn events = do
-        _ <- PG.withTransaction conn $ PG.executeMany conn insertString events
-        return ()
 
     getNext bufV timeout connV rd =
         fmap (Right . Left) dropSome    -- check this first to prevent overflow

@@ -182,6 +182,17 @@ mkGenPipeIO initial f = mkPipe $ loop initial where
                 _ <- atomically $ produce b
                 loop g' consume produce
 
+-- | Filter each element inside IO
+filterIO :: (a -> IO (Maybe b)) -> Pipe a b c
+filterIO f = mkPipe $ \consume produce -> fix $ \loop -> do
+    atomically consume >>= \case
+        EndOfData rv -> return rv
+        Message x -> do
+            f x >>= \case
+                Nothing -> return ()
+                Just y -> atomically $ produce y
+            loop
+
 -- | Create accumulator pipe
 mkAccumulator :: (Eq a, Monoid a) => a -> (a -> ([b], a)) -> Pipe a b c
 mkAccumulator initial f = mkPipe $ \consume produce -> do

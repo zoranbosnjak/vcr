@@ -1,22 +1,12 @@
 ------------------
 -- |
--- Module: CmdArchive
+-- Module: CmdRecord
 --
--- Archiver is used for transfering recorded data events from a file
--- or server to another file or server.
+-- 'archive' command
 --
--- (*) The transfer of recorded data is carried out in chunks.  The
---     size of a chunk is specified by a command-line option
---     'chunkSize' (default=1024).
--- (*) Events are encoded as specified in 'Encodings'.  The maximal
---     size of a recorded event is specified by a comman-line option
---     'maxEventSize' (default=16384).
---
--- TODO: WRITE COMPREHENSIVE DOCUMENTATION OF THE ARCHIVER
 
-module CmdArchive where
+{-# LANGUAGE LambdaCase #-}
 
-{-
 module CmdArchive (cmdArchive) where
 
 -- Standard imports.
@@ -29,27 +19,23 @@ import           System.Log.Logger (Priority(INFO, DEBUG, NOTICE))
 
 -- Local imports.
 import qualified Common as C
+import           Common (logM)
 import qualified Event
-import qualified Server
 import qualified File
 import qualified Encodings
 import           Streams
+import qualified Database as Db
 
-
-
--- | The exported function implementing the entire functionality of
--- the archiver.  For more information see the description at the top.
 cmdArchive :: Opt.ParserInfo (C.VcrOptions -> IO ())
 cmdArchive = Opt.info ((runCmd <$> options) <**> Opt.helper)
     (Opt.progDesc "Event archiver")
-
-
 
 -- | Archiver specific command options.
 data Options = Options
     { optInput          :: Input
     , optOutput         :: Output
-    , optChunkSize      :: Int
+    , optChunkBytes     :: Int
+    , optChunkEvents    :: Int
     , optMaxEventSize   :: Int
     , optChunkDelay     :: Int
     , optEventDelay     :: Int
@@ -62,13 +48,13 @@ data Options = Options
 -- | Input options.
 data Input
     = IFile Encodings.EncodeFormat File.FileStore
-    | IServer Server.ServerConnection
+    | IDatabase Db.Db
     deriving (Eq, Show)
 
 -- | Output options.
 data Output
     = OFile Encodings.EncodeFormat File.FileStore
-    | OServer Server.ServerConnection
+    | ODatabase Db.Db
     deriving (Eq, Show)
 
 -- | Command option parser.
@@ -77,16 +63,22 @@ options = Options
     <$> input
     <*> output
     <*> Opt.option Opt.auto
-        ( Opt.long "chunkSize"
-       <> Opt.help ("the chunk size")
+        ( Opt.long "chunkBytes"
+       <> Opt.help ("chunk size (bytes)")
        <> Opt.showDefault
-       <> Opt.value 1024
-       <> Opt.metavar "CHUNKSIZE")
+       <> Opt.value (64*1024)
+       <> Opt.metavar "BYTES")
+    <*> Opt.option Opt.auto
+        ( Opt.long "chunkEvents"
+       <> Opt.help ("chunk size (events)")
+       <> Opt.showDefault
+       <> Opt.value (10000)
+       <> Opt.metavar "BYTES")
     <*> Opt.option Opt.auto
         ( Opt.long "maxEventSize"
-       <> Opt.help ("the maximal event size")
+       <> Opt.help ("maximum size of event in bytes")
        <> Opt.showDefault
-       <> Opt.value 16384
+       <> Opt.value (64*1024)
        <> Opt.metavar "MAXEVENTSIZE")
     <*> Opt.option Opt.auto
         ( Opt.long "chunkDelay"
@@ -96,7 +88,7 @@ options = Options
        <> Opt.metavar "CHUNKDELAY")
     <*> Opt.option Opt.auto
         ( Opt.long "eventDelay"
-       <> Opt.help ("Time delay (in ms) between processing delays.")
+       <> Opt.help ("Time delay (in ms) between processing events.")
        <> Opt.showDefault
        <> Opt.value 0
        <> Opt.metavar "EVENTDELAY")
@@ -116,41 +108,48 @@ input = C.subparserCmd "input ..." $ Opt.command "input" $ Opt.info
     (opts <**> Opt.helper)
     (Opt.progDesc "Data source")
   where
-    opts = file <|> server
-    file = Opt.flag' () (Opt.long "file") *>
+    opts = file <|> database
+    file = C.subparserCmd "file ..." $ Opt.command "file" $ Opt.info
         (IFile <$> Encodings.encodeFormatOptions <*> File.fileStoreOptions)
-    server = Opt.flag' () (Opt.long "server")
-        *> (IServer <$> Server.serverConnectionOptions)
+        (Opt.progDesc "Input from file")
+    database = C.subparserCmd "database ..." $ Opt.command "database" $ Opt.info
+        (IDatabase <$> Db.databaseConnectionOptions)
+        (Opt.progDesc "Input from database")
 
 output :: Opt.Parser Output
 output = C.subparserCmd "output ..." $ Opt.command "output" $ Opt.info
     (opts <**> Opt.helper)
     (Opt.progDesc "Data destination")
   where
-    opts = file <|> server
-    file = Opt.flag' () (Opt.long "file") *>
+    opts = file <|> database
+    file = C.subparserCmd "file ..." $ Opt.command "file" $ Opt.info
         (OFile <$> Encodings.encodeFormatOptions <*> File.fileStoreOptions)
-    server = Opt.flag' () (Opt.long "server")
-        *> (OServer <$> Server.serverConnectionOptions)
-
+        (Opt.progDesc "Output to file")
+    database = C.subparserCmd "database ..." $ Opt.command "database" $ Opt.info
+        (ODatabase <$> Db.databaseConnectionOptions)
+        (Opt.progDesc "Output to database")
 
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
 runCmd opts vcrOpts = do
 
-    C.logM INFO $
-        "command 'archive'" ++
-        ", opts: " ++ show opts ++
-        ", vcrOpts: " ++ show vcrOpts
+    (startTimeUtc, _startTimeMono) <- Event.now
+    logM INFO $ "startup " ++ show startTimeUtc
+    logM INFO $
+        "command 'archive'"
+        ++ ", opts: " ++ show opts
+        ++ ", vcrOpts: " ++ show vcrOpts
 
-    C.check (0 < chunkSize)
-        "archive: Illegal chunk size."
+    C.check (0 < chunkBytes)
+        "Illegal chunk size (bytes)."
+    C.check (0 < chunkEvents)
+        "Illegal chunk size (events)."
     C.check (0 < maxEventSize)
-        "archive: Illegal maximal event size."
+        "Illegal maximum event size."
     C.check (0 <= chunkDelay)
-        "archive: Illegal chunk delay interval."
+        "Illegal chunk delay interval."
     C.check (0 <= eventDelay)
-        "archive: Illegal event delay interval."
+        "Illegal event delay interval."
 
     runStream_ $
         source
@@ -158,11 +157,12 @@ runCmd opts vcrOpts = do
         >-> traceDstEvents
         >-> destination
 
-    C.logM INFO $
-        "archive: done"
+    logM INFO "done"
 
   where
-    chunkSize = optChunkSize opts
+
+    chunkBytes = optChunkBytes opts
+    chunkEvents = optChunkEvents opts
     maxEventSize = optMaxEventSize opts
     chunkDelay = optChunkDelay opts
     eventDelay = optEventDelay opts
@@ -170,7 +170,7 @@ runCmd opts vcrOpts = do
     source :: Producer Event.Event ()
     source = case optInput opts of
         IFile inpEnc inpFS ->
-            File.fileReaderChunks chunkSize inpFS
+            File.fileReaderChunks chunkBytes inpFS
             >-> delay chunkDelay
             >-> Encodings.fromByteString maxEventSize inpEnc
             >-> traceSrcEvents
@@ -178,65 +178,63 @@ runCmd opts vcrOpts = do
             >-> sourceIdFilters
             >-> startTimeFilter
             >-> endTimeFilter
-        IServer _inpSC -> undefined
+        IDatabase db ->
+            Db.databaseReaderTask db
+                (optStartTime opts)
+                (optEndTime opts)
+                (optChannelFilter opts)
+                (optSourceIdFilter opts)
       where
 
         traceSrcEvents ::
             Pipe (Either (String, ByteString) Event.Event) Event.Event ()
-        traceSrcEvents = mkPipe $ \consume produce -> forever $ do
-            result <- consume Clear
-            case result of
-                Left (msg,_) -> do
-                    liftIO $ C.logM NOTICE $
-                        "archive: Cannot decode an event: " ++ msg
-                Right event -> do
-                    liftIO $ C.logM DEBUG $
-                        "archive: Src event " ++ show (Event.eUtcTime event)
-                    produce event
+        traceSrcEvents = filterIO $ \case
+            Left (msg,_) -> do
+                logM NOTICE $ "Cannot decode an event: " ++ msg
+                return Nothing
+            Right event -> do
+                logM DEBUG $ "Src event " ++ show (Event.eUtcTime event)
+                return $ Just event
 
         channelFilters :: Pipe Event.Event Event.Event ()
-        channelFilters =
-            case channels of
-                [] -> Streams.map id
-                _  -> Streams.filter ((`elem` channels).Event.eChannel)
-            where channels = optChannelFilter opts
+        channelFilters = case channels of
+            [] -> Streams.map id
+            _  -> Streams.filter ((`elem` channels).Event.eChannel)
+          where
+            channels = optChannelFilter opts
 
         sourceIdFilters :: Pipe Event.Event Event.Event ()
-        sourceIdFilters =
-            case sourceIds of
-                [] -> Streams.map id
-                _  -> Streams.filter ((`elem` sourceIds).Event.eSourceId)
-            where sourceIds = optSourceIdFilter opts
+        sourceIdFilters = case sourceIds of
+            [] -> Streams.map id
+            _  -> Streams.filter ((`elem` sourceIds).Event.eSourceId)
+          where
+            sourceIds = optSourceIdFilter opts
 
         startTimeFilter :: Pipe Event.Event Event.Event ()
-        startTimeFilter =
-            case (optStartTime opts) of
-                Just utcTime -> Streams.filter ((>=utcTime).Event.eUtcTime)
-                Nothing -> Streams.map id
+        startTimeFilter = case (optStartTime opts) of
+            Just utcTime -> Streams.filter ((>=utcTime).Event.eUtcTime)
+            Nothing -> Streams.map id
 
         endTimeFilter :: Pipe Event.Event Event.Event ()
-        endTimeFilter =
-            case (optEndTime opts) of
-                Just utcTime -> Streams.filter ((>=utcTime).Event.eUtcTime)
-                Nothing -> Streams.map id
+        endTimeFilter = case (optEndTime opts) of
+            Just utcTime -> Streams.filter ((<utcTime).Event.eUtcTime)
+            Nothing -> Streams.map id
 
     delay :: Int -> Pipe a a ()
-    delay interval = mkPipe $ \ consume produce -> forever $ do
-        msg <- consume Clear
-        liftIO $ threadDelay (1000 * interval)
-        produce msg
+    delay interval = filterIO $ \x -> do
+        threadDelay (1000 * interval)
+        return $ Just x
 
     traceDstEvents :: Pipe Event.Event Event.Event ()
-    traceDstEvents = mkPipe $ \consume produce -> forever $ do
-        event <- consume Clear
-        liftIO $ C.logM DEBUG $
-            "archive: Dst event " ++ show (Event.eUtcTime event)
-        produce event
+    traceDstEvents = filterIO $ \event -> do
+        logM DEBUG $ "Dst event " ++ show (Event.eUtcTime event)
+        return $ Just event
 
     destination :: Consumer Event.Event ()
     destination = case optOutput opts of
         OFile outEnc outFS ->
             Encodings.toByteString outEnc
             >-> File.fileWriter outFS Nothing (\_ -> return ())
-        OServer _outSC -> undefined
--}
+        ODatabase db ->
+            Db.databaseWriterTask chunkEvents db
+

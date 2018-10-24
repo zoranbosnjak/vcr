@@ -49,8 +49,8 @@ import           Network.HTTP.Types
 
 -- local imports
 import qualified Common as C
-import qualified Event
 import           Common (logM)
+import qualified Event
 import           Process
 import           Streams
 import qualified Udp

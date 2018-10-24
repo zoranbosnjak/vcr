@@ -238,9 +238,11 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents
                     let events = snd <$> toList chunk
                     try (writeEventsPG conn events) >>= \case
                         Right () -> return ()
-                        Left (_e :: IOException) -> atomically $ do
-                            modifyTVar bufV (chunk ><)
-                            writeTVar connV Nothing
+                        Left (e :: PG.SqlError) -> do
+                            C.logM C.NOTICE $ "database exception " ++ show e
+                            atomically $ do
+                                modifyTVar bufV (chunk ><)
+                                writeTVar connV Nothing
                     loop
 
                 -- drop some events
@@ -314,12 +316,13 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents
         _ <- atomically $ readTVar connV >>= \case
             Just _ -> retry     -- block until disconnected
             Nothing -> return ()
+        C.threadDelaySec connectTime -- do not reconnect too fast
         C.logM C.INFO $ "(re)connecting to database " ++ show connStr
         try connectDb >>= \case
             Right conn -> do
                 C.logM C.INFO $ "connected to database " ++ show connStr
                 atomically $ writeTVar connV $ Just conn
-            Left (_e :: IOException) -> C.threadDelaySec connectTime
+            Left (_e :: IOException) -> return ()
         reconnect
 
 databaseWriter _ _ _ _ (DbSQLite3 _filename) = undefined

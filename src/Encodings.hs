@@ -5,6 +5,7 @@
 -- This module defines encoding/decding.
 --
 
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE RankNTypes #-}
@@ -12,16 +13,18 @@
 module Encodings
 ( EncodeFormat(..)
 , HasSize(..)
-, encode, decode
+, encode, tryDecode
 , jsonEncode, jsonEncodePretty, jsonDecode, jsonEitherDecode
 , encodeFormatOptions
-, encodeList, decodeList
+, encodeList, tryDecodeList
 , hexlify, unhexlify
 , cobsEncode, cobsDecode
 , toByteString, fromByteString
-) where
+)
+where
 
 import           Control.Monad
+import           Control.Concurrent.STM
 import           Data.Monoid ((<>))
 import           Data.Word (Word8)
 
@@ -44,6 +47,7 @@ import           Options.Applicative ((<|>))
 import qualified Options.Applicative as Opt
 import qualified Test.QuickCheck as QC
 import           Text.Read (readMaybe)
+import qualified Data.Text as Text
 
 import           Streams
 
@@ -68,15 +72,14 @@ instance ToJSON EncodeFormat where
     toJSON EncText = toJSON ("text" :: String)
     toJSON EncBin = toJSON ("bin" :: String)
     toJSON EncJSON = toJSON ("json" :: String)
-    toJSON (EncJSONPretty _n) = undefined
-        -- toJSON (("jsonPretty " ++ show n) :: String)
+    toJSON (EncJSONPretty n) = toJSON (("jsonPretty " ++ show n))
 
 instance FromJSON EncodeFormat where
-    parseJSON (Data.Aeson.String s) = case s of
-        "text" -> return EncText
-        "bin" -> return EncBin
-        "json" -> return EncJSON
-        -- TODO: jsonPretty
+    parseJSON (Data.Aeson.String s) = case Text.words s of
+        ["text"] -> return EncText
+        ["bin"] -> return EncBin
+        ["json"] -> return EncJSON
+        ["jsonPretty", n] -> return $ EncJSONPretty (read $ Text.unpack n)
         _ -> typeMismatch "EncodeFormat" (Data.Aeson.String s)
     parseJSON t = typeMismatch "EncodeFormat" t
 
@@ -191,92 +194,79 @@ encode (EncJSONPretty i) val = BS.concat
   where
     cfg = (AP.defConfig {AP.confCompare = compare, AP.confIndent = AP.Spaces i})
 
--- | Item parser.
--- TODO:
---  - change this function to use proper parsers
---    for all formats (like jsonStream)
---  - compare performance (BS.elem... vs parser)
---  - BS.null check might not be necessary any more
---  - check performance for very large files, for example
---    '\n\n...' without recordSeparator for jsonPretty
-parse :: (Read a, Bin.Serialize a, Data.Aeson.FromJSON a) =>
-    Int -> EncodeFormat -> BS.ByteString -> ATP.Result a
-parse maxSize fmt s
-    | BS.null s = ATP.Partial (parse maxSize fmt)
-    | BS.length s > maxSize = ATP.Fail BS.empty [] "Input data too long."
-    | otherwise = case fmt of
-        EncText -> withEndDelim lineFeed (readMaybe . BS8.unpack)
-        EncBin -> withEndDelim 0 $ \x -> do
-            val <- cobsDecode x
-            case Bin.decode val of
-                Left _e -> Nothing
-                Right a -> Just a
-        EncJSON -> withEndDelim lineFeed Data.Aeson.decodeStrict
-        EncJSONPretty _ -> ATP.parse jsonStream s
-  where
-    withEndDelim delim tryParse = case BS.elemIndex delim s of
-            Nothing -> ATP.Partial (\more -> parse maxSize fmt (s <> more))
-            Just i ->
-                let (probe, rest) = BS.splitAt i s
-                    leftover = BS.drop 1 rest
-                in case tryParse probe of
-                    Nothing -> ATP.Fail leftover [] "Decode error."
-                    Just a -> ATP.Done leftover a
-
-    jsonStream = do
-        _ <- ATP.word8 recordSeparator
-        val <- Data.Aeson.json
-        _ <- ATP.word8 lineFeed
-        case Data.Aeson.fromJSON val of
-            Data.Aeson.Error e -> fail e
-            Data.Aeson.Success a -> return a
-
 -- | Encode list of encodable items.
 encodeList :: (Data.Aeson.ToJSON a, Bin.Serialize a, Show a) =>
     EncodeFormat -> [a] -> BS.ByteString
 encodeList fmt lst = BS.concat (encode fmt <$> lst)
-
--- | Decode ByteString to list of items + some remaining.
-decodeStream :: (Read a, Bin.Serialize a, Data.Aeson.FromJSON a) =>
-    Int
-    -> EncodeFormat
-    -> BS.ByteString
-    -> ([Either (String, BS.ByteString) a], BS.ByteString)
-decodeStream maxSize fmt orig = go [] orig where
-    go acc s = case parse maxSize fmt s of
-        ATP.Fail i _c e -> go (Left (e,s) : acc) i
-        ATP.Partial _f -> (reverse acc, s)
-        ATP.Done i r -> go (Right r : acc) i
-
--- | Try to decode list of encodable items.
-decodeList :: (Data.Aeson.FromJSON a, Bin.Serialize a, Read a) =>
-    Int -> EncodeFormat -> BS.ByteString -> Maybe [a]
-decodeList maxSize fmt s = do
-    guard $ BS.null leftover
-    sequence (check <$> lst)
-  where
-    (lst, leftover) = decodeStream maxSize fmt s
-    check (Left _) = Nothing
-    check (Right val) = Just val
-
--- | Try to decode single item.
-decode :: (Read a, Bin.Serialize a, Data.Aeson.FromJSON a) =>
-    EncodeFormat -> BS.ByteString -> Maybe a
-decode fmt s = do
-    result <- decodeList maxBound fmt s
-    case result of
-        [a] -> Just a
-        _ -> Nothing
 
 -- | Pipe from items to bytestrings.
 toByteString :: (Data.Aeson.ToJSON a, Bin.Serialize a, Show a) =>
     EncodeFormat -> Pipe a BS.ByteString c
 toByteString fmt = Streams.map (encode fmt)
 
--- | Pipe from ByteString to item.
+parser :: (Read b, Bin.Serialize b, FromJSON b) => EncodeFormat -> ATP.Parser b
+parser = \case
+    EncText -> do
+        val <- ATP.takeWhile1 (/= lineFeed) <* ATP.word8 lineFeed
+        maybe (fail "decode error") return $
+            readMaybe $ BS8.unpack val
+    EncBin -> do
+        mVal <- ATP.takeWhile1 (/= 0) <* ATP.word8 0
+        case cobsDecode mVal of
+            Nothing -> fail "COBS decode error"
+            Just val -> either fail return (Bin.decode val)
+    EncJSON -> do
+        val <- ATP.takeWhile1 (/= lineFeed) <* ATP.word8 lineFeed
+        maybe (fail "decode error") return $ Data.Aeson.decodeStrict val
+    EncJSONPretty _ -> do
+        val <-
+            ATP.word8 recordSeparator
+            *> Data.Aeson.json
+            <* ATP.word8 lineFeed
+        case Data.Aeson.fromJSON val of
+            Data.Aeson.Error e -> fail e
+            Data.Aeson.Success a -> return a
+
+-- | Try to decode single item.
+tryDecode :: (Read a, Bin.Serialize a, Data.Aeson.FromJSON a) =>
+    EncodeFormat -> BS.ByteString -> Maybe a
+tryDecode fmt s = either (const Nothing) return $ ATP.parseOnly (parser fmt) s
+
+-- | Try to decode list of encodable items.
+tryDecodeList :: (Data.Aeson.FromJSON a, Bin.Serialize a, Read a) =>
+    EncodeFormat -> BS.ByteString -> Maybe [a]
+tryDecodeList fmt s = loop s where
+    loop leftover
+        | leftover == mempty = Just []
+        | otherwise = case ATP.parse (parser fmt) leftover of
+            ATP.Done i r -> do
+                rest <- loop i
+                Just (r:rest)
+            _ -> Nothing
+
+-- | Pipe from ByteString to Either (error, item).
 fromByteString :: (Data.Aeson.FromJSON a, Bin.Serialize a, Read a) =>
     Int
     -> EncodeFormat
     -> Pipe BS.ByteString (Either (String, BS.ByteString) a) c
-fromByteString maxSize fmt = mkAccumulator BS.empty (decodeStream maxSize fmt)
+fromByteString maxSize fmt = mkPipe (loop BS.empty)
+  where
+    loop acc consume produce = atomically consume >>= \case
+        EndOfData rv
+            | BS.null acc -> return rv          -- clean exit
+            | otherwise -> fail "broken pipe"   -- more data is expected
+        Message s -> do
+            leftover <- process produce (acc <> s)
+            case BS.length leftover >= maxSize of
+                True -> fail "input data too long"
+                False -> loop leftover consume produce
+
+    process produce s = case ATP.parse (parser fmt) s of
+        ATP.Fail i _c e -> do
+            _ <- atomically $ produce $ Left (e,s)
+            process produce i
+        ATP.Partial _f -> return s
+        ATP.Done i r -> do
+            _ <- atomically $ produce $ Right r
+            process produce i
 

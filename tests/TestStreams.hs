@@ -9,6 +9,7 @@ import Data.Foldable
 import Control.Concurrent.STM
 import Data.IORef
 import qualified Data.Sequence as DS
+import qualified Data.ByteString as BS
 import Test.Framework (Test, testGroup)
 import Test.Framework.Providers.QuickCheck2 (testProperty)
 import Test.QuickCheck
@@ -114,8 +115,8 @@ propBasicPipe2 n = ioProperty $ do
   where
     orig = take n [1..] :: [Int]
 
-propFileEncodeDecode :: EncodeFormat -> [Event] -> Property
-propFileEncodeDecode fmt orig = ioProperty $ withTempFile $ \fn -> do
+propFileEncodeDecode :: Int -> EncodeFormat -> [Event] -> Property
+propFileEncodeDecode chunkSize fmt orig = ioProperty $ withTempFile $ \fn -> do
     -- write data to a file
     runStream_ $
         fromFoldable orig
@@ -125,14 +126,15 @@ propFileEncodeDecode fmt orig = ioProperty $ withTempFile $ \fn -> do
     -- read data
     buf <- newIORef DS.empty
     runStream_ $
-        fileReaderChunks 32752 (FileStore fn)
-        >-> Encodings.fromByteString maxBound fmt
+        fileReaderChunks (max chunkSize 1) (FileStore fn)
+        >-> Encodings.fromByteString maxEventSize fmt
         >-> rightToBuffer buf
 
     -- fetch data from buffer and compare with the original
     result <- toList <$> readIORef buf
     return $ result === orig
   where
+    maxEventSize = maximum [BS.length (encode fmt x) | x <- orig]
     withTempFile act = Control.Exception.bracket getName removeFile act where
         getName = do
             randDir <- getTemporaryDirectory >>= canonicalizePath

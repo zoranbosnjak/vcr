@@ -38,12 +38,12 @@ propBIN e = Data.Serialize.decode (Data.Serialize.encode e) == Right e
 
 -- | encode and decode shall be inverse operations.
 propEncodeDecode :: EncodeFormat -> Event -> Bool
-propEncodeDecode fmt e = decode fmt (encode fmt e) == Just e
+propEncodeDecode fmt e = tryDecode fmt (encode fmt e) == Just e
 
 -- | encodeEvents and decodeEvents shall be inverse operations.
 propEncodeDecodeMulti :: EncodeFormat -> [Event]-> Bool
 propEncodeDecodeMulti fmt lst =
-    decodeList maxBound fmt (encodeList fmt lst) == Just lst
+    tryDecodeList fmt (encodeList fmt lst) == Just lst
 
 -- | test leap seconds
 propLeapEncodeDecode :: EncodeFormat -> Event -> Property
@@ -53,5 +53,5 @@ propLeapEncodeDecode fmt e' = prop where
     t = UTCTime
             (utctDay u)
             (picosecondsToDiffTime (24*3600*(10^(12::Int))-1))
-    prop = decode fmt (encode fmt e) === Just e
+    prop = tryDecode fmt (encode fmt e) === Just e
 

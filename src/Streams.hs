@@ -193,17 +193,3 @@ filterIO f = mkPipe $ \consume produce -> fix $ \loop -> do
                 Just y -> atomically $ produce y
             loop
 
--- | Create accumulator pipe
-mkAccumulator :: (Eq a, Monoid a) => a -> (a -> ([b], a)) -> Pipe a b c
-mkAccumulator initial f = mkPipe $ \consume produce -> do
-    loop consume produce initial
-  where
-    loop consume produce acc = atomically consume >>= \case
-        EndOfData rv
-            | acc == mempty -> return rv        -- clean exit
-            | otherwise -> fail "broken pipe"   -- more data is expected
-        Message s -> do
-            let (lst, leftover) = f (acc <> s)
-            mapM_ (atomically . produce) lst
-            loop consume produce leftover
-

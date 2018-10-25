@@ -124,7 +124,7 @@ prepareDatabase (DbPostgreSQL s _to) = do
         , ",trkId VARCHAR(255) NOT NULL"
         , ",seqNum INT NOT NULL"
         , ",value BYTEA"
-        , ",UNIQUE (ch, utcTime, sesId, monoTimeSec, monoTimeNSec)"
+        , ",UNIQUE (monoTimeSec, monoTimeNSec, trkId, seqNum)"
         , ")"
         ]
 

@@ -66,9 +66,7 @@ library
         , hsyslog
         , convertible
         , binary
-        , HDBC
-        , HDBC-sqlite3
-        , HDBC-postgresql
+        , sqlite-simple
         , postgresql-simple
         , http-client
         , attoparsec
@@ -127,9 +125,7 @@ executable vcr
         , hsyslog
         , convertible
         , binary
-        , HDBC
-        , HDBC-sqlite3
-        , HDBC-postgresql
+        , sqlite-simple
         , postgresql-simple
         , http-client
         , attoparsec

@@ -19,6 +19,7 @@ import           Control.Concurrent.Async
 import           Control.Exception
 import qualified Data.HashMap.Strict as HMS
 import qualified Database.PostgreSQL.Simple as PG
+import qualified Database.SQLite.Simple as SL
 import           Data.String (fromString)
 import           Data.Sequence as DS
 import qualified System.Clock as Clk
@@ -31,11 +32,45 @@ import qualified Event
 type RetryTimeout = Double
 
 data Status
-    = StatusPostgreSQL Int Int      -- (current buffer level, drop threshold)
+    = Status Int Int      -- (current buffer level, drop threshold)
     deriving (Generic, Eq, Show)
 
 instance ToJSON Status
 instance FromJSON Status
+
+class IConnection conn where
+    writeEvents :: conn -> [Event.Event] -> IO ()
+    execute_ :: conn -> String -> IO ()
+    fold_ :: conn -> String -> a -> (a -> Event.Event -> IO a) -> IO a
+    forEach_ :: conn -> String -> (Event.Event -> IO ()) -> IO ()
+    forEach_ conn s f = fold_ conn s () (const f)
+
+data Connection
+    = ConnPostgres PG.Connection
+    | ConnSqlite SL.Connection
+
+instance IConnection Connection where
+    writeEvents (ConnPostgres conn) events = do
+        _ <- PG.withTransaction conn $
+            PG.executeMany conn (fromString insertString) events
+        return ()
+      where
+        insertString =
+            "INSERT INTO events VALUES"
+            ++ " (?,?,?,?,?,?,?,?,?,?)"
+            ++ " ON CONFLICT DO NOTHING"
+    writeEvents (ConnSqlite conn) events = do
+        _ <- SL.withTransaction conn $
+            SL.executeMany conn (fromString insertString) events
+        return ()
+      where
+        insertString =
+            "INSERT OR IGNORE INTO events VALUES"
+            ++ " (?,?,?,?,?,?,?,?,?,?)"
+    execute_ (ConnPostgres c) s = PG.execute_ c (fromString s) >> return ()
+    execute_ (ConnSqlite c) s = SL.execute_ c (fromString s)
+    fold_ (ConnPostgres c) s = PG.fold_ c (fromString s)
+    fold_ (ConnSqlite c) s = SL.fold_ c (fromString s)
 
 data Db
     = DbPostgreSQL String RetryTimeout -- postgresql (connection string)
@@ -61,6 +96,13 @@ instance FromJSON Db where
         Just "sqlite" -> DbSQLite3
             <$> v .: "path"
         _ -> typeMismatch "Db" $ String "wrong type"
+
+-- | Connect to database
+connect :: Db -> IO Connection
+connect = \case
+    DbPostgreSQL connStr _timeout -> ConnPostgres <$>
+        (PG.connectPostgreSQL $ fromString connStr)
+    DbSQLite3 fn -> ConnSqlite <$> (SL.open fn)
 
 databaseConnectionOptions :: Opt.Parser Db
 databaseConnectionOptions =
@@ -96,21 +138,12 @@ retryTimeout = Opt.option Opt.auto
    <> Opt.showDefault
     )
 
-indices :: [String]
-indices =
-    [ "CREATE INDEX ON events (utcTime DESC)"
-    , "CREATE INDEX ON events (ch, utcTime DESC)"
-    , "CREATE INDEX ON events (trkId, monoTimeSec, monoTimeNSec)"
-    ]
-
 -- | Prepare database tables.
 prepareDatabase :: Db -> IO ()
-
-prepareDatabase (DbPostgreSQL s _to) = do
-    conn <- PG.connectPostgreSQL $ fromString s
-    PG.execute_ conn (fromString createTable) >> return ()
-    forM_ indices $ \createIndex -> do
-        PG.execute_ conn (fromString createIndex) >> return ()
+prepareDatabase db = do
+    conn <- connect db
+    execute_ conn createTable
+    mapM_ (execute_ conn) indices
   where
     createTable = unwords
         [ "CREATE TABLE events"
@@ -127,27 +160,29 @@ prepareDatabase (DbPostgreSQL s _to) = do
         , ",UNIQUE (monoTimeSec, monoTimeNSec, trkId, seqNum)"
         , ")"
         ]
-
-prepareDatabase (DbSQLite3 _filename) = undefined
+    indices :: [String]
+    indices =
+        [ "CREATE INDEX iUtc ON events (utcTime DESC)"
+        , "CREATE INDEX iChUtc ON events (ch, utcTime DESC)"
+        , "CREATE INDEX iTrkMono ON events (trkId, monoTimeSec, monoTimeNSec)"
+        ]
 
 -- | Format UTC time for SQL (YYYY-MM-DD HH:MM:SS.SSS)
 fmtTime :: Show a => a -> String
 fmtTime t = "'" ++ show t ++ "'"
 
--- | Database reader.
+-- | Database reader task.
 databaseReaderTask :: Db
     -> Maybe (Event.UtcTime)
     -> Maybe (Event.UtcTime)
     -> [Event.Channel]
     -> [Event.SourceId]
     -> Producer Event.Event ()
-
--- postgres database reader
-databaseReaderTask (DbPostgreSQL connStr _) mStart mEnd channels sources =
+databaseReaderTask db mStart mEnd channels sources =
   mkProducer $ \produce -> do
-    conn <- PG.connectPostgreSQL $ fromString connStr
+    conn <- connect db
     C.logM C.DEBUG $ selectEvents
-    PG.forEach_ conn (fromString selectEvents) $ atomically . produce
+    forEach_ conn selectEvents $ atomically . produce
   where
     selectEvents =
         "SELECT * FROM events WHERE NULL IS NULL"
@@ -167,53 +202,35 @@ databaseReaderTask (DbPostgreSQL connStr _) mStart mEnd channels sources =
                 (\(Event.SourceId src) -> "'" ++ Text.unpack src ++ "'") sources
         return $ "srcId in (" ++ foldl1 (\a b -> a ++ "," ++ b) lst ++ ")"
 
-
--- sqlite database reader
-databaseReaderTask _ _ _ _ _ = undefined
-
-writeEventsPG :: PG.ToRow q => PG.Connection -> [q] -> IO ()
-writeEventsPG conn events = do
-    _ <- PG.withTransaction conn $ PG.executeMany conn insertString events
-    return ()
-  where
-    insertString = fromString
-        "INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING"
-
 -- | Database writer task.
 databaseWriterTask :: Int -> Db -> Consumer Event.Event c
-
--- postgres writer task
-databaseWriterTask thSend (DbPostgreSQL connStr _) =
+databaseWriterTask thSend db =
   mkConsumer $ \consume -> do
-    conn <- PG.connectPostgreSQL $ fromString connStr
+    conn <- connect db
     loop consume conn []
   where
     loop consume conn events = atomically consume >>= \case
         EndOfData rv -> do
-            writeEventsPG conn events
+            writeEvents conn events
             return rv
         Message event -> do
             let events' = event:events
             case Prelude.length events' >= thSend of
                 True -> do
-                    writeEventsPG conn events
+                    writeEvents conn events
                     loop consume conn []
                 False ->
                     loop consume conn events'
 
-databaseWriterTask _ _ = undefined
-
 -- | Database writer.
 databaseWriter :: (Status -> STM ()) -> (Int,Double) -> Int
     -> ([Event.Event] -> IO ()) -> Db -> Consumer Event.Event c
-
--- postgres database writer
-databaseWriter setStat (thSend, dt) thDrop dropEvents
-  (DbPostgreSQL connStr connectTime) = mkConsumer $ \consume -> do
+databaseWriter setStat (thSend, dt) thDrop dropEvents db =
+  mkConsumer $ \consume -> do
     when (thDrop > (maxBound `div` 2)) $ fail "drop threshold too big"
     when (thDrop <= thSend) $ fail "drop threshond <= send threshold"
     bufV <- newTVarIO DS.empty  -- buffer variable
-    atomically $ setStat $ StatusPostgreSQL 0 thDrop
+    atomically $ setStat $ Status 0 thDrop
     connV <- newTVarIO Nothing  -- database connection variable
     withAsync (reader bufV consume) $ \rd ->
         withAsync (connector connV) $ \_ -> fix $ \loop -> do
@@ -231,12 +248,12 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents
                             False -> registerDelay $ fromInteger (d `div` 1000)
             join $ atomically $ do
               buf <- readTVar bufV
-              setStat $ StatusPostgreSQL (DS.length buf) thDrop
+              setStat $ Status (DS.length buf) thDrop
               getNext bufV timeout connV rd >>= \case
                 -- send some events to database or put them back to buffer
                 Right (Right (chunk, conn)) -> return $ do
                     let events = snd <$> toList chunk
-                    try (writeEventsPG conn events) >>= \case
+                    try (writeEvents conn events) >>= \case
                         Right () -> return ()
                         Left (e :: PG.SqlError) -> do
                             C.logM C.NOTICE $ "database exception " ++ show e
@@ -258,8 +275,6 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents
                 Left (Right rv) -> return (return rv)
 
   where
-
-    connectDb = PG.connectPostgreSQL $ fromString connStr
 
     getNext bufV timeout connV rd =
         fmap (Right . Left) dropSome    -- check this first to prevent overflow
@@ -316,14 +331,26 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents
         _ <- atomically $ readTVar connV >>= \case
             Just _ -> retry     -- block until disconnected
             Nothing -> return ()
-        C.threadDelaySec connectTime -- do not reconnect too fast
-        C.logM C.INFO $ "(re)connecting to database " ++ show connStr
-        try connectDb >>= \case
+        case db of
+            DbPostgreSQL _ connectTime -> do
+                C.threadDelaySec connectTime -- do not reconnect too fast
+            DbSQLite3 _ -> return ()
+        C.logM C.INFO $ reconnecting db
+        try (connect db) >>= \case
             Right conn -> do
-                C.logM C.INFO $ "connected to database " ++ show connStr
+                C.logM C.INFO $ connected db
                 atomically $ writeTVar connV $ Just conn
-            Left (_e :: IOException) -> return ()
+            Left (e :: IOException) -> case db of
+                DbPostgreSQL _ _ -> return () --
+                DbSQLite3 _ -> fail $ show e  -- fail in case of sqlite failure
         reconnect
-
-databaseWriter _ _ _ _ (DbSQLite3 _filename) = undefined
+      where
+        reconnecting (DbPostgreSQL connStr _) =
+            "(re)connecting to database " ++ show connStr
+        reconnecting (DbSQLite3 fn) =
+            "(re)connecting to database file " ++ show fn
+        connected (DbPostgreSQL connStr _) =
+            "connected to database " ++ show connStr
+        connected (DbSQLite3 fn) =
+            "connected to database file " ++ show fn
 

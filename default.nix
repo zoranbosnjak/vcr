@@ -1,12 +1,12 @@
 { mkDerivation, aeson, aeson-pretty, async, attoparsec, base
 , base16-bytestring, base64-bytestring, binary, bytestring, cereal
-, clock, containers, convertible, directory, ekg, filepath, HDBC
-, HDBC-postgresql, HDBC-sqlite3, hslogger, hsyslog, http-client
-, http-conduit, http-types, HUnit, network, network-multicast
-, optparse-applicative, postgresql-simple, QuickCheck, scotty
-, stdenv, stm, test-framework, test-framework-hunit
-, test-framework-quickcheck2, text, text-format, time, transformers
-, unix, unordered-containers, uuid, wai, warp
+, clock, containers, convertible, directory, ekg, filepath
+, hslogger, hsyslog, http-client, http-conduit, http-types, HUnit
+, network, network-multicast, optparse-applicative
+, postgresql-simple, QuickCheck, scotty, sqlite-simple, stdenv, stm
+, test-framework, test-framework-hunit, test-framework-quickcheck2
+, text, text-format, time, transformers, unix, unordered-containers
+, uuid, wai, warp
 }:
 mkDerivation {
   pname = "vcr";
@@ -17,19 +17,19 @@ mkDerivation {
   libraryHaskellDepends = [
     aeson aeson-pretty async attoparsec base base16-bytestring
     base64-bytestring binary bytestring cereal clock containers
-    convertible directory ekg filepath HDBC HDBC-postgresql
-    HDBC-sqlite3 hslogger hsyslog http-client http-conduit http-types
-    network network-multicast optparse-applicative postgresql-simple
-    QuickCheck scotty stm text text-format time transformers unix
+    convertible directory ekg filepath hslogger hsyslog http-client
+    http-conduit http-types network network-multicast
+    optparse-applicative postgresql-simple QuickCheck scotty
+    sqlite-simple stm text text-format time transformers unix
     unordered-containers uuid wai warp
   ];
   executableHaskellDepends = [
     aeson aeson-pretty async attoparsec base base16-bytestring
     base64-bytestring binary bytestring cereal clock containers
-    convertible directory ekg filepath HDBC HDBC-postgresql
-    HDBC-sqlite3 hslogger hsyslog http-client http-conduit http-types
-    network network-multicast optparse-applicative postgresql-simple
-    QuickCheck scotty stm text text-format time transformers unix
+    convertible directory ekg filepath hslogger hsyslog http-client
+    http-conduit http-types network network-multicast
+    optparse-applicative postgresql-simple QuickCheck scotty
+    sqlite-simple stm text text-format time transformers unix
     unordered-containers uuid wai warp
   ];
   testHaskellDepends = [

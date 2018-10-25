@@ -19,13 +19,19 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Base64 as B64
 import           Data.Monoid ((<>))
-import           Database.HDBC
-import Database.PostgreSQL.Simple as PGSimple
-import Database.PostgreSQL.Simple.ToRow as PGSTR
-import Database.PostgreSQL.Simple.FromRow as PGSFR
-import Database.PostgreSQL.Simple.ToField as PGSTF
-import Database.PostgreSQL.Simple.FromField as PGSFF
-import           Data.Convertible
+
+import qualified Database.PostgreSQL.Simple as PG
+import qualified Database.PostgreSQL.Simple.ToRow as PGTR
+import qualified Database.PostgreSQL.Simple.FromRow as PGFR
+import qualified Database.PostgreSQL.Simple.ToField as PGTF
+import qualified Database.PostgreSQL.Simple.FromField as PGFF
+
+import qualified Database.SQLite.Simple as SL
+import qualified Database.SQLite.Simple.ToRow as SLTR
+import qualified Database.SQLite.Simple.FromRow as SLFR
+import qualified Database.SQLite.Simple.ToField as SLTF
+import qualified Database.SQLite.Simple.FromField as SLFF
+
 import           Text.Read
 import qualified Data.Time
 import qualified Data.Text as T
@@ -52,36 +58,67 @@ data Event = Event
     , eValue    :: BS.ByteString        -- the event value
     } deriving (Generic, Eq, Show, Read)
 
-instance PGSTR.ToRow Event where
+instance PGTR.ToRow Event where
     toRow evt =
-        [ toField $ eChannel evt
-        , toField $ eSourceId evt
-        , toField $ eUtcTime evt
-        , toField (getUtcPicos $ eUtcTime evt)
-        , toField $ (System.Clock.sec $ getMonoTime $ eMonoTime evt)
-        , toField $ (System.Clock.nsec $ getMonoTime $ eMonoTime evt)
-        , toField $ eSessionId evt
-        , toField $ eTrackId  evt
-        , toField $ eSequence evt
-        , toField $ PGSimple.Binary $ eValue evt
+        [ PGTF.toField $ eChannel evt
+        , PGTF.toField $ eSourceId evt
+        , PGTF.toField $ eUtcTime evt
+        , PGTF.toField (getUtcPicos $ eUtcTime evt)
+        , PGTF.toField $ (System.Clock.sec $ getMonoTime $ eMonoTime evt)
+        , PGTF.toField $ (System.Clock.nsec $ getMonoTime $ eMonoTime evt)
+        , PGTF.toField $ eSessionId evt
+        , PGTF.toField $ eTrackId  evt
+        , PGTF.toField $ eSequence evt
+        , PGTF.toField $ PG.Binary $ eValue evt
         ]
 
-instance PGSFR.FromRow Event where
+instance SLTR.ToRow Event where
+    toRow evt =
+        [ SLTF.toField $ eChannel evt
+        , SLTF.toField $ eSourceId evt
+        , SLTF.toField $ eUtcTime evt
+        , SLTF.toField (getUtcPicos $ eUtcTime evt)
+        , SLTF.toField $ (System.Clock.sec $ getMonoTime $ eMonoTime evt)
+        , SLTF.toField $ (System.Clock.nsec $ getMonoTime $ eMonoTime evt)
+        , SLTF.toField $ eSessionId evt
+        , SLTF.toField $ eTrackId  evt
+        , SLTF.toField $ eSequence evt
+        , SLTF.toField $ eValue evt
+        ]
+
+instance PGFR.FromRow Event where
     fromRow = Event
-        <$> field
-        <*> field
+        <$> PGFR.field
+        <*> PGFR.field
         <*> do
-            a <- field
-            b <- field
+            a <- PGFR.field
+            b <- PGFR.field
             return $ replaceUtcPicos b a
         <*> do
-            a <- field
-            b <- field
+            a <- PGFR.field
+            b <- PGFR.field
             return $ MonoTime $ System.Clock.TimeSpec a b
-        <*> field
-        <*> field
-        <*> field
-        <*> field
+        <*> PGFR.field
+        <*> PGFR.field
+        <*> PGFR.field
+        <*> PGFR.field
+
+instance SLFR.FromRow Event where
+    fromRow = Event
+        <$> SLFR.field
+        <*> SLFR.field
+        <*> do
+            a <- SLFR.field
+            b <- SLFR.field
+            return $ replaceUtcPicos b a
+        <*> do
+            a <- SLFR.field
+            b <- SLFR.field
+            return $ MonoTime $ System.Clock.TimeSpec a b
+        <*> SLFR.field
+        <*> SLFR.field
+        <*> SLFR.field
+        <*> SLFR.field
 
 instance Bin.Serialize Event
 
@@ -144,16 +181,16 @@ instance Data.Aeson.ToJSONKey Channel
 instance Data.Aeson.FromJSONKey Channel
 instance Arbitrary Channel where
     arbitrary = Channel . T.pack <$> arbitrary
-instance Convertible Channel SqlValue where
-    safeConvert (Channel val) = safeConvert val
-instance Convertible SqlValue Channel where
-    safeConvert val = Channel <$> safeConvert val
 instance IsString Channel where
     fromString s = Channel $ fromString s
-instance PGSTF.ToField Channel where
-    toField (Channel val) = toField val
-instance PGSFF.FromField Channel where
-    fromField f mdata = Channel <$> fromField f mdata
+instance PGTF.ToField Channel where
+    toField (Channel val) = PGTF.toField val
+instance PGFF.FromField Channel where
+    fromField f mdata = Channel <$> PGFF.fromField f mdata
+instance SLTF.ToField Channel where
+    toField (Channel val) = SLTF.toField val
+instance SLFF.FromField Channel where
+    fromField f = Channel <$> SLFF.fromField f
 
 channelOptions :: Opt.Parser Channel
 channelOptions = Channel <$> Opt.strOption
@@ -170,16 +207,16 @@ instance Data.Aeson.ToJSON SourceId
 instance Data.Aeson.FromJSON SourceId
 instance Arbitrary SourceId where
     arbitrary = SourceId . T.pack <$> arbitrary
-instance Convertible SourceId SqlValue where
-    safeConvert (SourceId val) = safeConvert val
-instance Convertible SqlValue SourceId where
-    safeConvert val = SourceId <$> safeConvert val
 instance IsString SourceId where
     fromString s = SourceId $ fromString s
-instance PGSTF.ToField SourceId where
-    toField (SourceId val) = toField val
-instance PGSFF.FromField SourceId where
-    fromField f mdata = SourceId <$> fromField f mdata
+instance PGTF.ToField SourceId where
+    toField (SourceId val) = PGTF.toField val
+instance PGFF.FromField SourceId where
+    fromField f mdata = SourceId <$> PGFF.fromField f mdata
+instance SLTF.ToField SourceId where
+    toField (SourceId val) = SLTF.toField val
+instance SLFF.FromField SourceId where
+    fromField f = SourceId <$> SLFF.fromField f
 
 sourceId :: Text -> SourceId
 sourceId = SourceId
@@ -199,12 +236,14 @@ instance Read UtcTime where
     readPrec = UtcTime <$> readPrec
 instance Data.Aeson.ToJSON UtcTime
 instance Data.Aeson.FromJSON UtcTime
-
-instance PGSTF.ToField UtcTime where
-    toField (UtcTime val) = toField val
-
-instance PGSFF.FromField UtcTime where
-    fromField f mdata = UtcTime <$> fromField f mdata
+instance PGTF.ToField UtcTime where
+    toField (UtcTime val) = PGTF.toField val
+instance PGFF.FromField UtcTime where
+    fromField f mdata = UtcTime <$> PGFF.fromField f mdata
+instance SLTF.ToField UtcTime where
+    toField (UtcTime val) = SLTF.toField val
+instance SLFF.FromField UtcTime where
+    fromField f = UtcTime <$> SLFF.fromField f
 
 instance Arbitrary UtcTime where
     arbitrary = do
@@ -218,12 +257,6 @@ instance Arbitrary UtcTime where
             <*> choose (1,31)
         diffT = Data.Time.picosecondsToDiffTime
             <$> choose (0, (24*3600*(10^(12::Int))-1))
-
-instance Convertible UtcTime SqlValue where
-    safeConvert (UtcTime val) = Right $ SqlUTCTime val
-
-instance Convertible SqlValue UtcTime where
-    safeConvert val = UtcTime <$> safeConvert val
 
 instance Bin.Serialize UtcTime where
     put (UtcTime t) = do
@@ -253,20 +286,6 @@ instance Arbitrary MonoTime where
         b <- choose (0, 999999999)
         return $ MonoTime $ System.Clock.TimeSpec a b
 
-instance Convertible MonoTime SqlValue where
-    safeConvert (MonoTime x) = Right $ SqlInteger $ System.Clock.toNanoSecs x
-instance Convertible SqlValue MonoTime where
-    safeConvert val = (MonoTime . System.Clock.fromNanoSecs) <$> safeConvert val
-
-{-
-instance PGSTF.ToField MonoTime where
-    toField (MonoTime val) = toField $ System.Clock.toNanoSecs val
-
-instance PGSFF.FromField MonoTime where
-    fromField f mdata =
-        MonoTime . System.Clock.fromNanoSecs <$> fromField f mdata
--}
-
 instance Bin.Serialize MonoTime where
     put (MonoTime t) = do
         Bin.put $ System.Clock.sec t
@@ -285,17 +304,14 @@ instance Arbitrary SessionId where
     arbitrary = SessionId <$> arbitrary
 instance IsString SessionId where
     fromString = SessionId
-
-instance Convertible SessionId SqlValue where
-    safeConvert (SessionId val) = Right $ SqlString val
-instance Convertible SqlValue SessionId where
-    safeConvert val = SessionId <$> safeConvert val
-
-instance PGSTF.ToField SessionId where
-    toField (SessionId val) = toField val
-
-instance PGSFF.FromField SessionId where
-    fromField f mdata = SessionId <$> fromField f mdata
+instance PGTF.ToField SessionId where
+    toField (SessionId val) = PGTF.toField val
+instance PGFF.FromField SessionId where
+    fromField f mdata = SessionId <$> PGFF.fromField f mdata
+instance SLTF.ToField SessionId where
+    toField (SessionId val) = SLTF.toField val
+instance SLFF.FromField SessionId where
+    fromField f = SessionId <$> SLFF.fromField f
 
 sessionId :: String -> SessionId
 sessionId = SessionId
@@ -308,17 +324,14 @@ instance Arbitrary TrackId where
     arbitrary = TrackId <$> arbitrary
 instance IsString TrackId where
     fromString = TrackId
-
-instance Convertible TrackId SqlValue where
-    safeConvert (TrackId val) = Right $ SqlString val
-instance Convertible SqlValue TrackId where
-    safeConvert val = TrackId <$> safeConvert val
-
-instance PGSTF.ToField TrackId where
-    toField (TrackId val) = toField val
-
-instance PGSFF.FromField TrackId where
-    fromField f mdata = TrackId <$> fromField f mdata
+instance PGTF.ToField TrackId where
+    toField (TrackId val) = PGTF.toField val
+instance PGFF.FromField TrackId where
+    fromField f mdata = TrackId <$> PGFF.fromField f mdata
+instance SLTF.ToField TrackId where
+    toField (TrackId val) = SLTF.toField val
+instance SLFF.FromField TrackId where
+    fromField f = TrackId <$> SLFF.fromField f
 
 trackId :: String -> TrackId
 trackId = TrackId
@@ -329,12 +342,14 @@ newtype SequenceNum = SequenceNum Integer
 instance Bin.Serialize SequenceNum
 instance Data.Aeson.ToJSON SequenceNum
 instance Data.Aeson.FromJSON SequenceNum
-
-instance PGSTF.ToField SequenceNum where
-    toField (SequenceNum val) = toField val
-
-instance PGSFF.FromField SequenceNum where
-    fromField f mdata = SequenceNum <$> fromField f mdata
+instance PGTF.ToField SequenceNum where
+    toField (SequenceNum val) = PGTF.toField val
+instance PGFF.FromField SequenceNum where
+    fromField f mdata = SequenceNum <$> PGFF.fromField f mdata
+instance SLTF.ToField SequenceNum where
+    toField (SequenceNum val) = SLTF.toField val
+instance SLFF.FromField SequenceNum where
+    fromField f = SequenceNum <$> SLFF.fromField f
 
 instance Bounded SequenceNum where
     minBound = SequenceNum 0
@@ -354,12 +369,6 @@ instance Arbitrary SequenceNum where
     arbitrary = sequenceNum <$> choose (a,b) where
         SequenceNum a = minBound
         SequenceNum b = maxBound
-
-instance Convertible SequenceNum SqlValue where
-    safeConvert (SequenceNum val) = Right $ SqlInteger val
-
-instance Convertible SqlValue SequenceNum where
-    safeConvert val = SequenceNum <$> safeConvert val
 
 -- | Increment sequence number, respect maxBound.
 nextSequenceNum :: SequenceNum -> SequenceNum

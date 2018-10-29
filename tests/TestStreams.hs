@@ -10,18 +10,18 @@ import Control.Concurrent.STM
 import Data.IORef
 import qualified Data.Sequence as DS
 import qualified Data.ByteString as BS
-import Test.Framework (Test, testGroup)
-import Test.Framework.Providers.QuickCheck2 (testProperty)
-import Test.QuickCheck
 import System.IO
 import System.Directory
+
+import Test.Tasty
+import Test.Tasty.QuickCheck as QC
 
 import Event
 import Encodings
 import Streams
 import File
 
-testStreams :: Test
+testStreams :: TestTree
 testStreams = testGroup "Streams"
     [ testGroup "basic"
         [ testProperty "basic producer" propBasicProducer
@@ -141,4 +141,3 @@ propFileEncodeDecode chunkSize fmt orig = ioProperty $ withTempFile $ \fn -> do
             (fn,fh) <- openTempFile randDir "recording.tmp"
             hClose fh
             return fn
-

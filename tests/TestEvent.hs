@@ -4,14 +4,14 @@ module TestEvent (testEvent) where
 import qualified Data.Aeson
 import qualified Data.Serialize
 import Data.Time.Clock
-import Test.Framework (Test, testGroup)
-import Test.Framework.Providers.QuickCheck2 (testProperty)
-import Test.QuickCheck (Property, (===))
+
+import Test.Tasty
+import Test.Tasty.QuickCheck as QC
 
 import Event
 import Encodings
 
-testEvent :: Test
+testEvent :: TestTree
 testEvent = testGroup "Event"
     [ testGroup "JSON"
         [ testProperty "json" propJSON

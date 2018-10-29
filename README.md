@@ -26,7 +26,7 @@ nix-prefetch-git https://github.com/NixOS/nixpkgs-channels.git <rev> > nixpkgs.j
 
 ```bash
 nix-shell
-cabal configure
+cabal configure --enable-tests
 cabal build -j
 ```
 
@@ -54,12 +54,9 @@ cabal test -j
 ### color output with details
 
 ```bash
-cabal test -j --test-option=--color --show-details=always
-```
-
-### require test more iterations
-```bash
-cabal test -j --test-option=--color --show-details=always --test-option=--maximum-generated-tests=10000 --test-option=--maximum-unsuitable-generated-tests=10000000
+cabal test -j --test-option=--color=always --show-details=always
+# or
+cabal build -j && ./dist/build/test-vcr/test-vcr
 ```
 
 ## nix installation

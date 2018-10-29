@@ -1,15 +1,12 @@
 
 module TestEncodings (testEncodings) where
 
-import qualified Data.ByteString as BS
-import Data.Maybe (isJust)
-import Test.Framework (Test, testGroup)
-import Test.Framework.Providers.QuickCheck2 (testProperty)
-import Test.Framework.Providers.HUnit (testCase)
-import Test.HUnit (Assertion, assertEqual)
-import Test.QuickCheck
-    ( Gen, Property, forAll, resize, arbitrary, Positive(Positive)
-    , suchThat, Arbitrary)
+import Data.ByteString as BS
+import Data.Maybe
+
+import Test.Tasty
+import Test.Tasty.QuickCheck as QC
+import Test.Tasty.HUnit
 
 import Encodings
 
@@ -17,7 +14,7 @@ import Encodings
 largeByteString :: (Arbitrary a) => Int -> Gen a
 largeByteString n = resize n arbitrary
 
-testEncodings :: Test
+testEncodings :: TestTree
 testEncodings = testGroup "Encodings"
     [ testGroup "hexlify"
         [ testProperty "hexlify" propHexlify
@@ -63,10 +60,10 @@ cobsExamples = do
 
 -- | COBS encoded string shall not contain any zero byte
 propCobsEncodeNonZero :: (Positive Int) -> Property
-propCobsEncodeNonZero (Positive n) = forAll sample $ \bs -> do
+propCobsEncodeNonZero (Positive n) = forAll testSample $ \bs -> do
     BS.elemIndex 0 (cobsEncode bs) == Nothing
   where
-    sample =
+    testSample =
         (BS.pack <$> largeByteString n)
         `suchThat` (\s -> isJust (BS.elemIndex 0 s))
 

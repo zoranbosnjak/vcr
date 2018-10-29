@@ -217,7 +217,7 @@ databaseWriterTask thSend db =
             let events' = event:events
             case Prelude.length events' >= thSend of
                 True -> do
-                    writeEvents conn events
+                    writeEvents conn events'
                     loop consume conn []
                 False ->
                     loop consume conn events'
@@ -232,6 +232,7 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents db =
     bufV <- newTVarIO DS.empty  -- buffer variable
     atomically $ setStat $ Status 0 thDrop
     connV <- newTVarIO Nothing  -- database connection variable
+    tryConnect connV
     withAsync (reader bufV consume) $ \rd ->
         withAsync (connector connV) $ \_ -> fix $ \loop -> do
             timeout <- do
@@ -326,6 +327,25 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents db =
                 atomically $ modifyTVar bufV (\val -> (val |> (t,msg)))
                 loop
 
+    reconnecting (DbPostgreSQL connStr _) =
+        "(re)connecting to database " ++ show connStr
+    reconnecting (DbSQLite3 fn) =
+        "(re)connecting to database file " ++ show fn
+    connected (DbPostgreSQL connStr _) =
+        "connected to database " ++ show connStr
+    connected (DbSQLite3 fn) =
+        "connected to database file " ++ show fn
+
+    tryConnect connV = do
+        C.logM C.INFO $ reconnecting db
+        try (connect db) >>= \case
+            Right conn -> do
+                C.logM C.INFO $ connected db
+                atomically $ writeTVar connV $ Just conn
+            Left (e :: IOException) -> case db of
+                DbPostgreSQL _ _ -> return () --
+                DbSQLite3 _ -> fail $ show e  -- fail in case of sqlite failure
+
     -- try to (re)connect to the database (when disconnected)
     connector connV = fix $ \reconnect -> do
         _ <- atomically $ readTVar connV >>= \case
@@ -335,22 +355,6 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents db =
             DbPostgreSQL _ connectTime -> do
                 C.threadDelaySec connectTime -- do not reconnect too fast
             DbSQLite3 _ -> return ()
-        C.logM C.INFO $ reconnecting db
-        try (connect db) >>= \case
-            Right conn -> do
-                C.logM C.INFO $ connected db
-                atomically $ writeTVar connV $ Just conn
-            Left (e :: IOException) -> case db of
-                DbPostgreSQL _ _ -> return () --
-                DbSQLite3 _ -> fail $ show e  -- fail in case of sqlite failure
+        tryConnect connV
         reconnect
-      where
-        reconnecting (DbPostgreSQL connStr _) =
-            "(re)connecting to database " ++ show connStr
-        reconnecting (DbSQLite3 fn) =
-            "(re)connecting to database file " ++ show fn
-        connected (DbPostgreSQL connStr _) =
-            "connected to database " ++ show connStr
-        connected (DbSQLite3 fn) =
-            "connected to database file " ++ show fn
 

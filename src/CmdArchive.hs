@@ -7,7 +7,7 @@
 
 {-# LANGUAGE LambdaCase #-}
 
-module CmdArchive (cmdArchive) where
+module CmdArchive where
 
 -- Standard imports.
 import           Control.Concurrent (threadDelay)

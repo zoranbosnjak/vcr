@@ -269,7 +269,7 @@ sendEvents = Opt.option Opt.auto
     ( Opt.long "sendEvents"
    <> Opt.metavar "N"
    <> Opt.help "Send events in batches of N"
-   <> Opt.value 10000
+   <> Opt.value 1000
    <> Opt.showDefault
     )
 
@@ -287,7 +287,7 @@ bufferDropAt = Opt.option Opt.auto
     ( Opt.long "dropAt"
    <> Opt.metavar "N"
    <> Opt.help "Drop events when buffer size reaches N"
-   <> Opt.value 100
+   <> Opt.value 10000
    <> Opt.showDefault
     )
 

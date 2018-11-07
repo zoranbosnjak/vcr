@@ -1,41 +1,42 @@
-{ mkDerivation, aeson, aeson-pretty, async, attoparsec, base
-, base16-bytestring, base64-bytestring, binary, bytestring, cereal
-, clock, containers, convertible, directory, ekg, filepath
-, hslogger, hsyslog, http-client, http-conduit, http-types, network
-, network-multicast, optparse-applicative, postgresql-simple
-, QuickCheck, scotty, sqlite-simple, stdenv, stm, tasty
-, tasty-golden, tasty-hspec, tasty-hunit, tasty-program
-, tasty-quickcheck, temporary, text, text-format, time
-, transformers, unix, unordered-containers, uuid, wai, warp
-}:
-mkDerivation {
-  pname = "vcr";
-  version = "0.4.0";
-  src = ./.;
-  isLibrary = true;
-  isExecutable = true;
-  libraryHaskellDepends = [
-    aeson aeson-pretty async attoparsec base base16-bytestring
-    base64-bytestring binary bytestring cereal clock containers
-    convertible directory ekg filepath hslogger hsyslog http-client
-    http-conduit http-types network network-multicast
-    optparse-applicative postgresql-simple QuickCheck scotty
-    sqlite-simple stm text text-format time transformers unix
-    unordered-containers uuid wai warp
-  ];
-  executableHaskellDepends = [
-    aeson aeson-pretty async attoparsec base base16-bytestring
-    base64-bytestring binary bytestring cereal clock containers
-    convertible directory ekg filepath hslogger hsyslog http-client
-    http-conduit http-types network network-multicast
-    optparse-applicative postgresql-simple QuickCheck scotty
-    sqlite-simple stm text text-format time transformers unix
-    unordered-containers uuid wai warp
-  ];
-  testHaskellDepends = [
-    aeson base base16-bytestring base64-bytestring bytestring cereal
-    containers directory stm tasty tasty-golden tasty-hspec tasty-hunit
-    tasty-program tasty-quickcheck temporary time
-  ];
-  license = stdenv.lib.licenses.gpl3;
-}
+{ withHoogle ? false }:
+
+let
+
+  config = {
+      packageOverrides = pkgs: rec {
+          haskellPackages = pkgs.haskellPackages.override {
+              overrides = haskellPackagesNew: haskellPackagesOld: rec {
+                  hslogger = haskellPackagesNew.callPackage ./hslogger-1.2.11.nix { };
+              };
+          };
+      };
+  };
+
+  bootstrap = import <nixpkgs> { };
+
+  nixpkgs = builtins.fromJSON (builtins.readFile ./nixpkgs.json);
+
+  src = bootstrap.fetchFromGitHub {
+    owner = "NixOS";
+    repo  = "nixpkgs";
+    inherit (nixpkgs) rev sha256;
+  };
+
+  pkgs = import src { inherit config; };
+
+  haskellPackages = if withHoogle
+    then ( pkgs.haskellPackages.override {
+        overrides = (self: super:
+            {
+                ghc = super.ghc // { withPackages = super.ghc.withHoogle; };
+                ghcWithPackages = self.ghc.withPackages;
+            }
+         ); } )
+    else pkgs.haskellPackages;
+
+  drv = haskellPackages.callPackage ./generated.nix { };
+
+in
+
+  if pkgs.lib.inNixShell then drv.env else drv
+

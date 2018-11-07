@@ -11,9 +11,25 @@ Given a version number *MAJOR*.*MINOR*.*PATCH*, increment the:
 - MINOR version when you add functionality in a backwards-compatible manner, and
 - PATCH version when you make backwards-compatible bug fixes.
 
+## Default build from nix
+
+```bash
+nix-build
+```
+
 ## Development
 
-To update revision of `nixpkgs`, (re)run (with new git release):
+### Changes in cabal file
+
+When changing `*.cabal` file, run:
+
+```bash
+cabal2nix . > generated.nix
+```
+
+### Updating `nixpkgs`
+
+(re)run (with new git release):
 
 ```bash
 # select branch
@@ -22,44 +38,38 @@ To update revision of `nixpkgs`, (re)run (with new git release):
 nix-prefetch-git https://github.com/NixOS/nixpkgs-channels.git <rev> > nixpkgs.json
 ```
 
-### Default build
+### Runing local hoogle server
+
+Start server, for example on localhost, port 8080:
+
+```bash
+nix-shell --arg withHoogle true
+hoogle server -p 8080 --local
+
+# user web browser on localhost:8080
+```
+
+### Building and testing from shell
 
 ```bash
 nix-shell
+rm -rf dist/
 cabal configure --enable-tests
 cabal build -j
+
+cabal build -j && cabal test -j
+cabal build -j && cabal test -j --test-option=--color=always --show-details=always
+cabal build -j && ./dist/build/test-vcr/test-vcr
 ```
 
 ### Running (inside nix-shell)
+
 ```bash
 cabal build -j && ./dist/build/vcr/vcr +RTS -M300m -RTS {args}
 ```
 
-## Changes in cabal file
-
-When changing `*.cabal` file, run:
-
-```bash
-cabal2nix . > default.nix
-```
-
-## Running tests (examples)
-
-### basic usage
-
-```bash
-cabal test -j
-```
-
-### color output with details
-
-```bash
-cabal test -j --test-option=--color=always --show-details=always
-# or
-cabal build -j && ./dist/build/test-vcr/test-vcr
-```
-
 ## nix installation
 ```bash
-nix-env -f release0.nix -iA vcr
+nix-env -f default.nix -iA vcr
 ```
+

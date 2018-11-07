@@ -16,6 +16,8 @@ module CmdRecord (cmdRecord) where
 
 -- standard imports
 import           Control.Monad
+import           Control.Monad.Fix
+import           Data.Foldable (toList)
 import           Options.Applicative ((<**>), (<|>))
 import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(..))
@@ -29,13 +31,14 @@ import qualified Data.Map as Map
 import           GHC.Generics (Generic)
 import qualified Data.Aeson
 import           Data.String (fromString)
+import           Data.Sequence as DS
 import           Data.Aeson (ToJSON, FromJSON, toJSON, parseJSON, (.=), object)
 import           Data.Aeson.Types (typeMismatch)
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import qualified Data.HashMap.Strict as HMS
 import qualified Control.Concurrent.Async as Async
+import           Control.Concurrent.Async (withAsync)
 import qualified System.Clock as Clk
 import           System.Posix.Signals (installHandler, sigHUP, Handler(Catch))
 import qualified Control.Exception as Ex
@@ -225,18 +228,18 @@ instance FromJSON DatabaseOutput
 -- | Overflow handler (what to do in case of buffer overflow).
 data OnOverflow
     = OnOverflowDrop
-    | OnOverflowFile File.FileStore
+    | OnOverflowFile FileOutput
     deriving (Generic, Eq, Show)
 
 instance ToJSON OnOverflow where
     toJSON OnOverflowDrop = toJSON ("drop" :: String)
-    toJSON (OnOverflowFile (File.FileStore f)) = toJSON $ "file " ++ f
+    toJSON (OnOverflowFile fo) = toJSON fo
 
 instance FromJSON OnOverflow where
     parseJSON (Data.Aeson.String s) = case (words $ unpack s) of
         ("drop":[]) -> return OnOverflowDrop
-        ("file":f:[]) -> return $ OnOverflowFile $ File.FileStore f
         _ -> typeMismatch "OnOverflow" (Data.Aeson.String s)
+    parseJSON val@(Data.Aeson.Object _) = OnOverflowFile <$> parseJSON val
     parseJSON t = typeMismatch "OnOverflow" t
 
 storeDatabaseOptions :: Opt.Parser DatabaseOutput
@@ -258,11 +261,16 @@ onOverflowDrop = Opt.flag' OnOverflowDrop
     )
 
 onOverflowFile :: Opt.Parser OnOverflow
-onOverflowFile = OnOverflowFile <$> Opt.strOption
-    ( Opt.long "dropFile"
-   <> Opt.metavar "FILE"
-   <> Opt.help "In case of buffer overflow, save data to a file"
-    )
+onOverflowFile = tag *> fmap OnOverflowFile opts
+  where
+    tag = Opt.flag' ()
+        ( Opt.long "dropFile"
+       <> Opt.help "In case of buffer overflow, save data to a file"
+        )
+    opts = FileOutput
+        <$> File.fileStoreOptions
+        <*> Enc.encodeFormatOptions
+        <*> Opt.optional File.rotateOptions
 
 sendEvents :: Opt.Parser Int
 sendEvents = Opt.option Opt.auto
@@ -403,7 +411,7 @@ processInputs getInputs act = do
         onStart active ch newParam
 
     autoRestart ch param = forever $
-        Async.withAsync (act (ch, param)) $ \a -> do
+        withAsync (act (ch, param)) $ \a -> do
             rv <- Async.waitCatch a
             let msg = case rv of
                     Left e -> "with exception: " ++ show e
@@ -437,7 +445,7 @@ stdOutOutput cfg = mkConsumer $ \consume ->
   where
     consumer =
         Streams.map (Enc.encode Enc.EncText)
-        >-> File.fileWriter (File.FileStore "-") Nothing (\_ -> return ())
+        >-> File.rotatingFileWriter File.streamStdout Nothing (\_ -> return ())
 
 fileOutput :: (Show a, Bin.Serialize a, ToJSON a) =>
     STM (Maybe FileOutput) -> Consumer a ()
@@ -448,7 +456,10 @@ fileOutput cfg = mkConsumer $ \consume ->
   where
     consumer fo =
         Streams.map (Enc.encode $ outFileEnc fo)
-        >-> File.fileWriter (outFileStore fo) (outFileRotate fo) (logM INFO)
+        >-> File.rotatingFileWriter (open fo) (outFileRotate fo) (logM INFO)
+    open f = case outFileStore f of
+        File.FileStore "-" -> File.streamStdout
+        File.FileStore fs -> File.streamHandle fs
 
 databaseOutput :: Event.SessionId -> (Db.Status -> STM ())
     -> STM (Maybe DatabaseOutput) -> Consumer Event.Event ()
@@ -456,18 +467,64 @@ databaseOutput sessionId setStat cfg = mkConsumer $ \consume ->
     withVar "database output" cfg $ \case
         Nothing -> (streamAction drain) consume noProduce
         Just dbo -> do
-            let conn = outDatabase dbo
+            qOfw <- newTVarIO DS.empty  -- overflow queue
+            dbQueue <- newEmptyTMVarIO
+            let dropEvents s = modifyTVar qOfw (|> s)
+                dbConsume = takeTMVar dbQueue
+                dbProduce = putTMVar dbQueue
+                conn = outDatabase dbo
                 bufSend = outDatabaseBufferSend dbo
                 bufDropAt = outDatabaseBufferDrop dbo
-                dropEvents = case outDatabaseOnOverflow dbo of
-                    OnOverflowDrop -> \_events -> return ()
-                    OnOverflowFile fs ->
-                        let (Event.SessionId sid) = sessionId
-                            fn = File.filePath fs ++ "-" ++ sid
-                        in BS.appendFile fn . Enc.encodeList Enc.EncJSON
-                consumer =
+                onOwf = outDatabaseOnOverflow dbo
+                dbWriter =
                     Db.databaseWriter setStat bufSend bufDropAt dropEvents conn
-            (streamAction consumer) consume noProduce
+            -- run database writer and drop handler concurrently
+            -- drop handler will finish only after database writer,
+            -- so just wait for a drop handler to finish
+            withAsync ((streamAction dbWriter) dbConsume noProduce) $ \a1 ->
+                withAsync (dropHandler qOfw a1 onOwf) $ \a2 -> do
+                    let runConsume = atomically $ do
+                            val <- consume
+                            dbProduce val
+                            return val
+                        onEnd rv = Async.wait a2 >> return rv
+                        onData _msg = return ()
+                    processMessage runConsume onEnd onData
+  where
+    dropHandler q db onDrop = runStream_ $ producer >-> consumer where
+        producer = mkProducer $ \produce -> fix $ \loop -> do
+            -- wait for
+            --  - empty queue and finished database process
+            --  - or some messages to drop
+            mMsgs <- atomically $ do
+                finished <- Async.pollSTM db >>= \case
+                    Nothing -> return False
+                    Just (Left e) -> Ex.throw e
+                    Just (Right _) -> return True
+                msgs <- readTVar q
+                case finished && (DS.null msgs) of
+                    True -> return Nothing
+                    False -> case DS.null msgs of
+                        True -> retry
+                        False -> return $ Just msgs
+            case mMsgs of
+                Nothing -> return ()
+                Just msgs -> do
+                    mapM_ (atomically . produce) $ toList msgs
+                    loop
+        consumer = case onDrop of
+            OnOverflowDrop -> drain
+            OnOverflowFile fo ->
+                let (Event.SessionId sid) = sessionId
+                    fs1 = outFileStore fo
+                    fs2 = File.filePath fs1 ++ "-" ++ sid
+                    open = case fs1 of
+                        File.FileStore "-" -> File.streamStdout
+                        File.FileStore _ -> File.streamPath fs2
+                in
+                    Streams.map (Enc.encode $ outFileEnc fo)
+                    >-> File.rotatingFileWriter open (outFileRotate fo)
+                        (logM INFO)
 
 logUptime :: Event.MonoTime -> Double -> IO b
 logUptime startTimeMono t = forever $ do
@@ -608,6 +665,7 @@ runCmd opts vcrOpts = case optArgs opts of
       Nothing -> do
         dbStat <- newTVarIO Nothing
         let updateDbStatus = writeTVar dbStat . Just
+            rtCheck = expedite 3.0 $ fail "real time error"
         runAll
             [ process_ "uptime" $
                 maybe doNothing (logUptime startTimeMono) (optUptime opts)
@@ -617,10 +675,11 @@ runCmd opts vcrOpts = case optArgs opts of
             , process_ "data flow" $ runStream_ $
                 mergeProducers  -- inputs
                     [ stdInInput (appStdin <$> readTVar cfg) recId sessionId
+                        >-> rtCheck
                     , udpInputs (appInputs <$> readTVar cfg) recId sessionId
+                        >-> rtCheck
                     ]
-                >->
-                forkConsumers   -- outputs
+                >-> forkConsumers   -- outputs
                     [ stdOutOutput (appStdout <$> readTVar cfg)
                     , fileOutput (appFileOutput <$> readTVar cfg)
                     , databaseOutput sessionId updateDbStatus

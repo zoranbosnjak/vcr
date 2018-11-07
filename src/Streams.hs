@@ -8,6 +8,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Streams where
 
@@ -24,6 +25,10 @@ data Message a c
     | EndOfData c
     deriving (Eq, Show)
 
+mapMessage :: (a -> b) -> Message a c -> Message b c
+mapMessage f (Message a) = Message (f a)
+mapMessage _f (EndOfData c) = EndOfData c
+
 type ProduceFunc a c = a -> STM ()
 type ConsumeFunc a c = STM (Message a c)
 
@@ -36,6 +41,47 @@ type Consumer a = Streaming a ()
 type Pipe a b = Streaming a b
 type Effect = Streaming () ()
 
+threadDelaySec :: Double -> IO ()
+threadDelaySec = threadDelay . round . (1000000*)
+
+-- | When one streaming component terminates, run another.
+-- Similar to 'Alternative', without Fuctor, Applicative... constraint.
+class After a where
+    (-->) :: a -> a -> a
+
+-- | When one producer exhausts, run another.
+instance After (Producer a c) where
+    (-->) p1 p2 = mkProducer $ \produce ->
+        (streamAction p1) noConsume produce
+        >> (streamAction p2) noConsume produce
+
+-- | When one consumer does not want any more data, run another.
+instance After (Consumer a c) where
+    (-->) c1 c2 = mkConsumer $ \consume -> do
+        chan <- newEmptyTMVarIO
+        let consume1 = takeTMVar chan
+            produce = putTMVar chan
+            act1 = streamAction c1
+            act2 = streamAction c2
+        -- feed consumer c1 and peek messages
+        withAsync (act1 consume1 noProduce) $ \a -> do
+            fix $ \loop -> do
+                eMsg <- atomically $
+                    fmap Left (waitSTM a) `orElse` fmap Right consume
+                case eMsg of
+                    Left _ -> act2 consume noProduce -- run second consumer
+                    Right val -> do
+                        atomically $ produce val
+                        case val of
+                            EndOfData _ -> wait a   -- no more data, done
+                            Message _ -> loop
+
+-- | Run 2 effects in sequence.
+instance After (Effect c) where
+    (-->) e1 e2 = mkEffect $ do
+        (streamAction e1) noConsume noProduce
+        >> (streamAction e2) noConsume noProduce
+
 -- | The (<>) operator for producers.
 combineProducers :: Producer a c -> Producer a c -> Producer a c
 combineProducers a b = mkProducer $ \produce -> do
@@ -47,9 +93,9 @@ combineProducers a b = mkProducer $ \produce -> do
 
 -- | Empty producer.
 silence :: Producer a c
-silence = mkProducer $ \_produce -> forever $ threadDelay (1000 * 1000)
+silence = mkProducer $ \_produce -> forever $ threadDelaySec 1
 
--- | Concat list of producers
+-- | Concat list of producers (parallel).
 mergeProducers :: [Producer a c] -> Producer a c
 mergeProducers [] = silence
 mergeProducers (p1:p2:[]) = p1 `combineProducers` p2
@@ -75,12 +121,23 @@ combineConsumers a b = mkConsumer $ \consume -> do
                     Left rv -> wait rightSide >> return rv
                     Right rv -> wait leftSide >> return rv
 
+-- | stream loop
+processMessage :: IO (Message a c) -> (c -> IO c) -> (a -> IO b) -> IO c
+processMessage runConsume onEnd onData = fix $ \loop -> do
+    runConsume >>= \case
+        EndOfData rv -> onEnd rv
+        Message msg -> do
+            _ <- onData msg
+            loop
+
+-- | simple stream loop
+processMessage_ :: IO (Message a c) -> (a -> IO b) -> IO c
+processMessage_ runConsume onData = processMessage runConsume return onData
+
 -- | Empty consumer
 drain :: Consumer a c
-drain = mkConsumer $ \consume -> fix $ \loop -> do
-    atomically consume >>= \case
-        EndOfData rv -> return rv
-        Message _msg -> loop
+drain = mkConsumer $ \consume ->
+    processMessage_ (atomically consume) (\_ -> return ())
 
 forkConsumers :: [Consumer a c] -> Consumer a c
 forkConsumers [] = drain
@@ -143,10 +200,8 @@ runStream_ s = runStream s >> return ()
 
 -- | Helper function for creating pipes.
 mapEachPipe :: (ProduceFunc b c -> a -> STM ()) -> Pipe a b c
-mapEachPipe f = mkPipe $ \consume produce -> fix $ \loop -> do
-    atomically consume >>= \case
-        EndOfData rv -> return rv
-        Message msg -> atomically (f produce msg) >> loop
+mapEachPipe f = mkPipe $ \consume produce ->
+    processMessage_ (atomically consume) $ \msg -> atomically (f produce msg)
 
 -- | a version of map that can remove elements
 mapMaybe :: (a -> Maybe b) -> Pipe a b c
@@ -166,10 +221,8 @@ fromFoldable lst = mkProducer $ \produce -> do
     mapM_ (atomically . produce) lst
 
 consumeToIO :: (a -> IO b) -> Consumer a c
-consumeToIO act = mkConsumer $ \consume -> fix $ \loop -> do
-    atomically consume >>= \case
-        EndOfData rv -> return rv
-        Message msg -> act msg >> loop
+consumeToIO act = mkConsumer $ \consume ->
+    processMessage_ (atomically consume) act
 
 -- | Create statefull pipe with IO action
 mkGenPipeIO :: g -> (a -> g -> IO (b, g)) -> Pipe a b c
@@ -184,12 +237,16 @@ mkGenPipeIO initial f = mkPipe $ loop initial where
 
 -- | Filter each element inside IO
 filterIO :: (a -> IO (Maybe b)) -> Pipe a b c
-filterIO f = mkPipe $ \consume produce -> fix $ \loop -> do
-    atomically consume >>= \case
-        EndOfData rv -> return rv
-        Message x -> do
-            f x >>= \case
-                Nothing -> return ()
-                Just y -> atomically $ produce y
-            loop
+filterIO f = mkPipe $ \consume produce ->
+    processMessage_ (atomically consume) $ \x -> do
+        f x >>= \case
+            Nothing -> return ()
+            Just y -> atomically $ produce y
+
+-- | Check that every message leaves the pipe a within given dt (seconds).
+expedite :: Double -> IO () -> Pipe a a c
+expedite dt onProblem = mkPipe $ \consume produce ->
+    processMessage_ (atomically consume) $ \msg -> race_
+        (atomically $ produce msg)
+        (threadDelaySec dt >> onProblem)
 

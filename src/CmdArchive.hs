@@ -234,7 +234,11 @@ runCmd opts vcrOpts = do
     destination = case optOutput opts of
         OFile outEnc outFS ->
             Encodings.toByteString outEnc
-            >-> File.fileWriter outFS Nothing (\_ -> return ())
+            >-> File.rotatingFileWriter (open outFS) Nothing (\_ -> return ())
         ODatabase db ->
             Db.databaseWriterTask chunkEvents db
+      where
+        open = \case
+            File.FileStore "-" -> File.streamStdout
+            File.FileStore fs -> File.streamHandle fs
 

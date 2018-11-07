@@ -25,10 +25,10 @@ import qualified Data.ByteString as BS
 import qualified System.IO as IO
 import qualified Data.Time as Time
 import           Data.List (isPrefixOf, sort)
-import qualified Data.Time.Clock.POSIX
+import           Data.Time.Clock.POSIX
 import           System.Directory (renameFile, listDirectory, removeFile)
 import           System.FilePath ((</>), takeDirectory, takeFileName)
-import           System.Posix (getFileStatus, fileSize, accessTimeHiRes)
+import           System.Posix hiding (release)
 import           System.IO.Error (isDoesNotExistError)
 import           Data.Text (unpack)
 
@@ -104,64 +104,128 @@ humanTime = Opt.eitherReader $ \arg -> do
         [(r, "")] -> return (r * factor)
         _         -> Left $ "cannot parse value `" ++ arg ++ "'"
 
--- | File writer with 'rotation' support.
-fileWriter :: FileStore -> Maybe Rotate -> (String -> IO ())
-    -> Consumer BS.ByteString c
-fileWriter (FileStore "-") _ _ = consumeToIO BS.putStr
-fileWriter (FileStore fs) mRot onRotate = mkConsumer $ \consume -> do
-    -- get file status and make sure it exists
-    (h, bytes, t) <- do
-        st <- tryJust (guard . isDoesNotExistError) (getFileStatus fs) >>= \case
-            Right st -> return st
-            Left _ -> do
-                IO.openFile fs IO.AppendMode >>= IO.hClose
-                getFileStatus fs
-        h <- IO.openFile fs IO.AppendMode
-        return (h, fromIntegral $ fileSize st, accessTimeHiRes st)
-    loop consume h t bytes
-  where
-    myFiles = isPrefixOf $ (takeFileName fs) ++ "-"
-    now = (,) <$> Time.getCurrentTime <*> Data.Time.Clock.POSIX.getPOSIXTime
-    tFormat = Time.formatTime Time.defaultTimeLocale
-        (Time.iso8601DateFormat (Just "%H-%M-%S"))
+now :: IO (Time.UTCTime, POSIXTime)
+now = (,) <$> Time.getCurrentTime <*> Data.Time.Clock.POSIX.getPOSIXTime
 
-    loop consume h t !bytes = atomically consume >>= \case
-        EndOfData rv -> do
-            IO.hClose h
-            return rv
+class IsStream w where
+    writeMsg   :: w -> BS.ByteString -> IO ()
+    closeWriter :: w -> IO ()
+    writerName :: w -> Maybe FilePath
+
+data Stream
+
+    -- Stream to stdout.
+    = StreamStdout
+
+    -- File writer (fast version).
+    -- Open file at startup and keep it open (until rotation).
+    -- Example usage: regular recording to a file.
+    | StreamHandle FilePath IO.Handle
+
+    -- File writer (slow version).
+    -- Apend and close on each write.
+    -- It does not open a file until is required.
+    -- Example usage: dump overflow data to a file.
+    | StreamPath FilePath
+
+instance IsStream Stream where
+    writeMsg = \case
+        StreamStdout -> BS.putStr
+        StreamHandle _ h -> BS.hPut h
+        StreamPath fp -> BS.appendFile fp
+    closeWriter = \case
+        StreamStdout -> return ()
+        StreamHandle _ h -> IO.hClose h
+        StreamPath _fp -> return ()
+    writerName = \case
+        StreamStdout -> Nothing
+        StreamHandle fp _ -> Just fp
+        StreamPath fp -> Just fp
+
+-- | Create stdout stream.
+streamStdout :: IO (Stream, Integer, POSIXTime)
+streamStdout = (,,) <$> pure StreamStdout <*> pure 0 <*> fmap snd now
+
+-- | Create fast file stream.
+streamHandle :: FilePath -> IO (Stream, Integer, POSIXTime)
+streamHandle fp = do
+    -- get file status and make sure it exists
+    st <- tryJust (guard . isDoesNotExistError) (getFileStatus fp) >>= \case
+        Right st -> return st
+        Left _ -> do
+            IO.openFile fp IO.AppendMode >>= IO.hClose
+            getFileStatus fp
+    h <- IO.openFile fp IO.AppendMode
+    return (StreamHandle fp h, fromIntegral $ fileSize st, accessTimeHiRes st)
+
+-- | Create file stream.
+streamPath :: FilePath -> IO (Stream, Integer, POSIXTime)
+streamPath fp = do
+    let fa = StreamPath fp
+    tryJust (guard . isDoesNotExistError) (getFileStatus fp) >>= \case
+        Right st -> return (fa, fromIntegral $ fileSize st, accessTimeHiRes st)
+        Left _ -> (,,) <$> pure fa <*> pure 0 <*> fmap snd now
+
+-- | File writer with 'rotation' support.
+rotatingFileWriter :: (IsStream w) => IO (w, Integer, POSIXTime)
+    -> Maybe Rotate -> (String -> IO ()) -> Consumer BS.ByteString ()
+rotatingFileWriter openWriter mRot onRotate = writeSome --> writeSome
+  where
+    -- Write to one file. When it's time to rotate, terminate.
+    writeSome = mkConsumer $ \consume -> do
+        bracket rotate release (loop consume)
+
+    rotateTo (nowUtc, nowPosix) (fw, bytes, t) = do
+        let tFormat = Time.formatTime Time.defaultTimeLocale
+                (Time.iso8601DateFormat (Just "%H-%M-%S"))
+        rot <- mRot
+        fs <- writerName fw
+        let fileAge = nowPosix - t
+            sizeLimit = maybe False (bytes >=) (rotateSize rot)
+            timeLimit = case rotateTime rot of
+                Nothing -> False
+                Just x -> (toRational fileAge) >= (toRational x)
+        guard $ sizeLimit || timeLimit
+        Just (fs, fs ++ "-" ++ tFormat nowUtc, rotateKeep rot)
+
+    loop consume (fw, !bytes, t) = atomically consume >>= \case
+        EndOfData rv -> return rv
         Message msg -> do
             (nowUtc, nowPosix) <- now
-            BS.hPut h msg
+            writeMsg fw msg
             let bytes' = bytes + (fromIntegral $ BS.length msg)
-                rotateTo = do
-                    rot <- mRot
-                    let fileAge = nowPosix - t
-                        sizeLimit = maybe False (bytes' >=) (rotateSize rot)
-                        timeLimit = case rotateTime rot of
-                            Nothing -> False
-                            Just x -> (toRational fileAge) >= (toRational x)
-                    guard $ sizeLimit || timeLimit
-                    Just (fs ++ "-" ++ tFormat nowUtc, rotateKeep rot)
-            case rotateTo of
-                Nothing -> loop consume h t bytes'
-                Just (newName, keep) -> do
-                    h' <- mask_ $ do
-                        IO.hClose h
-                        renameFile fs newName
-                        IO.openFile fs IO.AppendMode
-                    removed <- cleanup keep
-                    onRotate $ "Output file rotated: " ++ newName
-                    forM_ removed $ \i -> do
-                        onRotate $ "Old file removed: " ++ i
-                    loop consume h' nowPosix 0
+            case rotateTo (nowUtc, nowPosix) (fw, bytes', t) of
+                Nothing -> loop consume (fw, bytes', t)
+                Just _ -> return ()
 
-    cleanup keep = do
+    release (fw,_,_) = do
+        closeWriter fw
+
+    -- rotate files and open writer
+    rotate = do
+        (nowUtc, nowPosix) <- now
+        (fw, bytes, t) <- openWriter
+        case rotateTo (nowUtc, nowPosix) (fw, bytes, t) of
+            Nothing -> return (fw, bytes, t)
+            Just (fs, newName, keep) -> do
+                (fw', b', t') <- mask_ $ do
+                    closeWriter fw
+                    renameFile fs newName
+                    openWriter
+                removed <- cleanup fs keep
+                onRotate $ "Output file rotated: " ++ newName
+                forM_ removed $ \i -> do
+                    onRotate $ "Old file removed: " ++ i
+                return (fw', b', t')
+
+    cleanup fs keep = do
         let dirName = takeDirectory fs
-        content <- listDirectory dirName
-        let oldFiles =
-                drop keep . reverse . sort . Prelude.filter myFiles $ content
-        mapM_ removeFile (fmap (dirName </>) oldFiles)
-        return oldFiles
+        cont <- listDirectory dirName
+        let olds = drop keep . reverse . sort . Prelude.filter myFiles $ cont
+        mapM_ removeFile (fmap (dirName </>) olds)
+        return olds
+      where
+        myFiles = isPrefixOf $ (takeFileName fs) ++ "-"
 
 -- | Read chunks from file.
 fileReaderChunks :: Int -> FileStore -> Producer BS.ByteString ()
@@ -203,4 +267,3 @@ fileReaderLines fs = mkProducer $ \produce -> do
             Right msg -> do
                 _ <- atomically $ produce msg
                 loop
-

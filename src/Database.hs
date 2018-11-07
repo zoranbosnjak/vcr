@@ -222,9 +222,9 @@ databaseWriterTask thSend db =
                 False ->
                     loop consume conn events'
 
--- | Database writer.
+-- | Database writer process.
 databaseWriter :: (Status -> STM ()) -> (Int,Double) -> Int
-    -> ([Event.Event] -> IO ()) -> Db -> Consumer Event.Event c
+    -> (DS.Seq Event.Event -> STM ()) -> Db -> Consumer Event.Event c
 databaseWriter setStat (thSend, dt) thDrop dropEvents db =
   mkConsumer $ \consume -> do
     when (thDrop > (maxBound `div` 2)) $ fail "drop threshold too big"
@@ -236,8 +236,11 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents db =
     withAsync (reader bufV consume) $ \rd ->
         withAsync (connector connV) $ \_ -> fix $ \loop -> do
             timeout <- do
-                mEl <- DS.lookup 0 <$> atomically (readTVar bufV)
-                case mEl of
+                (conn, mEl) <- atomically $
+                    (,) <$> readTVar connV <*> (DS.lookup 0 <$> readTVar bufV)
+                -- requires connection, otherwise
+                -- the timeout is high, without checking the first element
+                case (conn >> mEl) of
                     Nothing -> registerDelay $ round $ dt * 1000 * 1000
                     Just (t1', _) -> do
                         t <- Clk.toNanoSecs <$> Clk.getTime Clk.Boottime
@@ -264,10 +267,9 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents db =
                     loop
 
                 -- drop some events
-                Right (Left chunk) -> return $ do
-                    let events = snd <$> toList chunk
-                    dropEvents events
-                    loop
+                Right (Left chunk) -> do
+                    dropEvents (snd <$> chunk)
+                    return $ loop
 
                 -- tick
                 Left (Left ()) -> return loop
@@ -318,14 +320,13 @@ databaseWriter setStat (thSend, dt) thDrop dropEvents db =
                     Just conn -> return $ Right $ Right (a, conn)
 
     -- consume data to buffer, add timestamp to each message
-    reader bufV consume = fix $ \loop -> do
-        x <- atomically consume
-        t <- Clk.getTime Clk.Boottime
-        case x of
-            EndOfData rv -> return rv
-            Message msg -> do
-                atomically $ modifyTVar bufV (\val -> (val |> (t,msg)))
-                loop
+    reader bufV consume =
+        let runConsume = do
+                msg <- atomically consume
+                t <- Clk.getTime Clk.Boottime
+                return $ mapMessage (\a -> (t,a)) msg
+        in processMessage_ runConsume $ \(t,msg) ->
+            atomically $ modifyTVar bufV (\val -> (val |> (t,msg)))
 
     reconnecting (DbPostgreSQL connStr _) =
         "(re)connecting to database " ++ show connStr

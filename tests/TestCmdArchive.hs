@@ -60,7 +60,7 @@ withTestData size enc fn act = withSystemTempFile fn $ \f h -> do
     runStream_ $
         fromFoldable orig
         >-> Streams.map (encode enc)
-        >-> fileWriter (FileStore f) Nothing (\_ -> return ())
+        >-> rotatingFileWriter (streamPath f) Nothing (\_ -> return ())
     act orig f
 
 -- | Greate temp file and run action on it.

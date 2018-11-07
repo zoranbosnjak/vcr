@@ -1,5 +1,6 @@
 
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module TestStreams (testStreams) where
 
@@ -30,6 +31,11 @@ testStreams = testGroup "Streams"
         , testProperty "basic pipe 1a" propBasicPipe1a
         , testProperty "basic pipe 1b" propBasicPipe1b
         , testProperty "basic pipe 1b" propBasicPipe2
+        ]
+    , testGroup "after"
+        [ testProperty "--> on Producers" afterProducer
+        , testProperty "--> on Consumers" afterConsumer
+        , testProperty "--> on Effects" afterEffect
         ]
     , testGroup "encode/decode"
         [ testProperty "file" propFileEncodeDecode
@@ -115,13 +121,58 @@ propBasicPipe2 n = ioProperty $ do
   where
     orig = take n [1..] :: [Int]
 
+afterProducer :: [Int] -> Property
+afterProducer orig = ioProperty $ do
+    buf <- newTVarIO DS.empty
+    let consumer = consumeToIO $ \x -> atomically $ modifyTVar buf (DS.|> x)
+        producers = fmap genProducer orig
+    runStream_ $ sequenceProducers producers >-> consumer
+    result <- toList <$> atomically (readTVar buf)
+    return $ result === orig
+  where
+    genProducer i = mkProducer $ \produce -> atomically $ produce i
+    sequenceProducers [] = mkProducer $ \_ -> return ()
+    sequenceProducers (p:ps) = p --> sequenceProducers ps
+
+afterConsumer :: Positive Int -> Property
+afterConsumer (Positive n) = ioProperty $ do
+    orig <- generate arbitrary
+    let producer = fromFoldable (orig :: [Int])
+
+    buf <- newTVarIO DS.empty
+    let toBuf x = atomically $ modifyTVar buf (DS.|> x)
+        oneConsumer = mkConsumer $ \consume -> do
+            atomically consume >>= \case
+                EndOfData rv -> return rv
+                Message msg -> toBuf msg
+    runStream_ $ producer >-> sequenceConsumers (replicate n oneConsumer)
+    result <- toList <$> atomically (readTVar buf)
+    return $ result === (take n orig)
+  where
+    sequenceConsumers [] = mkConsumer $ \_ -> return ()
+    sequenceConsumers (c:cs) = c --> sequenceConsumers cs
+
+afterEffect :: Positive Int -> Property
+afterEffect (Positive n) = ioProperty $ do
+    buf <- newTVarIO DS.empty
+    let putBuf x = atomically $ modifyTVar buf (DS.|> x)
+
+    orig <- generate arbitrary
+    let effects = fmap (mkEffect . putBuf) (orig :: [Int])
+    runStream_ $ sequenceEffects effects
+    result <- toList <$> atomically (readTVar buf)
+    return $ result === (take n orig)
+  where
+    sequenceEffects [] = mkEffect $ return ()
+    sequenceEffects (e:es) = e --> sequenceEffects es
+
 propFileEncodeDecode :: Int -> EncodeFormat -> [Event] -> Property
 propFileEncodeDecode chunkSize fmt orig = ioProperty $ withTempFile $ \fn -> do
     -- write data to a file
     runStream_ $
         fromFoldable orig
         >-> toByteString fmt
-        >-> fileWriter (FileStore fn) Nothing (\_ -> return ())
+        >-> rotatingFileWriter (streamPath fn) Nothing (\_ -> return ())
 
     -- read data
     buf <- newIORef DS.empty
@@ -141,3 +192,4 @@ propFileEncodeDecode chunkSize fmt orig = ioProperty $ withTempFile $ \fn -> do
             (fn,fh) <- openTempFile randDir "recording.tmp"
             hClose fh
             return fn
+

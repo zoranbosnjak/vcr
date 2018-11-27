@@ -10,8 +10,6 @@
 module Udp where
 
 import           Control.Monad
-import           Control.Exception (bracket)
-import           Control.Concurrent.STM
 import qualified Data.Aeson
 import           Data.Aeson (ToJSON, FromJSON, toJSON, parseJSON)
 import           Data.Aeson.Types (typeMismatch)
@@ -24,7 +22,8 @@ import qualified Options.Applicative as Opt
 import           GHC.Generics (Generic)
 import           Data.Text (unpack)
 
-import           Streams
+import           Pipes
+import           Pipes.Safe
 
 type Ip = String
 type Port = String
@@ -116,10 +115,9 @@ udpOutOptions = UdpOut
             ))
 
 -- | UDP network reader.
-udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr) c
-udpReader addr = mkProducer $ \produce -> do
-    bracket acquire release (action produce)
-  where
+udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr) (SafeT IO) c
+udpReader addr = bracket acquire Net.close action where
+
     acquire = do
         let (ip, port, mclocal) = case addr of
                 UdpIn ip' port' Nothing -> (ip', port', Nothing)
@@ -138,19 +136,17 @@ udpReader addr = mkProducer $ \produce -> do
         Net.bind sock (Net.addrAddress serveraddr)
         return sock
 
-    release sock = Net.close sock
+    action sock = forever $ do
+        msg <- liftIO $ NB.recvFrom sock (2^(16::Int))
+        yield msg
 
-    action produce sock = forever $ do
-        msg <- NB.recvFrom sock (2^(16::Int))
-        atomically $ produce msg
-
-{-
 -- | UDP bytestring consumer (write to network).
-udpWriter :: UdpOut -> Consumer BS.ByteString c
-udpWriter (UdpOut ip port mMcast) = mkConsumer action where
+udpWriter :: UdpOut -> Consumer BS.ByteString (SafeT IO) c
+udpWriter (UdpOut ip port mMcast) = bracket acquire Net.close action where
+
     acquire = Net.socket Net.AF_INET Net.Datagram Net.defaultProtocol
-    release = Net.close
-    action consume = bracket acquire release $ \sock -> do
+
+    action sock = do
         dst <- liftIO $ case mMcast of
             Nothing -> do
                 (serveraddr:_) <- Net.getAddrInfo Nothing (Just ip) (Just port)
@@ -164,7 +160,6 @@ udpWriter (UdpOut ip port mMcast) = mkConsumer action where
                     Just ttl -> Mcast.setTimeToLive sock ttl
                 return (Net.addrAddress serveraddr)
         forever $ do
-            s <- consume Clear
+            s <- await
             liftIO $ NB.sendAllTo sock s dst
--}
 

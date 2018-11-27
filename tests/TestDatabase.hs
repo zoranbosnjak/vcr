@@ -14,8 +14,10 @@ import Test.Tasty
 import Test.Tasty.QuickCheck as QC
 import Test.Tasty.HUnit
 
+import Pipes
+import Pipes.Safe
+
 import Database
-import Streams
 import Event
 
 testDatabase :: TestTree
@@ -43,15 +45,15 @@ testDatabase = testGroup "Database" $ join
             $ verify totalSize (databaseWriterTask chunkSize)
         , testCase
             ("write/read stream " ++ show chunkSize ++ ", " ++ show totalSize)
-            $ verify totalSize (databaseWriter
+            $ verify totalSize (databaseWriterProcess
                 (\_ -> return ())   -- set status
-                (chunkSize, 1.0)    -- (thSend, timeout)
+                (Buffer chunkSize 1.0)    -- (thSend, timeout)
                 (maxBound `div` 2)  -- thDrop
                 (\_ -> return ())   -- onDrop
                 )
         ]
 
-verify :: Int -> (Db -> Consumer Event ()) -> Assertion
+verify :: Int -> (Db -> Consumer Event (SafeT IO) ()) -> Assertion
 verify totalSize dbWriter = do
   withSystemTempFile "test.db" $ \fp _h -> do
     let db = DbSQLite3 fp
@@ -62,15 +64,18 @@ verify totalSize dbWriter = do
 
     -- write original events to database
     do
-        let producer = fromFoldable orig
+        let producer = each orig
             consumer = dbWriter db
-        runStream_ $ producer >-> consumer
+        runSafeT $ runEffect $ producer >-> consumer
 
     -- read back from database
     readback <- do
         bufV <- newTVarIO DS.empty
-        let consumer = consumeToIO $ \x -> atomically $ modifyTVar bufV (|> x)
-        runStream_ $ databaseReaderTask db Nothing Nothing [] [] >-> consumer
+        let consumer = forever $ do
+                x <- await
+                liftIO $ atomically $ modifyTVar bufV (DS.|> x)
+        runSafeT $ runEffect $
+            databaseReaderTask db Nothing Nothing [] [] >-> consumer
         fmap toList $ readTVarIO bufV
 
     -- verify length

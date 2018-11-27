@@ -23,14 +23,12 @@ import           System.Remote.Monitoring
 -- local imports
 import qualified Common as C
 import           CmdRecord    (cmdRecord)
---import           CmdReplay    (cmdReplay)
 import           CmdArchive   (cmdArchive)
 
 -- | Available commands.
 commands :: [(String, Opt.ParserInfo (C.VcrOptions -> IO ()))]
 commands =
     [ ("record",    cmdRecord)
-    --, ("replay",    cmdReplay)
     , ("archive",   cmdArchive)
     ]
 

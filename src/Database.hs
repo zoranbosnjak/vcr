@@ -15,8 +15,8 @@ import           Data.Bool
 import           Data.Aeson
 import           Data.Aeson.Types (typeMismatch)
 import           Control.Concurrent.STM
-import           Control.Concurrent.Async
-import           Control.Exception
+import           Control.Concurrent.Async as Async
+import qualified Control.Exception as Ex
 import qualified Data.HashMap.Strict as HMS
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Database.SQLite.Simple as SL
@@ -25,8 +25,11 @@ import           Data.Sequence as DS
 import qualified System.Clock as Clk
 import qualified Data.Text as Text
 
+import           Pipes
+import qualified Pipes.Safe as PS
+import qualified Pipes.Concurrent as PC
+
 import qualified Common as C
-import           Streams
 import qualified Event
 
 type RetryTimeout = Double
@@ -38,10 +41,20 @@ data Status
 instance ToJSON Status
 instance FromJSON Status
 
+
+data Buffer = Buffer
+    { bufThreshold  :: Int
+    , bufTimeout    :: Double
+    } deriving (Generic, Eq, Show)
+
+instance ToJSON Buffer
+instance FromJSON Buffer
+
 class IConnection conn where
     writeEvents :: conn -> [Event.Event] -> IO ()
     execute_ :: conn -> String -> IO ()
     fold_ :: conn -> String -> a -> (a -> Event.Event -> IO a) -> IO a
+
     forEach_ :: conn -> String -> (Event.Event -> IO ()) -> IO ()
     forEach_ conn s f = fold_ conn s () (const f)
 
@@ -171,19 +184,36 @@ prepareDatabase db = do
 fmtTime :: Show a => a -> String
 fmtTime t = "'" ++ show t ++ "'"
 
--- | Database reader task.
-databaseReaderTask :: Db
+-- | Database reader task (do not attempt to reconnect).
+databaseReaderTask ::
+    Db
     -> Maybe (Event.UtcTime)
     -> Maybe (Event.UtcTime)
     -> [Event.Channel]
     -> [Event.SourceId]
-    -> Producer Event.Event ()
+    -> Producer Event.Event (PS.SafeT IO) ()
 databaseReaderTask db mStart mEnd channels sources =
-  mkProducer $ \produce -> do
-    conn <- connect db
-    C.logM C.DEBUG $ selectEvents
-    forEach_ conn selectEvents $ atomically . produce
+    PS.bracket prepare finalize action
   where
+    prepare = do
+        C.logM C.DEBUG $ selectEvents
+        (output, input, seal) <- PC.spawn' $ PC.bounded 1
+        conn <- connect db
+        a <- async $ do
+            rv <- Ex.try $ forEach_ conn selectEvents $ \event -> do
+                _ <- atomically . PC.send output $ event
+                return ()
+            case rv of
+                Right () -> return ()
+                Left (e :: Ex.IOException) -> C.logM C.NOTICE $ show e
+            atomically seal
+            PC.performGC
+        return (input, a)
+
+    finalize (_, a) = cancel a
+
+    action (input,_) = PC.fromInput input
+
     selectEvents =
         "SELECT * FROM events WHERE NULL IS NULL"
         ++ maybe "" (\x -> " AND utcTime >= " ++ fmtTime x) mStart
@@ -202,160 +232,140 @@ databaseReaderTask db mStart mEnd channels sources =
                 (\(Event.SourceId src) -> "'" ++ Text.unpack src ++ "'") sources
         return $ "srcId in (" ++ foldl1 (\a b -> a ++ "," ++ b) lst ++ ")"
 
--- | Database writer task.
-databaseWriterTask :: Int -> Db -> Consumer Event.Event c
-databaseWriterTask thSend db =
-  mkConsumer $ \consume -> do
-    conn <- connect db
-    loop consume conn []
-  where
-    loop consume conn events = atomically consume >>= \case
-        EndOfData rv -> do
-            writeEvents conn events
-            return rv
-        Message event -> do
-            let events' = event:events
-            case Prelude.length events' >= thSend of
-                True -> do
-                    writeEvents conn events'
-                    loop consume conn []
-                False ->
-                    loop consume conn events'
+-- | Database writer task (do not attempt to reconnect).
+databaseWriterTask :: Int -> Db -> Consumer Event.Event (PS.SafeT IO) c
+databaseWriterTask thSend db = PS.bracket prepare finalize action where
+    prepare = (,) <$> connect db <*> newTVarIO DS.empty
+    finalize (conn, buf) = do
+        events <- toList <$> (atomically $ readTVar buf)
+        writeEvents conn events
+    action (conn, buf) = forever $ do
+        event <- await
+        mEvents <- liftIO $ atomically $ do
+            events <- readTVar buf
+            let events' = events |> event
+            case DS.length events' >= thSend of
+                False -> writeTVar buf events' >> return Nothing
+                True -> writeTVar buf DS.empty >> return (Just events')
+        case mEvents of
+            Nothing -> return ()
+            Just events -> liftIO $ writeEvents conn $ toList events
 
 -- | Database writer process.
-databaseWriter :: (Status -> STM ()) -> (Int,Double) -> Int
-    -> (DS.Seq Event.Event -> STM ()) -> Db -> Consumer Event.Event c
-databaseWriter setStat (thSend, dt) thDrop dropEvents db =
-  mkConsumer $ \consume -> do
-    when (thDrop > (maxBound `div` 2)) $ fail "drop threshold too big"
-    when (thDrop <= thSend) $ fail "drop threshond <= send threshold"
-    bufV <- newTVarIO DS.empty  -- buffer variable
-    atomically $ setStat $ Status 0 thDrop
-    connV <- newTVarIO Nothing  -- database connection variable
-    tryConnect connV
-    withAsync (reader bufV consume) $ \rd ->
-        withAsync (connector connV) $ \_ -> fix $ \loop -> do
-            timeout <- do
-                (conn, mEl) <- atomically $
-                    (,) <$> readTVar connV <*> (DS.lookup 0 <$> readTVar bufV)
-                -- requires connection, otherwise
-                -- the timeout is high, without checking the first element
-                case (conn >> mEl) of
-                    Nothing -> registerDelay $ round $ dt * 1000 * 1000
-                    Just (t1', _) -> do
-                        t <- Clk.toNanoSecs <$> Clk.getTime Clk.Boottime
-                        let t1 = Clk.toNanoSecs t1'
-                            t2 = t1 + round (dt * 1000 * 1000 * 1000)
-                            d = t2 - t
-                        case d <= 0 of  -- expire now or setup timer
-                            True -> newTVarIO True
-                            False -> registerDelay $ fromInteger (d `div` 1000)
-            join $ atomically $ do
-              buf <- readTVar bufV
-              setStat $ Status (DS.length buf) thDrop
-              getNext bufV timeout connV rd >>= \case
-                -- send some events to database or put them back to buffer
-                Right (Right (chunk, conn)) -> return $ do
-                    let events = snd <$> toList chunk
-                    try (writeEvents conn events) >>= \case
-                        Right () -> return ()
-                        Left (e :: PG.SqlError) -> do
-                            C.logM C.NOTICE $ "database exception " ++ show e
-                            atomically $ do
-                                modifyTVar bufV (chunk ><)
-                                writeTVar connV Nothing
-                    loop
-
-                -- drop some events
-                Right (Left chunk) -> do
-                    dropEvents (snd <$> chunk)
-                    return $ loop
-
-                -- tick
-                Left (Left ()) -> return loop
-
-                -- end of data, empty buffer
-                Left (Right rv) -> return (return rv)
-
+databaseWriterProcess :: (Status -> STM ()) -> Buffer -> Int
+    -> (DS.Seq Event.Event -> STM ()) -> Db
+    -> Consumer Event.Event (PS.SafeT IO) c
+databaseWriterProcess setStat th thDrop dropEvents db
+    | thDrop > (maxBound `div` 2) = fail "drop threshold too big"
+    | thDrop <= thSend = fail "drop threshond <= send threshold"
+    | otherwise = PS.bracket prepare finalize consumer
   where
+    thSend = bufThreshold th
+    dt = bufTimeout th
+    prepare = do
+        atomically $ setStat $ Status 0 thDrop
+        bufV <- newTVarIO DS.empty  -- buffer variable
+        sealed <- newTVarIO False   -- a flag to stop processing
+        a <- async (withoutConnection bufV sealed)
+        return (bufV, sealed, a)
 
-    getNext bufV timeout connV rd =
-        fmap (Right . Left) dropSome    -- check this first to prevent overflow
-        `orElse` fmap (Right . Right) sendSome
-        `orElse` eof
-        `orElse` tick
+    finalize (bufV, sealed, a) = do
+        atomically $ writeTVar sealed True
+        _ <- wait a
+        buf <- atomically $ readTVar bufV
+        when (not $ DS.null buf) $ tryConnect >>= \case
+            Nothing -> atomically $ dropEvents (snd <$> buf)
+            Just conn -> do
+                let events = snd <$> toList buf
+                Ex.try (writeEvents conn events) >>= \case
+                    Right () -> return ()
+                    Left (_e :: Ex.IOException) -> do
+                        atomically $ dropEvents (snd <$> buf)
+
+    -- try to reconnect
+    withoutConnection bufV sealed = fix $ \reconnect -> do
+        C.logM C.INFO $ reconnecting db
+        race finish tryConnect >>= \case
+            Left _ -> return ()
+            Right Nothing -> sleepReconnect db sealed >> reconnect
+            Right (Just conn) ->  do
+                C.logM C.INFO $ connected db
+                withConnection conn bufV sealed
       where
-        dropSome = atThreshold thDrop
-        sendSome = do
-            conn <- readTVar connV >>= maybe retry return -- requires connection
-            values <- expired `orElse` atThreshold thSend
-            return (values, conn)
-        expired = do
-            _ <- readTVar timeout >>= bool retry (return ())
-            buf <- readTVar bufV
-            let (a,b) = DS.splitAt thSend buf
-            when (DS.null a) retry
-            writeTVar bufV b
-            return a
-        atThreshold th = do
-            buf <- readTVar bufV
-            case DS.length buf >= th of
+        finish = atomically $ readTVar sealed >>= bool retry (return ())
+
+    tryConnect = Ex.try (connect db) >>= \case
+        Right conn -> return (Just conn)
+        Left (e :: Ex.IOException) -> case db of
+            DbPostgreSQL _ _ -> return Nothing
+            DbSQLite3 _ -> fail $ show e  -- sqlite failure is a problem
+
+    -- send events to database in chunks
+    withConnection conn bufV sealed = fix $ \loop -> do
+        timeout <- do
+            -- check first element, to calculate timeout
+            mEl <- atomically $ (DS.lookup 0 <$> readTVar bufV)
+            case mEl of
+                Nothing -> registerDelay $ round $ dt * 1000 * 1000
+                Just (t1', _) -> do
+                    t <- Clk.toNanoSecs <$> Clk.getTime Clk.Boottime
+                    let t1 = Clk.toNanoSecs t1'
+                        t2 = t1 + round (dt * 1000 * 1000 * 1000)
+                        d = t2 - t
+                    case d <= 0 of  -- expire now or setup timer
+                        True -> newTVarIO True
+                        False -> registerDelay $ fromInteger (d `div` 1000)
+        mChunk <- atomically $ readTVar sealed >>= \case
+            True -> return Nothing
+            False -> readTVar timeout >>= \case
                 False -> retry
                 True -> do
+                    buf <- readTVar bufV
                     let (a,b) = DS.splitAt thSend buf
+                    when (DS.null a) retry
                     writeTVar bufV b
-                    return a
-        tick = do
-            _ <- readTVar timeout >>= bool retry (return ())
-            return $ Left (Left ())
-        eof = do
-            rv <- waitSTM rd
-            buf <- readTVar bufV
-            let (a,b) = DS.splitAt thSend buf
-            writeTVar bufV b
-            case DS.null a of
-                True -> return $ Left (Right rv)    -- end of data, empty buffer
-                False -> readTVar connV >>= \case
-                    Nothing -> return $ Right $ Left a
-                    Just conn -> return $ Right $ Right (a, conn)
+                    return $ Just a
+        case mChunk of
+            Nothing -> return ()
+            Just chunk -> do
+                let events = snd <$> toList chunk
+                Ex.try (writeEvents conn events) >>= \case
+                    Right () -> loop
+                    Left (e :: Ex.IOException) -> do
+                        atomically $ modifyTVar bufV (chunk ><)
+                        C.logM C.NOTICE $ "database exception " ++ show e
+                        sleepReconnect db sealed
+                        withoutConnection bufV sealed
 
     -- consume data to buffer, add timestamp to each message
-    reader bufV consume =
-        let runConsume = do
-                msg <- atomically consume
-                t <- Clk.getTime Clk.Boottime
-                return $ mapMessage (\a -> (t,a)) msg
-        in processMessage_ runConsume $ \(t,msg) ->
-            atomically $ modifyTVar bufV (\val -> (val |> (t,msg)))
+    -- drop events on buffer overflow
+    consumer (bufV, _, _) = forever $ do
+        msg <- await
+        t <- liftIO $ Clk.getTime Clk.Boottime
+        liftIO $ atomically $ do
+            buf <- readTVar bufV
+            let buf' = buf |> (t,msg)
+            case (DS.length buf') >= thDrop of
+                False -> do
+                    writeTVar bufV buf'
+                    setStat $ Status (DS.length buf') thDrop
+                True -> do
+                    dropEvents (snd <$> buf')
+                    writeTVar bufV DS.empty
+                    setStat $ Status 0 thDrop
+
+    sleepReconnect (DbPostgreSQL _connStr timeout) sealed = race_
+        (C.threadDelaySec timeout)
+        (atomically (readTVar sealed >>= bool retry (return ())))
+    sleepReconnect (DbSQLite3 _fn) _ = return ()
 
     reconnecting (DbPostgreSQL connStr _) =
         "(re)connecting to database " ++ show connStr
     reconnecting (DbSQLite3 fn) =
         "(re)connecting to database file " ++ show fn
+
     connected (DbPostgreSQL connStr _) =
         "connected to database " ++ show connStr
     connected (DbSQLite3 fn) =
         "connected to database file " ++ show fn
-
-    tryConnect connV = do
-        C.logM C.INFO $ reconnecting db
-        try (connect db) >>= \case
-            Right conn -> do
-                C.logM C.INFO $ connected db
-                atomically $ writeTVar connV $ Just conn
-            Left (e :: IOException) -> case db of
-                DbPostgreSQL _ _ -> return () --
-                DbSQLite3 _ -> fail $ show e  -- fail in case of sqlite failure
-
-    -- try to (re)connect to the database (when disconnected)
-    connector connV = fix $ \reconnect -> do
-        _ <- atomically $ readTVar connV >>= \case
-            Just _ -> retry     -- block until disconnected
-            Nothing -> return ()
-        case db of
-            DbPostgreSQL _ connectTime -> do
-                C.threadDelaySec connectTime -- do not reconnect too fast
-            DbSQLite3 _ -> return ()
-        tryConnect connV
-        reconnect
 

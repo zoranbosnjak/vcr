@@ -68,8 +68,30 @@ cabal build -j && ./dist/build/test-vcr/test-vcr
 cabal build -j && ./dist/build/vcr/vcr +RTS -M300m -RTS {args}
 ```
 
+### Use ghcid environment (inside nix-shell)
+
+```bash
+ghcid "--command=ghci -Wall -isrc Main"
+```
+
 ## nix installation
+
 ```bash
 nix-env -f default.nix -iA vcr
+```
+
+## Configuration change
+
+Edit config file, then send SIGHUP signal to the procress.
+
+```bash
+# find pid
+ps aux | grep vcr
+
+# send signal
+kill -s SIGHUP <pid>
+
+# or as one line bash
+ps aux | grep vcr | grep RTS | head -n 1 | awk '{print $2}' | xargs kill -s SIGHUP
 ```
 

@@ -10,12 +10,19 @@
 module CmdArchive where
 
 -- Standard imports.
+import           Control.Monad
+import           Data.Bool
+import           Options.Applicative ((<**>), (<|>))
+import qualified Options.Applicative as Opt
 import           Control.Concurrent (threadDelay)
 import           Data.ByteString (ByteString)
 import           Data.Monoid ((<>))
-import           Options.Applicative ((<**>), (<|>))
-import qualified Options.Applicative as Opt
 import           System.Log.Logger (Priority(INFO, DEBUG, NOTICE))
+import qualified Data.Map as Map
+
+import           Pipes
+import qualified Pipes.Safe as PS
+import qualified Pipes.Prelude as PP
 
 -- Local imports.
 import qualified Common as C
@@ -23,12 +30,45 @@ import           Common (logM)
 import qualified Event
 import qualified File
 import qualified Encodings
-import           Streams
 import qualified Database as Db
 
-cmdArchive :: Opt.ParserInfo (C.VcrOptions -> IO ())
-cmdArchive = Opt.info ((runCmd <$> options) <**> Opt.helper)
-    (Opt.progDesc "Event archiver")
+-- | Input options.
+data Input
+    = IFile Encodings.EncodeFormat File.FileStore
+    | IDatabase Db.Db
+    deriving (Eq, Show)
+
+input :: Opt.Parser Input
+input = C.subparserCmd "input ..." $ Opt.command "input" $ Opt.info
+    (opts <**> Opt.helper)
+    (Opt.progDesc "Data source")
+  where
+    opts = file <|> database
+    file = C.subparserCmd "file ..." $ Opt.command "file" $ Opt.info
+        (IFile <$> Encodings.encodeFormatOptions <*> File.fileStoreOptions)
+        (Opt.progDesc "Input from file")
+    database = C.subparserCmd "database ..." $ Opt.command "database" $ Opt.info
+        (IDatabase <$> Db.databaseConnectionOptions)
+        (Opt.progDesc "Input from database")
+
+-- | Output options.
+data Output
+    = OFile Encodings.EncodeFormat File.FileStore
+    | ODatabase Db.Db
+    deriving (Eq, Show)
+
+output :: Opt.Parser Output
+output = C.subparserCmd "output ..." $ Opt.command "output" $ Opt.info
+    (opts <**> Opt.helper)
+    (Opt.progDesc "Data destination")
+  where
+    opts = file <|> database
+    file = C.subparserCmd "file ..." $ Opt.command "file" $ Opt.info
+        (OFile <$> Encodings.encodeFormatOptions <*> File.fileStoreOptions)
+        (Opt.progDesc "Output to file")
+    database = C.subparserCmd "database ..." $ Opt.command "database" $ Opt.info
+        (ODatabase <$> Db.databaseConnectionOptions)
+        (Opt.progDesc "Output to database")
 
 -- | Archiver specific command options.
 data Options = Options
@@ -43,19 +83,8 @@ data Options = Options
     , optSourceIdFilter :: [Event.SourceId]
     , optStartTime      :: Maybe Event.UtcTime
     , optEndTime        :: Maybe Event.UtcTime
+    , optIgnoreError    :: Bool
     } deriving (Eq, Show)
-
--- | Input options.
-data Input
-    = IFile Encodings.EncodeFormat File.FileStore
-    | IDatabase Db.Db
-    deriving (Eq, Show)
-
--- | Output options.
-data Output
-    = OFile Encodings.EncodeFormat File.FileStore
-    | ODatabase Db.Db
-    deriving (Eq, Show)
 
 -- | Command option parser.
 options :: Opt.Parser Options
@@ -99,40 +128,17 @@ options = Options
              <> Opt.metavar "STARTTIME"
              <> Opt.help "Start time"))
     <*> Opt.optional (Event.UtcTime <$> Opt.option Opt.auto
-        (  Opt.long "endTime"
+        ( Opt.long "endTime"
              <> Opt.metavar "ENDTIME"
              <> Opt.help "End time"))
-
-input :: Opt.Parser Input
-input = C.subparserCmd "input ..." $ Opt.command "input" $ Opt.info
-    (opts <**> Opt.helper)
-    (Opt.progDesc "Data source")
-  where
-    opts = file <|> database
-    file = C.subparserCmd "file ..." $ Opt.command "file" $ Opt.info
-        (IFile <$> Encodings.encodeFormatOptions <*> File.fileStoreOptions)
-        (Opt.progDesc "Input from file")
-    database = C.subparserCmd "database ..." $ Opt.command "database" $ Opt.info
-        (IDatabase <$> Db.databaseConnectionOptions)
-        (Opt.progDesc "Input from database")
-
-output :: Opt.Parser Output
-output = C.subparserCmd "output ..." $ Opt.command "output" $ Opt.info
-    (opts <**> Opt.helper)
-    (Opt.progDesc "Data destination")
-  where
-    opts = file <|> database
-    file = C.subparserCmd "file ..." $ Opt.command "file" $ Opt.info
-        (OFile <$> Encodings.encodeFormatOptions <*> File.fileStoreOptions)
-        (Opt.progDesc "Output to file")
-    database = C.subparserCmd "database ..." $ Opt.command "database" $ Opt.info
-        (ODatabase <$> Db.databaseConnectionOptions)
-        (Opt.progDesc "Output to database")
+    <*> Opt.switch
+        ( Opt.long "ignore"
+            <> Opt.help "Proceed if [encoding, sequence...] error is detected"
+            )
 
 -- | Run command.
 runCmd :: Options -> C.VcrOptions -> IO ()
 runCmd opts vcrOpts = do
-
     (startTimeUtc, _startTimeMono) <- Event.now
     logM INFO $ "startup " ++ show startTimeUtc
     logM INFO $
@@ -140,26 +146,24 @@ runCmd opts vcrOpts = do
         ++ ", opts: " ++ show opts
         ++ ", vcrOpts: " ++ show vcrOpts
 
-    C.check (0 < chunkBytes)
-        "Illegal chunk size (bytes)."
-    C.check (0 < chunkEvents)
-        "Illegal chunk size (events)."
-    C.check (0 < maxEventSize)
-        "Illegal maximum event size."
-    C.check (0 <= chunkDelay)
-        "Illegal chunk delay interval."
-    C.check (0 <= eventDelay)
-        "Illegal event delay interval."
+    (chunkBytes <= 0)   --> "Illegal chunk size (bytes)."
+    (chunkEvents <= 0)  --> "Illegal chunk size (events)."
+    (maxEventSize <= 0) --> "Illegal maximum event size."
+    (chunkDelay < 0)    --> "Illegal chunk delay interval."
+    (eventDelay < 0)    --> "Illegal event delay interval."
 
-    runStream_ $
+    PS.runSafeT $ runEffect $
         source
         >-> delay eventDelay
         >-> traceDstEvents
+        >-> verifySequence
         >-> destination
 
     logM INFO "done"
 
   where
+
+    condition --> e = when condition $ fail e
 
     chunkBytes = optChunkBytes opts
     chunkEvents = optChunkEvents opts
@@ -167,7 +171,7 @@ runCmd opts vcrOpts = do
     chunkDelay = optChunkDelay opts
     eventDelay = optEventDelay opts
 
-    source :: Producer Event.Event ()
+    source :: Producer Event.Event (PS.SafeT IO) ()
     source = case optInput opts of
         IFile inpEnc inpFS ->
             File.fileReaderChunks chunkBytes inpFS
@@ -185,52 +189,73 @@ runCmd opts vcrOpts = do
                 (optChannelFilter opts)
                 (optSourceIdFilter opts)
       where
-
-        traceSrcEvents ::
-            Pipe (Either (String, ByteString) Event.Event) Event.Event ()
-        traceSrcEvents = filterIO $ \case
-            Left (msg,_) -> do
-                logM NOTICE $ "Cannot decode an event: " ++ msg
-                return Nothing
+        traceSrcEvents :: (MonadIO m) =>
+            Pipe (Either (String, ByteString) Event.Event) Event.Event m r
+        traceSrcEvents = forever $ await >>= \case
+            Left (msg,s) -> do
+                let e = "Cannot decode an event: " ++ msg ++ ", " ++ show s
+                bool (fail e) (liftIO $ logM NOTICE e) (optIgnoreError opts)
             Right event -> do
-                logM DEBUG $ "Src event " ++ show (Event.eUtcTime event)
-                return $ Just event
+                liftIO $ logM DEBUG $ "Src event "
+                    ++ show (Event.eUtcTime event)
+                yield event
 
-        channelFilters :: Pipe Event.Event Event.Event ()
+        channelFilters :: (Monad m) => Pipe Event.Event Event.Event m r
         channelFilters = case channels of
-            [] -> Streams.map id
-            _  -> Streams.filter ((`elem` channels).Event.eChannel)
+            [] -> PP.map id
+            _  -> PP.filter ((`elem` channels).Event.eChannel)
           where
             channels = optChannelFilter opts
 
-        sourceIdFilters :: Pipe Event.Event Event.Event ()
+        sourceIdFilters :: (Monad m) => Pipe Event.Event Event.Event m r
         sourceIdFilters = case sourceIds of
-            [] -> Streams.map id
-            _  -> Streams.filter ((`elem` sourceIds).Event.eSourceId)
+            [] -> PP.map id
+            _  -> PP.filter ((`elem` sourceIds).Event.eSourceId)
           where
             sourceIds = optSourceIdFilter opts
 
-        startTimeFilter :: Pipe Event.Event Event.Event ()
+        startTimeFilter :: (Monad m) => Pipe Event.Event Event.Event m r
         startTimeFilter = case (optStartTime opts) of
-            Just utcTime -> Streams.filter ((>=utcTime).Event.eUtcTime)
-            Nothing -> Streams.map id
+            Just utcTime -> PP.filter ((>=utcTime).Event.eUtcTime)
+            Nothing -> PP.map id
 
-        endTimeFilter :: Pipe Event.Event Event.Event ()
+        endTimeFilter :: (Monad m) => Pipe Event.Event Event.Event m r
         endTimeFilter = case (optEndTime opts) of
-            Just utcTime -> Streams.filter ((<utcTime).Event.eUtcTime)
-            Nothing -> Streams.map id
+            Just utcTime -> PP.filter ((<utcTime).Event.eUtcTime)
+            Nothing -> PP.map id
 
-    delay :: Int -> Pipe a a ()
-    delay interval = filterIO $ \x -> do
-        threadDelay (1000 * interval)
-        return $ Just x
+    delay :: (MonadIO m) => Int -> Pipe a a m r
+    delay interval = PP.mapM $ \msg -> do
+        liftIO $ threadDelay (1000 * interval)
+        return msg
 
-    traceDstEvents :: Pipe Event.Event Event.Event ()
-    traceDstEvents = filterIO $ \event -> do
-        logM DEBUG $ "Dst event " ++ show (Event.eUtcTime event)
-        return $ Just event
+    traceDstEvents :: (MonadIO m) => Pipe Event.Event Event.Event m r
+    traceDstEvents = PP.mapM $ \event -> do
+        liftIO $ logM DEBUG $ "Dst event " ++ show (Event.eUtcTime event)
+        return event
 
-    destination :: Consumer Event.Event ()
+    -- TODO: verify monotonic time (no backward jump)
+    verifySequence :: (MonadIO m) => Pipe Event.Event Event.Event m r
+    verifySequence = loop Map.empty where
+        loop tracks = do
+            event <- await
+            yield event
+            let track = Event.eTrackId event
+                sn = Event.eSequence event
+                tracks' = Map.insert track sn tracks
+                mErr = do
+                    prev <- Map.lookup track tracks
+                    let expected = Event.nextSequenceNum prev
+                    guard $ expected /= sn
+                    return $ "sequence error, expecting: " ++ show expected
+                        ++ ", got: " ++ show event
+            case mErr of
+                Nothing -> return ()
+                Just e -> do
+                    bool (fail e) (liftIO $ logM NOTICE e) (optIgnoreError opts)
+            loop tracks'
+
+    destination :: Consumer Event.Event (PS.SafeT IO) ()
     destination = case optOutput opts of
         OFile outEnc outFS ->
             Encodings.toByteString outEnc
@@ -241,4 +266,8 @@ runCmd opts vcrOpts = do
         open = \case
             File.FileStore "-" -> File.streamStdout
             File.FileStore fs -> File.streamHandle fs
+
+cmdArchive :: Opt.ParserInfo (C.VcrOptions -> IO ())
+cmdArchive = Opt.info ((runCmd <$> options) <**> Opt.helper)
+    (Opt.progDesc "Event archiver")
 

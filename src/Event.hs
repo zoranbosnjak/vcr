@@ -7,6 +7,7 @@
 
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE BangPatterns #-}
 
 module Event where
 
@@ -18,6 +19,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Base64 as B64
 import           Data.Monoid ((<>))
+import           Control.DeepSeq
 
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Database.PostgreSQL.Simple.ToRow as PGTR
@@ -54,8 +56,10 @@ data Event = Event
                                         -- the same session ID
     , eTrackId  :: TrackId              -- unique value for each channel startup
     , eSequence :: SequenceNum          -- incrementing sequence number
-    , eValue    :: BS.ByteString        -- the event value
+    , eValue    :: Payload              -- the event value
     } deriving (Generic, Eq, Show, Read)
+
+instance NFData Event
 
 instance PGTR.ToRow Event where
     toRow evt =
@@ -68,7 +72,7 @@ instance PGTR.ToRow Event where
         , PGTF.toField $ eSessionId evt
         , PGTF.toField $ eTrackId  evt
         , PGTF.toField $ eSequence evt
-        , PGTF.toField $ PG.Binary $ eValue evt
+        , PGTF.toField $ PG.Binary $ getPayload $ eValue evt
         ]
 
 instance SLTR.ToRow Event where
@@ -137,7 +141,7 @@ instance Arbitrary Event where
         <*> arbitrary
         <*> arbitrary
         <*> arbitrary
-        <*> (BS.pack <$> resize 1000 arbitrary)
+        <*> arbitrary
 
 instance Data.Aeson.ToJSON Event where
     toJSON
@@ -150,7 +154,7 @@ instance Data.Aeson.ToJSON Event where
         , "session"     .= ses
         , "track"       .= trk
         , "sequence"    .= seqNum
-        , "data"        .= Enc.hexlify val
+        , "data"        .= Enc.hexlify (getPayload val)
         ]
 
 instance Data.Aeson.FromJSON Event where
@@ -162,7 +166,7 @@ instance Data.Aeson.FromJSON Event where
         <*> v .: "session"
         <*> v .: "track"
         <*> fmap SequenceNum (v .: "sequence")
-        <*> readStr (v .: "data")
+        <*> fmap Payload (readStr (v .: "data"))
       where
         readStr px = do
             s <- px
@@ -170,12 +174,20 @@ instance Data.Aeson.FromJSON Event where
 
     parseJSON invalid    = typeMismatch "Event" invalid
 
-newtype Channel = Channel Text deriving (Generic, Eq, Ord, Show, Read)
+newtype Channel = Channel { getChannel :: Text }
+    deriving (Generic, Eq, Ord)
+instance Show Channel where
+    show (Channel val) = show val
+instance Read Channel where
+    readPrec = Channel <$> readPrec
+instance NFData Channel
 instance Bin.Serialize Channel where
     put (Channel c) = Bin.put $ TE.encodeUtf8 c
     get = Channel . TE.decodeUtf8 <$> Bin.get
-instance Data.Aeson.ToJSON Channel
-instance Data.Aeson.FromJSON Channel
+instance Data.Aeson.ToJSON Channel where
+    toJSON (Channel val) = Data.Aeson.toJSON val
+instance Data.Aeson.FromJSON Channel where
+    parseJSON val = Channel <$> Data.Aeson.parseJSON val
 instance Data.Aeson.ToJSONKey Channel
 instance Data.Aeson.FromJSONKey Channel
 instance Arbitrary Channel where
@@ -198,12 +210,20 @@ channelOptions = Channel <$> Opt.strOption
    <> Opt.help "Channel identifier"
     )
 
-newtype SourceId = SourceId Text deriving (Generic, Eq, Show, Read)
+newtype SourceId = SourceId { getSourceId :: Text }
+    deriving (Generic, Eq)
+instance Show SourceId where
+    show (SourceId val) = show val
+instance Read SourceId where
+    readPrec = SourceId <$> readPrec
+instance NFData SourceId
 instance Bin.Serialize SourceId where
     put (SourceId c) = Bin.put $ TE.encodeUtf8 c
     get = SourceId . TE.decodeUtf8 <$> Bin.get
-instance Data.Aeson.ToJSON SourceId
-instance Data.Aeson.FromJSON SourceId
+instance Data.Aeson.ToJSON SourceId where
+    toJSON (SourceId val) = Data.Aeson.toJSON val
+instance Data.Aeson.FromJSON SourceId where
+    parseJSON val = SourceId <$> Data.Aeson.parseJSON val
 instance Arbitrary SourceId where
     arbitrary = SourceId . T.pack <$> arbitrary
 instance IsString SourceId where
@@ -227,7 +247,7 @@ sourceIdOptions = SourceId <$> Opt.strOption
    <> Opt.help "Recorder identifier"
     )
 
-newtype UtcTime = UtcTime Data.Time.UTCTime
+newtype UtcTime = UtcTime { getUtcTime :: Data.Time.UTCTime }
     deriving (Generic, Eq, Ord)
 instance Show UtcTime where
     show (UtcTime t) = show t
@@ -243,6 +263,7 @@ instance SLTF.ToField UtcTime where
     toField (UtcTime val) = SLTF.toField val
 instance SLFF.FromField UtcTime where
     fromField f = UtcTime <$> SLFF.fromField f
+instance NFData UtcTime
 
 instance Arbitrary UtcTime where
     arbitrary = do
@@ -277,7 +298,14 @@ replaceUtcPicos p (UtcTime t) = UtcTime $ t { Data.Time.utctDayTime = dt } where
     dt = Data.Time.picosecondsToDiffTime p
 
 newtype MonoTime = MonoTime { getMonoTime :: System.Clock.TimeSpec }
-    deriving (Generic, Eq, Ord, Show, Read)
+    deriving (Generic, Eq, Ord)
+instance Show MonoTime where
+    show (MonoTime val) = show val
+instance Read MonoTime where
+    readPrec = MonoTime <$> readPrec
+instance NFData MonoTime where
+    rnf (MonoTime t) =
+        System.Clock.sec t `deepseq` System.Clock.nsec t `deepseq` ()
 
 instance Arbitrary MonoTime where
     arbitrary = do
@@ -295,10 +323,18 @@ instance Bin.Serialize MonoTime where
         b <- Bin.get
         return $ MonoTime $ System.Clock.TimeSpec a b
 
-newtype SessionId = SessionId String deriving (Generic, Eq, Ord, Show, Read)
+newtype SessionId = SessionId { getSessionId :: String }
+    deriving (Generic, Eq, Ord)
+instance Show SessionId where
+    show (SessionId val) = show val
+instance Read SessionId where
+    readPrec = SessionId <$> readPrec
+instance NFData SessionId
 instance Bin.Serialize SessionId
-instance Data.Aeson.ToJSON SessionId
-instance Data.Aeson.FromJSON SessionId
+instance Data.Aeson.ToJSON SessionId where
+    toJSON (SessionId val) = Data.Aeson.toJSON val
+instance Data.Aeson.FromJSON SessionId where
+    parseJSON val = SessionId <$> Data.Aeson.parseJSON val
 instance Arbitrary SessionId where
     arbitrary = SessionId <$> arbitrary
 instance IsString SessionId where
@@ -315,10 +351,18 @@ instance SLFF.FromField SessionId where
 sessionId :: String -> SessionId
 sessionId = SessionId
 
-newtype TrackId = TrackId String deriving (Generic, Eq, Ord, Show, Read)
+newtype TrackId = TrackId { getTrackId :: String }
+    deriving (Generic, Eq, Ord)
+instance Show TrackId where
+    show (TrackId val) = show val
+instance Read TrackId where
+    readPrec = TrackId <$> readPrec
+instance NFData TrackId
 instance Bin.Serialize TrackId
-instance Data.Aeson.ToJSON TrackId
-instance Data.Aeson.FromJSON TrackId
+instance Data.Aeson.ToJSON TrackId where
+    toJSON (TrackId val) = Data.Aeson.toJSON val
+instance Data.Aeson.FromJSON TrackId where
+    parseJSON val = TrackId <$> Data.Aeson.parseJSON val
 instance Arbitrary TrackId where
     arbitrary = TrackId <$> arbitrary
 instance IsString TrackId where
@@ -336,11 +380,18 @@ trackId :: String -> TrackId
 trackId = TrackId
 
 -- | Sequence number that wraps around.
-newtype SequenceNum = SequenceNum Integer
-    deriving (Generic, Eq, Show, Read)
+data SequenceNum = SequenceNum { getSequenceNum :: !Integer }
+    deriving (Generic, Eq)
+instance Show SequenceNum where
+    show (SequenceNum val) = show val
+instance Read SequenceNum where
+    readPrec = SequenceNum <$> readPrec
+instance NFData SequenceNum
 instance Bin.Serialize SequenceNum
-instance Data.Aeson.ToJSON SequenceNum
-instance Data.Aeson.FromJSON SequenceNum
+instance Data.Aeson.ToJSON SequenceNum where
+    toJSON (SequenceNum val) = Data.Aeson.toJSON val
+instance Data.Aeson.FromJSON SequenceNum where
+    parseJSON val = SequenceNum <$> Data.Aeson.parseJSON val
 instance PGTF.ToField SequenceNum where
     toField (SequenceNum val) = PGTF.toField val
 instance PGFF.FromField SequenceNum where
@@ -356,7 +407,7 @@ instance Bounded SequenceNum where
 
 -- | Smart constructor for SequenceNum
 sequenceNum :: (Integral i) => i -> SequenceNum
-sequenceNum i
+sequenceNum !i
     | i < fromIntegral a = error "value too small"
     | i > fromIntegral b = error "value too large"
     | otherwise = SequenceNum $ fromIntegral i
@@ -376,6 +427,29 @@ nextSequenceNum (SequenceNum sn)
     | otherwise = sequenceNum $ succ sn
   where
     SequenceNum b = maxBound
+
+newtype Payload = Payload { getPayload :: BS.ByteString }
+    deriving (Generic, Eq)
+instance NFData Payload
+instance Bin.Serialize Payload
+instance PGTF.ToField Payload where
+    toField (Payload val) = PGTF.toField val
+instance PGFF.FromField Payload where
+    fromField f mdata = Payload <$> PGFF.fromField f mdata
+instance SLTF.ToField Payload where
+    toField (Payload val) = SLTF.toField val
+instance SLFF.FromField Payload where
+    fromField f = Payload <$> SLFF.fromField f
+instance Show Payload where
+    show (Payload s) = show (Enc.hexlify s)
+instance Read Payload where
+    readPrec = do
+        s <- readPrec
+        case Enc.unhexlify s of
+            Nothing -> error "can not parse payload"
+            Just x -> return $ Payload x
+instance Arbitrary Payload where
+    arbitrary = Payload . BS.pack <$> resize 1000 arbitrary
 
 -- | Get current time (UTC,boot).
 now :: IO (UtcTime, MonoTime)
@@ -403,7 +477,8 @@ randomEvents dt ch rec startTime sid tid lnLimit = loop e0 where
             { eUtcTime = UtcTime $ Data.Time.addUTCTime (fromRational dt) utc
             , eMonoTime = MonoTime nextMono
             , eSequence = nextSequenceNum $ eSequence e
-            , eValue = BS.take lnLimit $ B64.encode $ BS8.pack $ show e
+            , eValue =
+                Payload $ BS.take lnLimit $ B64.encode $ BS8.pack $ show e
             }
     e0 = Event
         ch
@@ -413,5 +488,5 @@ randomEvents dt ch rec startTime sid tid lnLimit = loop e0 where
         sid
         tid
         minBound
-        (B64.encode "testData")
+        (Payload $ B64.encode "testData")
 

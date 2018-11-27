@@ -13,15 +13,15 @@
 module File where
 
 import           Control.Monad
-import           Control.Exception as Ex
 import           Control.Monad.Fix
-import           Control.Concurrent.STM
+import qualified Control.Exception as Ex
 import           GHC.Generics (Generic)
 import           Data.Aeson (ToJSON, FromJSON, toJSON, parseJSON, withText)
 import           Data.String
 import qualified Options.Applicative as Opt
 import           Data.Monoid ((<>))
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 import qualified System.IO as IO
 import qualified Data.Time as Time
 import           Data.List (isPrefixOf, sort)
@@ -32,9 +32,13 @@ import           System.Posix hiding (release)
 import           System.IO.Error (isDoesNotExistError)
 import           Data.Text (unpack)
 
+import           Pipes
+import qualified Pipes.Prelude as PP
+import qualified Pipes.Safe as PS
+import qualified Pipes.Safe.Prelude as PSP
+
 -- local imports
 import qualified Common as C
-import           Streams
 
 -- | File storage.
 data FileStore = FileStore
@@ -150,7 +154,7 @@ streamStdout = (,,) <$> pure StreamStdout <*> pure 0 <*> fmap snd now
 streamHandle :: FilePath -> IO (Stream, Integer, POSIXTime)
 streamHandle fp = do
     -- get file status and make sure it exists
-    st <- tryJust (guard . isDoesNotExistError) (getFileStatus fp) >>= \case
+    st <- Ex.tryJust (guard . isDoesNotExistError) (getFileStatus fp) >>= \case
         Right st -> return st
         Left _ -> do
             IO.openFile fp IO.AppendMode >>= IO.hClose
@@ -162,18 +166,18 @@ streamHandle fp = do
 streamPath :: FilePath -> IO (Stream, Integer, POSIXTime)
 streamPath fp = do
     let fa = StreamPath fp
-    tryJust (guard . isDoesNotExistError) (getFileStatus fp) >>= \case
+    Ex.tryJust (guard . isDoesNotExistError) (getFileStatus fp) >>= \case
         Right st -> return (fa, fromIntegral $ fileSize st, accessTimeHiRes st)
         Left _ -> (,,) <$> pure fa <*> pure 0 <*> fmap snd now
 
 -- | File writer with 'rotation' support.
 rotatingFileWriter :: (IsStream w) => IO (w, Integer, POSIXTime)
-    -> Maybe Rotate -> (String -> IO ()) -> Consumer BS.ByteString ()
-rotatingFileWriter openWriter mRot onRotate = writeSome --> writeSome
-  where
-    -- Write to one file. When it's time to rotate, terminate.
-    writeSome = mkConsumer $ \consume -> do
-        bracket rotate release (loop consume)
+    -> Maybe Rotate -> (String -> IO ())
+    -> Consumer BS.ByteString (PS.SafeT IO) ()
+rotatingFileWriter openWriter mRot onRotate = writeSome where
+
+    -- Rotate, write to file until it's time to rotate again.
+    writeSome = PS.bracket rotate close loop >> writeSome
 
     rotateTo (nowUtc, nowPosix) (fw, bytes, t) = do
         let tFormat = Time.formatTime Time.defaultTimeLocale
@@ -188,18 +192,16 @@ rotatingFileWriter openWriter mRot onRotate = writeSome --> writeSome
         guard $ sizeLimit || timeLimit
         Just (fs, fs ++ "-" ++ tFormat nowUtc, rotateKeep rot)
 
-    loop consume (fw, !bytes, t) = atomically consume >>= \case
-        EndOfData rv -> return rv
-        Message msg -> do
-            (nowUtc, nowPosix) <- now
-            writeMsg fw msg
-            let bytes' = bytes + (fromIntegral $ BS.length msg)
-            case rotateTo (nowUtc, nowPosix) (fw, bytes', t) of
-                Nothing -> loop consume (fw, bytes', t)
-                Just _ -> return ()
+    loop (fw, !bytes, t) = do
+        msg <- await
+        (nowUtc, nowPosix) <- liftIO now
+        liftIO $ writeMsg fw msg
+        let bytes' = bytes + (fromIntegral $ BS.length msg)
+        case rotateTo (nowUtc, nowPosix) (fw, bytes', t) of
+            Nothing -> loop (fw, bytes', t)
+            Just _ -> return ()
 
-    release (fw,_,_) = do
-        closeWriter fw
+    close (fw,_,_) = closeWriter fw
 
     -- rotate files and open writer
     rotate = do
@@ -208,7 +210,7 @@ rotatingFileWriter openWriter mRot onRotate = writeSome --> writeSome
         case rotateTo (nowUtc, nowPosix) (fw, bytes, t) of
             Nothing -> return (fw, bytes, t)
             Just (fs, newName, keep) -> do
-                (fw', b', t') <- mask_ $ do
+                (fw', b', t') <- Ex.mask_ $ do
                     closeWriter fw
                     renameFile fs newName
                     openWriter
@@ -228,42 +230,24 @@ rotatingFileWriter openWriter mRot onRotate = writeSome --> writeSome
         myFiles = isPrefixOf $ (takeFileName fs) ++ "-"
 
 -- | Read chunks from file.
-fileReaderChunks :: Int -> FileStore -> Producer BS.ByteString ()
-fileReaderChunks chunkSize fs = mkProducer $ \produce -> do
-    bracket acquire release (action produce)
+fileReaderChunks :: (PS.MonadSafe m) => Int -> FileStore
+    -> Producer BS.ByteString m ()
+fileReaderChunks chunkSize fs = case filePath fs of
+    "-" -> action IO.stdin
+    f -> PSP.withFile f IO.ReadMode action
   where
-    acquire = case filePath fs of
-        "-" -> return IO.stdin
-        f -> IO.openFile f IO.ReadMode
-    release h = case filePath fs of
-        "-" -> return ()
-        _ -> IO.hClose h
-    action produce h = fix $ \loop -> do
-        val <- BS.hGetSome h chunkSize
+    action h = fix $ \loop -> do
+        val <- liftIO $ BS.hGetSome h chunkSize
         case BS.null val of
             True -> return ()
             False -> do
-                _ <- atomically $ produce val
+                yield val
                 loop
 
 -- | Read lines from file.
-fileReaderLines :: FileStore -> Producer BS.ByteString ()
-fileReaderLines fs = mkProducer $ \produce -> do
-    bracket acquire release (action produce)
-  where
-    acquire = do
-        h <- case filePath fs of
-            "-" -> return IO.stdin
-            f -> IO.openFile f IO.ReadMode
-        IO.hSetBuffering h IO.LineBuffering
-        return h
-    release h = case filePath fs of
-        "-" -> return ()
-        _ -> IO.hClose h
-    action produce h = fix $ \loop -> do
-        rv <- try $ BS.hGetLine h
-        case rv of
-            Left (_e::SomeException) -> return ()
-            Right msg -> do
-                _ <- atomically $ produce msg
-                loop
+fileReaderLines :: (PS.MonadSafe m) => FileStore -> Producer BS.ByteString m ()
+fileReaderLines fs = src >-> PP.map BS8.pack where
+    src = case filePath fs of
+        "-" -> PP.stdinLn
+        f -> PSP.readFile f
+

@@ -4,7 +4,7 @@ import Test.Tasty
 
 import TestEncodings (testEncodings)
 import TestEvent (testEvent)
-import TestStreams (testStreams)
+import TestPipes (testPipes)
 import TestDatabase (testDatabase)
 
 import TestCmdArchive (testCmdArchive)
@@ -14,7 +14,7 @@ main = defaultMain $ testGroup "Tests"
     [ testGroup "Library"
         [ testEncodings
         , testEvent
-        , testStreams
+        , testPipes
         , testDatabase
         ]
     , testGroup "Commands"

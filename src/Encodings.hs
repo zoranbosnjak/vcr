@@ -24,9 +24,9 @@ module Encodings
 where
 
 import           Control.Monad
-import           Control.Concurrent.STM
 import           Data.Monoid ((<>))
 import           Data.Word (Word8)
+import           Data.Bool
 
 import qualified Data.Attoparsec.ByteString as ATP
 
@@ -49,7 +49,9 @@ import qualified Test.QuickCheck as QC
 import           Text.Read (readMaybe)
 import qualified Data.Text as Text
 
-import           Streams
+import           Pipes
+import qualified Pipes.Prelude as PP
+import qualified Pipes.Safe as PS
 
 class HasSize a where
     sizeOf :: a -> Integer
@@ -200,9 +202,9 @@ encodeList :: (Data.Aeson.ToJSON a, Bin.Serialize a, Show a) =>
 encodeList fmt lst = BS.concat (encode fmt <$> lst)
 
 -- | Pipe from items to bytestrings.
-toByteString :: (Data.Aeson.ToJSON a, Bin.Serialize a, Show a) =>
-    EncodeFormat -> Pipe a BS.ByteString c
-toByteString fmt = Streams.map (encode fmt)
+toByteString :: (Monad m, Data.Aeson.ToJSON a, Bin.Serialize a, Show a) =>
+    EncodeFormat -> Pipe a BS.ByteString m r
+toByteString fmt = PP.map (encode fmt)
 
 parser :: (Read b, Bin.Serialize b, FromJSON b) => EncodeFormat -> ATP.Parser b
 parser = \case
@@ -245,28 +247,27 @@ tryDecodeList fmt s = loop s where
             _ -> Nothing
 
 -- | Pipe from ByteString to Either (error, item).
-fromByteString :: (Data.Aeson.FromJSON a, Bin.Serialize a, Read a) =>
-    Int
-    -> EncodeFormat
-    -> Pipe BS.ByteString (Either (String, BS.ByteString) a) c
-fromByteString maxSize fmt = mkPipe (loop BS.empty)
-  where
-    loop acc consume produce = atomically consume >>= \case
-        EndOfData rv
-            | BS.null acc -> return rv          -- clean exit
-            | otherwise -> fail "broken pipe"   -- more data is expected
-        Message s -> do
-            leftover <- process produce (acc <> s)
-            case BS.length leftover >= maxSize of
-                True -> fail "input data too long"
-                False -> loop leftover consume produce
+fromByteString ::
+    (PS.MonadSafe m, Data.Aeson.FromJSON a, Bin.Serialize a, Read a) =>
+    Int -> EncodeFormat
+    -> Pipe BS.ByteString (Either (String, BS.ByteString) a) m r
+fromByteString maxSize fmt = loop BS.empty where
 
-    process produce s = case ATP.parse (parser fmt) s of
+    loop acc = do
+        key <- PS.register $ bool (fail "broken pipe") (return ()) (BS.null acc)
+        s <- await
+        leftover <- process (acc <> s)
+        PS.release key
+        case BS.length leftover >= maxSize of
+            True -> fail "input data too long"
+            False -> loop leftover
+
+    process s = case ATP.parse (parser fmt) s of
         ATP.Fail i _c e -> do
-            _ <- atomically $ produce $ Left (e,s)
-            process produce i
+            yield $ Left (e,s)
+            process i
         ATP.Partial _f -> return s
         ATP.Done i r -> do
-            _ <- atomically $ produce $ Right r
-            process produce i
+            yield $ Right r
+            process i
 

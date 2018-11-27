@@ -9,13 +9,16 @@ import System.IO.Temp
 import qualified Data.ByteString as BS
 import Data.List (sort)
 
+import Pipes
+import qualified Pipes.Prelude as PP
+import qualified Pipes.Safe as PS
+
 import Test.Tasty
 import Test.Tasty.QuickCheck as QC
 -- import Test.Tasty.HUnit
 
 import File
 import Common as C
-import Streams
 import Encodings
 import Event
 import Database
@@ -48,6 +51,10 @@ opts chunkBytes chunkEvents src dst = Cmd.Options
     , optSourceIdFilter = []
     , optStartTime      = Nothing
     , optEndTime        = Nothing
+    , optIgnoreError    = True      -- TODO: change arbitrary events
+                                    -- to a random flow, such that sequences
+                                    -- are correct and ignore errors flag is not
+                                    -- necessary any more.
     }
 
 -- | Generate temporary random data to a file and run action on it.
@@ -57,9 +64,9 @@ withTestData size enc fn act = withSystemTempFile fn $ \f h -> do
     hClose h
     orig :: [Event] <-
         Prelude.take (getNonNegative size) <$> generate arbitrary
-    runStream_ $
-        fromFoldable orig
-        >-> Streams.map (encode enc)
+    PS.runSafeT $ runEffect $
+        each orig
+        >-> PP.map (encode enc)
         >-> rotatingFileWriter (streamPath f) Nothing (\_ -> return ())
     act orig f
 

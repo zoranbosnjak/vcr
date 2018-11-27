@@ -4,24 +4,25 @@
 --
 -- 'record' command
 --
--- TODO:
---  - IPv6 support on unicast/multicast input "[ipv6]", "ip" syntax
+-- TODO: - IPv6 support on unicast/multicast input "[ipv6]", "ip" syntax
 
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module CmdRecord (cmdRecord) where
 
 -- standard imports
 import           Control.Monad
 import           Control.Monad.Fix
-import           Data.Foldable (toList)
-import           Options.Applicative ((<**>), (<|>))
+import           Control.DeepSeq
 import qualified Options.Applicative as Opt
+import           Options.Applicative ((<**>), (<|>))
 import           System.Log.Logger (Priority(..))
-import           Data.Text (pack)
+import           Data.Text as Text
+import           Data.Bool
 import           Network.BSD (getHostName)
 import           Data.Maybe (fromMaybe)
 import qualified Data.UUID
@@ -44,87 +45,31 @@ import           System.Posix.Signals (installHandler, sigHUP, Handler(Catch))
 import qualified Control.Exception as Ex
 import qualified Data.Set as Set
 import           Numeric (showFFloat)
-import           Data.Text (unpack)
-import qualified Data.Serialize as Bin
 import           Network.Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import           Network.HTTP.Types
+
+import           Pipes
+import qualified Pipes.Safe as PS
+import qualified Pipes.Concurrent as PC
+import qualified Pipes.Prelude as PP
+import qualified Pipes.ByteString as PBS
 
 -- local imports
 import qualified Common as C
 import           Common (logM)
 import qualified Event
 import           Process
-import           Streams
 import qualified Udp
 import qualified Encodings as Enc
 import qualified File
 import qualified Database as Db
 
-cmdRecord :: Opt.ParserInfo (C.VcrOptions -> IO ())
-cmdRecord = Opt.info ((runCmd <$> options) <**> Opt.helper)
-    (Opt.progDesc "Event recorder")
-
 type Ip = String
 type Port = Int
 
--- | Top level commands.
-data TopCommand
-    = TopFile FilePath
-    | TopCmd CmdLine
-    | TopDump FilePath
-    | TopPrepare Db.Db
-    deriving (Eq, Show)
-
--- | Speciffic command options.
-data Options = Options
-    { optIdent      :: Maybe Event.SourceId
-    , optUptime     :: Maybe Double
-    , optHttp       :: Maybe (Ip, Port)
-    , optArgs       :: TopCommand
-    } deriving (Eq, Show)
-
--- | Options if arguments are given in command line.
-data CmdLine = CmdLine
-    { optStdIn      :: Maybe Event.Channel
-    , optUdpIn      :: Map.Map Event.Channel Udp.UdpIn
-    , optStdOut     :: Bool
-    , optFileOut    :: Maybe FileOutput
-    , optDatabaseOut :: Maybe DatabaseOutput
-    , optBootstrap  :: Bool
-    } deriving (Eq, Show)
-
--- | File output.
-data FileOutput = FileOutput
-    { outFileStore  :: File.FileStore
-    , outFileEnc    :: Enc.EncodeFormat
-    , outFileRotate :: (Maybe File.Rotate)
-    } deriving (Generic, Eq, Show)
-
-instance ToJSON FileOutput
-instance FromJSON FileOutput
-
--- | Eventual application configuration.
-data AppConfig = AppConfig
-    { appStdin :: Maybe Event.Channel
-    , appInputs :: Inputs
-    , appStdout :: Bool
-    , appFileOutput :: Maybe FileOutput
-    , appDatabaseOutput :: Maybe DatabaseOutput
-    } deriving (Generic, Eq, Show)
-
-instance ToJSON AppConfig
-instance FromJSON AppConfig
-
 newtype Inputs = Inputs (Map.Map Event.Channel Udp.UdpIn)
     deriving (Generic, Eq, Show)
-
-instance Semigroup Inputs where
-    (Inputs i1) <> (Inputs i2) = Inputs (mappend i1 i2)
-
-instance Monoid Inputs where
-    mempty = Inputs mempty
-    mappend = (<>)
 
 instance ToJSON Inputs where
     toJSON (Inputs val) = object
@@ -137,93 +82,26 @@ instance FromJSON Inputs where
             [(Event.Channel key, i) | (key, i) <- HMS.toList lst]
     parseJSON t = typeMismatch "Inputs" t
 
--- | Command option parser.
-options :: Opt.Parser Options
-options = Options
-    <$> Opt.optional Event.sourceIdOptions
-    <*> Opt.optional ( Opt.option Opt.auto
-        ( Opt.long "logUptime"
-       <> Opt.help "Log uptime every N seconds"
-       <> Opt.metavar "N"
-        ))
-    <*> Opt.optional httpOptions
-    <*> parseConfig
+inputsOptions :: Opt.Parser Inputs
+inputsOptions = fmap Inputs (Map.fromList <$> Opt.many udpInputOptions)
   where
-    parseConfig =
-        ( C.subparserCmd "config ..." $ Opt.command "config" $ Opt.info
-            (fmap TopFile parseConfigFile <**> Opt.helper)
-            (Opt.progDesc "Use config file")
-        )
-       <|> ( C.subparserCmd "args ..." $ Opt.command "args" $ Opt.info
-            (fmap TopCmd parseConfigArgs <**> Opt.helper)
-            (Opt.progDesc "Use command line arguments")
-           )
-       <|> ( C.subparserCmd "dump FILE" $ Opt.command "dump" $ Opt.info
-            (fmap TopDump parseConfigFile <**> Opt.helper)
-            (Opt.progDesc "Read and print config file")
-           )
-       <|> ( C.subparserCmd "prepare ..." $ Opt.command "prepare" $ Opt.info
-            (fmap TopPrepare Db.databaseConnectionOptions <**> Opt.helper)
-            (Opt.progDesc "Create database tables")
-           )
+    udpInputOptions :: Opt.Parser (Event.Channel, Udp.UdpIn)
+    udpInputOptions =
+        C.subparserCmd "udpin ..." $ Opt.command "udpin" $ Opt.info
+            (opts <**> Opt.helper)
+            (Opt.progDesc "Read data from UDP")
+      where
+        opts = (,) <$> Event.channelOptions <*> Udp.udpInOptions
 
-    parseConfigFile :: Opt.Parser FilePath
-    parseConfigFile = Opt.argument Opt.str (Opt.metavar "FILE")
-
-    parseConfigArgs :: Opt.Parser CmdLine
-    parseConfigArgs = CmdLine
-        <$> Opt.optional stdinOptions
-        <*> (Map.fromList <$> Opt.many udpInputOptions)
-        <*> (maybe False (const True) <$> Opt.optional stdoutOptions)
-        <*> Opt.optional storeFileOptions
-        <*> Opt.optional storeDatabaseOptions
-        <*> Opt.switch
-            ( Opt.long "bootstrap"
-            <> Opt.help "Print config file and exit"
-            )
-
-stdinOptions :: Opt.Parser Event.Channel
-stdinOptions = C.subparserCmd "stdin ..." $ Opt.command "stdin" $ Opt.info
-    (opts <**> Opt.helper)
-    (Opt.progDesc "Read data from stdin")
-  where
-    opts = Event.channelOptions
-
-udpInputOptions :: Opt.Parser (Event.Channel, Udp.UdpIn)
-udpInputOptions = C.subparserCmd "udpin ..." $ Opt.command "udpin" $ Opt.info
-        (opts <**> Opt.helper)
-        (Opt.progDesc "Read data from UDP")
-  where
-    opts = (,) <$> Event.channelOptions <*> Udp.udpInOptions
-
-stdoutOptions :: Opt.Parser ()
-stdoutOptions = C.subparserCmd "stdout" $ Opt.command "stdout" $ Opt.info
-    (opts <**> Opt.helper)
-    (Opt.progDesc "Write data to stdout")
-  where
-    opts = pure ()
-
-storeFileOptions :: Opt.Parser FileOutput
-storeFileOptions = C.subparserCmd "fileout ..." $ Opt.command "fileout" $
-    Opt.info
-        (opts <**> Opt.helper)
-        (Opt.progDesc "Store data to a (rotating) file")
-  where
-    opts = FileOutput
-        <$> File.fileStoreOptions
-        <*> Enc.encodeFormatOptions
-        <*> Opt.optional File.rotateOptions
-
--- | Database output.
-data DatabaseOutput = DatabaseOutput
-    { outDatabase           :: Db.Db
-    , outDatabaseOnOverflow :: OnOverflow
-    , outDatabaseBufferSend :: (Int, Double)
-    , outDatabaseBufferDrop :: Int
+-- | File output.
+data FileOutput = FileOutput
+    { outFileStore  :: File.FileStore
+    , outFileEnc    :: Enc.EncodeFormat
+    , outFileRotate :: (Maybe File.Rotate)
     } deriving (Generic, Eq, Show)
 
-instance ToJSON DatabaseOutput
-instance FromJSON DatabaseOutput
+instance ToJSON FileOutput
+instance FromJSON FileOutput
 
 -- | Overflow handler (what to do in case of buffer overflow).
 data OnOverflow
@@ -236,14 +114,25 @@ instance ToJSON OnOverflow where
     toJSON (OnOverflowFile fo) = toJSON fo
 
 instance FromJSON OnOverflow where
-    parseJSON (Data.Aeson.String s) = case (words $ unpack s) of
+    parseJSON (Data.Aeson.String s) = case (Prelude.words $ Text.unpack s) of
         ("drop":[]) -> return OnOverflowDrop
         _ -> typeMismatch "OnOverflow" (Data.Aeson.String s)
     parseJSON val@(Data.Aeson.Object _) = OnOverflowFile <$> parseJSON val
     parseJSON t = typeMismatch "OnOverflow" t
 
-storeDatabaseOptions :: Opt.Parser DatabaseOutput
-storeDatabaseOptions = C.subparserCmd "databaseout ..." $
+-- | Database output.
+data DatabaseOutput = DatabaseOutput
+    { outDatabase           :: Db.Db
+    , outDatabaseOnOverflow :: OnOverflow
+    , outDatabaseBufferSend :: Db.Buffer
+    , outDatabaseBufferDrop :: Int
+    } deriving (Generic, Eq, Show)
+
+instance ToJSON DatabaseOutput
+instance FromJSON DatabaseOutput
+
+databaseOutputOptions :: Opt.Parser DatabaseOutput
+databaseOutputOptions = C.subparserCmd "databaseout ..." $
     Opt.command "databaseout" $ Opt.info
         (opts <**> Opt.helper)
         (Opt.progDesc "Store data to database")
@@ -251,103 +140,214 @@ storeDatabaseOptions = C.subparserCmd "databaseout ..." $
     opts = DatabaseOutput
         <$> Db.databaseConnectionOptions
         <*> (onOverflowDrop <|> onOverflowFile)
-        <*> ((,) <$> sendEvents <*> sendSeconds)
+        <*> (Db.Buffer <$> sendEvents <*> sendSeconds)
         <*> bufferDropAt
 
-onOverflowDrop :: Opt.Parser OnOverflow
-onOverflowDrop = Opt.flag' OnOverflowDrop
-    ( Opt.long "dropDiscard"
-   <> Opt.help "In case of buffer overflow, drop data"
-    )
-
-onOverflowFile :: Opt.Parser OnOverflow
-onOverflowFile = tag *> fmap OnOverflowFile opts
-  where
-    tag = Opt.flag' ()
-        ( Opt.long "dropFile"
-       <> Opt.help "In case of buffer overflow, save data to a file"
+    onOverflowDrop :: Opt.Parser OnOverflow
+    onOverflowDrop = Opt.flag' OnOverflowDrop
+        ( Opt.long "dropDiscard"
+       <> Opt.help "In case of buffer overflow, drop data"
         )
-    opts = FileOutput
-        <$> File.fileStoreOptions
-        <*> Enc.encodeFormatOptions
-        <*> Opt.optional File.rotateOptions
 
-sendEvents :: Opt.Parser Int
-sendEvents = Opt.option Opt.auto
-    ( Opt.long "sendEvents"
-   <> Opt.metavar "N"
-   <> Opt.help "Send events in batches of N"
-   <> Opt.value 1000
-   <> Opt.showDefault
-    )
+    onOverflowFile :: Opt.Parser OnOverflow
+    onOverflowFile = tag *> fmap OnOverflowFile optsFo
+      where
+        tag = Opt.flag' ()
+            ( Opt.long "dropFile"
+           <> Opt.help "In case of buffer overflow, save data to a file"
+            )
+        optsFo = FileOutput
+            <$> File.fileStoreOptions
+            <*> Enc.encodeFormatOptions
+            <*> Opt.optional File.rotateOptions
 
-sendSeconds :: Opt.Parser Double
-sendSeconds = Opt.option Opt.auto
-    ( Opt.long "sendSeconds"
-   <> Opt.metavar "SECONDS"
-   <> Opt.help "Send events at least every N seconds"
-   <> Opt.value 1.0
-   <> Opt.showDefault
-    )
-
-bufferDropAt :: Opt.Parser Int
-bufferDropAt = Opt.option Opt.auto
-    ( Opt.long "dropAt"
-   <> Opt.metavar "N"
-   <> Opt.help "Drop events when buffer size reaches N"
-   <> Opt.value 10000
-   <> Opt.showDefault
-    )
-
-httpOptions :: Opt.Parser (Ip, Port)
-httpOptions = C.subparserCmd "http ..." $
-    Opt.command "http" $ Opt.info
-        (opts <**> Opt.helper)
-        (Opt.progDesc "Enable http server")
-  where
-    opts = (,)
-        <$> parseIp
-        <*> parsePort
-    parseIp = Opt.strOption
-        ( Opt.long "ip"
-       <> Opt.metavar "IP"
-       <> Opt.help "Ip address"
-       <> Opt.value "127.0.0.1"
+    sendEvents :: Opt.Parser Int
+    sendEvents = Opt.option Opt.auto
+        ( Opt.long "sendEvents"
+       <> Opt.metavar "N"
+       <> Opt.help "Send events in batches of N"
+       <> Opt.value 1000
        <> Opt.showDefault
         )
-    parsePort = Opt.option Opt.auto
-        ( Opt.long "port"
-       <> Opt.metavar "PORT"
-       <> Opt.help "TCP port number"
-       <> Opt.value 8080
+
+    sendSeconds :: Opt.Parser Double
+    sendSeconds = Opt.option Opt.auto
+        ( Opt.long "sendSeconds"
+       <> Opt.metavar "SECONDS"
+       <> Opt.help "Send events at least every N seconds"
+       <> Opt.value 1.0
        <> Opt.showDefault
+        )
+
+    bufferDropAt :: Opt.Parser Int
+    bufferDropAt = Opt.option Opt.auto
+        ( Opt.long "dropAt"
+       <> Opt.metavar "N"
+       <> Opt.help "Drop events when buffer size reaches N"
+       <> Opt.value 10000
+       <> Opt.showDefault
+        )
+
+-- | Eventual application configuration.
+data AppConfig = AppConfig
+    { appInputs :: Inputs
+    , appFileOutput :: Maybe FileOutput
+    , appDatabaseOutput :: Maybe DatabaseOutput
+    } deriving (Generic, Eq, Show)
+
+instance ToJSON AppConfig
+instance FromJSON AppConfig
+
+-- | Options if arguments are given in command line.
+data CmdLine = CmdLine
+    { optInputs     :: Inputs
+    , optFileOut    :: Maybe FileOutput
+    , optDatabaseOut :: Maybe DatabaseOutput
+    , optBootstrap  :: Bool
+    } deriving (Eq, Show)
+
+cmdLineOpts :: Opt.Parser CmdLine
+cmdLineOpts = CmdLine
+    <$> inputsOptions
+    <*> Opt.optional storeFileOptions
+    <*> Opt.optional databaseOutputOptions
+    <*> Opt.switch
+        ( Opt.long "bootstrap"
+        <> Opt.help "Print config file and exit"
+        )
+  where
+    storeFileOptions :: Opt.Parser FileOutput
+    storeFileOptions = C.subparserCmd "fileout ..." $ Opt.command "fileout" $
+        Opt.info
+            (opts <**> Opt.helper)
+            (Opt.progDesc "Store data to a (rotating) file")
+      where
+        opts = FileOutput
+            <$> File.fileStoreOptions
+            <*> Enc.encodeFormatOptions
+            <*> Opt.optional File.rotateOptions
+
+-- | Top level commands.
+data TopCommand
+    = TopFile FilePath
+    | TopCmd CmdLine
+    | TopDump FilePath
+    | TopPrepare Db.Db
+    deriving (Eq, Show)
+
+topCommandOpts :: Opt.Parser TopCommand
+topCommandOpts =
+    ( C.subparserCmd "config ..." $ Opt.command "config" $ Opt.info
+        (fmap TopFile parseConfigFile <**> Opt.helper)
+        (Opt.progDesc "Use config file")
+    )
+   <|> ( C.subparserCmd "args ..." $ Opt.command "args" $ Opt.info
+        (fmap TopCmd cmdLineOpts <**> Opt.helper)
+        (Opt.progDesc "Use command line arguments")
+       )
+   <|> ( C.subparserCmd "dump FILE" $ Opt.command "dump" $ Opt.info
+        (fmap TopDump parseConfigFile <**> Opt.helper)
+        (Opt.progDesc "Read and print config file")
+       )
+   <|> ( C.subparserCmd "prepare ..." $ Opt.command "prepare" $ Opt.info
+        (fmap TopPrepare Db.databaseConnectionOptions <**> Opt.helper)
+        (Opt.progDesc "Create database tables")
+       )
+ where
+    parseConfigFile :: Opt.Parser FilePath
+    parseConfigFile = Opt.argument Opt.str (Opt.metavar "FILE")
+
+-- | Speciffic command options.
+data Options = Options
+    { optIdent      :: Maybe Event.SourceId
+    , optUptime     :: Maybe Double
+    , optStdin      :: Maybe Event.Channel
+    , optStdout     :: Bool
+    , optHttp       :: Maybe (Ip, Port)
+    , optArgs       :: TopCommand
+    } deriving (Eq, Show)
+
+-- | Command option parser.
+options :: Opt.Parser Options
+options = Options
+    <$> Opt.optional Event.sourceIdOptions
+    <*> Opt.optional ( Opt.option Opt.auto
+        ( Opt.long "logUptime"
+       <> Opt.help "Log uptime every N seconds"
+       <> Opt.metavar "N"
+        ))
+    <*> Opt.optional stdinOption
+    <*> Opt.switch
+        (Opt.long "stdout"
+       <> Opt.help "Enable stdoutput"
+        )
+    <*> Opt.optional httpOptions
+    <*> topCommandOpts
+
+  where
+
+    httpOptions :: Opt.Parser (Ip, Port)
+    httpOptions = C.subparserCmd "http ..." $
+        Opt.command "http" $ Opt.info
+            (opts <**> Opt.helper)
+            (Opt.progDesc "Enable http server")
+      where
+        opts = (,)
+            <$> parseIp
+            <*> parsePort
+        parseIp = Opt.strOption
+            ( Opt.long "ip"
+           <> Opt.metavar "IP"
+           <> Opt.help "Ip address"
+           <> Opt.value "127.0.0.1"
+           <> Opt.showDefault
+            )
+        parsePort = Opt.option Opt.auto
+            ( Opt.long "port"
+           <> Opt.metavar "PORT"
+           <> Opt.help "TCP port number"
+           <> Opt.value 8080
+           <> Opt.showDefault
+            )
+
+    stdinOption :: Opt.Parser Event.Channel
+    stdinOption = Event.Channel <$> Opt.strOption
+        ( Opt.long "stdin"
+       <> Opt.metavar "CH"
+       <> Opt.help (Prelude.unwords
+            [ "Record events (lines) from stdin to given channel,"
+            , "ignore other configured sources"
+            ])
         )
 
 emptyConfig :: AppConfig
 emptyConfig = AppConfig
-    { appStdin = Nothing
-    , appInputs = mempty
-    , appStdout = False
+    { appInputs = Inputs mempty
     , appFileOutput = Nothing
     , appDatabaseOutput = Nothing
     }
 
-stdInInput :: STM (Maybe Event.Channel) -> Event.SourceId -> Event.SessionId
-    -> Producer Event.Event ()
-stdInInput cfg recId sessionId = mkProducer $ \produce -> do
-  withVar "stdin" cfg $ \case
-    Nothing -> doNothing
-    Just ch -> do
-        trackId <- Event.trackId . Data.UUID.toString <$> nextRandom
-        logM INFO $ show ch ++ " -> " ++ show trackId
-        let gen = mkGenPipeIO minBound $ \s sn -> do
-                (tUtc, tMono) <- Event.now
-                return
-                    ( Event.Event ch recId tUtc tMono sessionId trackId sn s
-                    , Event.nextSequenceNum sn
-                    )
-            p = File.fileReaderLines (File.FileStore "-") >-> gen
-        (streamAction p) noConsume produce
+-- | Custom version of 'drain', where each element is
+-- fully evaluated, to prevent a leak.
+drain :: (NFData a, Monad m) => Consumer a m r
+drain = await >>= \x -> x `deepseq` drain
+
+stdInInput :: (PS.MonadSafe m) =>
+    Event.SourceId -> Event.SessionId -> Event.Channel
+    -> Producer Event.Event m ()
+stdInInput recId sessionId ch = do
+    trackId <- liftIO (Event.trackId . Data.UUID.toString <$> nextRandom)
+    liftIO $ logM INFO $ "ch: " ++ show ch ++ " -> trackId: " ++ show trackId
+    File.fileReaderLines (File.FileStore "-") >-> go trackId minBound
+  where
+    go trackId sn = do
+        s <- Event.Payload <$> await
+        (tUtc, tMono) <- liftIO Event.now
+        yield $ Event.Event ch recId tUtc tMono sessionId trackId sn s
+        go trackId (Event.nextSequenceNum sn)
+
+stdOutOutput :: (MonadIO m) => Consumer Event.Event m ()
+stdOutOutput = PP.map (Enc.encode Enc.EncText) >-> PBS.stdout
 
 -- | Process inputs.
 processInputs :: STM Inputs -> ((Event.Channel, Udp.UdpIn) -> IO ()) -> IO ()
@@ -393,7 +393,7 @@ processInputs getInputs act = do
         loop active newRunning
 
     onStart active ch param = do
-        logM INFO $ "Start input: " ++ show ch ++ ", " ++ show param
+        logM INFO $ "Start input: ch: " ++ show ch ++ ", " ++ show param
         a <- Ex.mask $ \restore -> do
             a <- Async.async $ restore $ autoRestart ch param
             atomically $ modifyTVar' active $ Set.insert a
@@ -401,7 +401,7 @@ processInputs getInputs act = do
         return (a, param)
 
     onStop active ch (a, param) = do
-        logM INFO $ "Stop input: " ++ show ch ++ ", " ++ show param
+        logM INFO $ "Stop input: ch: " ++ show ch ++ ", " ++ show param
         Ex.mask $ \_restore -> do
             atomically $ modifyTVar' active $ Set.delete a
             Async.cancel a
@@ -420,111 +420,117 @@ processInputs getInputs act = do
                 ++ show ch ++ ", " ++ show param ++ ", " ++ msg
                 ++ ", will auto restart in few moments..."
             C.threadDelaySec 3
-            logM INFO $ "Auto restart input: " ++ show ch ++ ", " ++ show param
+            logM INFO $
+                "Auto restart input: ch: " ++ show ch ++ ", " ++ show param
 
+-- | Single UDP input producer.
+udpInput :: Event.SourceId -> Event.SessionId -> (Event.Channel, Udp.UdpIn)
+    -> Producer Event.Event (PS.SafeT IO) ()
+udpInput recId sessionId (ch, addr) = do
+    trackId <- liftIO (Event.trackId . Data.UUID.toString <$> nextRandom)
+    liftIO $ logM INFO $ "ch: " ++ show ch ++ " -> trackId: " ++ show trackId
+    Udp.udpReader addr >-> PP.map fst >-> go trackId minBound
+  where
+    go trackId sn = do
+        s <- Event.Payload <$> await
+        (tUtc, tMono) <- liftIO Event.now
+        yield $ Event.Event ch recId tUtc tMono sessionId trackId sn s
+        go trackId (Event.nextSequenceNum sn)
+
+-- | Merged all configured UDP inputs into a single producer.
 udpInputs :: STM Inputs -> Event.SourceId -> Event.SessionId
-    -> Producer Event.Event ()
-udpInputs getInputs recId sessionId = mkProducer $ \produce -> do
-    processInputs getInputs $ \(ch, udp) -> do
-        trackId <- Event.trackId . Data.UUID.toString <$> nextRandom
-        logM INFO $ show ch ++ " -> " ++ show trackId
-        let gen = mkGenPipeIO minBound $ \(val, _addr) sn -> do
-                (tUtc, tMono) <- Event.now
-                return
-                    ( Event.Event ch recId tUtc tMono sessionId trackId sn val
-                    , Event.nextSequenceNum sn
-                    )
-            p = Udp.udpReader udp >-> gen
-        (streamAction p) noConsume produce
-
-stdOutOutput :: (Show a, Bin.Serialize a, ToJSON a) => STM Bool -> Consumer a ()
-stdOutOutput cfg = mkConsumer $ \consume ->
-    withVar "stdout" cfg $ \case
-        False -> (streamAction drain) consume noProduce
-        True -> (streamAction consumer) consume noProduce
+    -> Producer Event.Event (PS.SafeT IO) ()
+udpInputs getInputs recId sessionId = PS.bracket prepare finalize action
   where
-    consumer =
-        Streams.map (Enc.encode Enc.EncText)
-        >-> File.rotatingFileWriter File.streamStdout Nothing (\_ -> return ())
+    prepare = do
+        (output, input) <- PC.spawn PC.unbounded
+        a <- C.linkAsync $ do
+            processInputs getInputs $ \(ch, udp) -> do
+                let p = udpInput recId sessionId (ch, udp)
+                PS.runSafeT $ runEffect $ p >-> PC.toOutput output
+            PC.performGC
+            fail "main UDP input process terminated"
+        return (input, a)
+    finalize (_, a) = Async.cancel a
+    action (input, _) = fix $ \loop -> do
+        mMsg <- liftIO $ atomically $ PC.recv input
+        case mMsg of
+            Nothing -> fail "UDP source exhausted"
+            Just msg -> do
+                yield msg
+                loop
 
-fileOutput :: (Show a, Bin.Serialize a, ToJSON a) =>
-    STM (Maybe FileOutput) -> Consumer a ()
-fileOutput cfg = mkConsumer $ \consume ->
-    withVar "file output" cfg $ \case
-        Nothing -> (streamAction drain) consume noProduce
-        Just fo -> (streamAction (consumer fo)) consume noProduce
-  where
-    consumer fo =
-        Streams.map (Enc.encode $ outFileEnc fo)
+-- | Conditional file output, depending on configuration.
+fileOutput :: STM (Maybe FileOutput) -> Consumer Event.Event (PS.SafeT IO) ()
+fileOutput getCfg = C.consumeWith "file output" getCfg $ \case
+    Nothing -> drain
+    Just fo ->
+        PP.map (Enc.encode $ outFileEnc fo)
         >-> File.rotatingFileWriter (open fo) (outFileRotate fo) (logM INFO)
+  where
     open f = case outFileStore f of
         File.FileStore "-" -> File.streamStdout
         File.FileStore fs -> File.streamHandle fs
 
+-- | Conditional database output, depending on configuration.
 databaseOutput :: Event.SessionId -> (Db.Status -> STM ())
-    -> STM (Maybe DatabaseOutput) -> Consumer Event.Event ()
-databaseOutput sessionId setStat cfg = mkConsumer $ \consume ->
-    withVar "database output" cfg $ \case
-        Nothing -> (streamAction drain) consume noProduce
-        Just dbo -> do
-            qOfw <- newTVarIO DS.empty  -- overflow queue
-            dbQueue <- newEmptyTMVarIO
-            let dropEvents s = modifyTVar qOfw (|> s)
-                dbConsume = takeTMVar dbQueue
-                dbProduce = putTMVar dbQueue
-                conn = outDatabase dbo
-                bufSend = outDatabaseBufferSend dbo
-                bufDropAt = outDatabaseBufferDrop dbo
-                onOwf = outDatabaseOnOverflow dbo
-                dbWriter =
-                    Db.databaseWriter setStat bufSend bufDropAt dropEvents conn
-            -- run database writer and drop handler concurrently
-            -- drop handler will finish only after database writer,
-            -- so just wait for a drop handler to finish
-            withAsync ((streamAction dbWriter) dbConsume noProduce) $ \a1 ->
-                withAsync (dropHandler qOfw a1 onOwf) $ \a2 -> do
-                    let runConsume = atomically $ do
-                            val <- consume
-                            dbProduce val
-                            return val
-                        onEnd rv = Async.wait a2 >> return rv
-                        onData _msg = return ()
-                    processMessage runConsume onEnd onData
-  where
-    dropHandler q db onDrop = runStream_ $ producer >-> consumer where
-        producer = mkProducer $ \produce -> fix $ \loop -> do
-            -- wait for
-            --  - empty queue and finished database process
-            --  - or some messages to drop
-            mMsgs <- atomically $ do
-                finished <- Async.pollSTM db >>= \case
-                    Nothing -> return False
-                    Just (Left e) -> Ex.throw e
-                    Just (Right _) -> return True
-                msgs <- readTVar q
-                case finished && (DS.null msgs) of
-                    True -> return Nothing
-                    False -> case DS.null msgs of
-                        True -> retry
-                        False -> return $ Just msgs
-            case mMsgs of
-                Nothing -> return ()
-                Just msgs -> do
-                    mapM_ (atomically . produce) $ toList msgs
-                    loop
-        consumer = case onDrop of
-            OnOverflowDrop -> drain
-            OnOverflowFile fo ->
-                let (Event.SessionId sid) = sessionId
-                    fs1 = outFileStore fo
-                    fs2 = File.filePath fs1 ++ "-" ++ sid
-                    open = case fs1 of
-                        File.FileStore "-" -> File.streamStdout
-                        File.FileStore _ -> File.streamPath fs2
-                in
-                    Streams.map (Enc.encode $ outFileEnc fo)
-                    >-> File.rotatingFileWriter open (outFileRotate fo)
-                        (logM INFO)
+    -> STM (Maybe DatabaseOutput) -> Consumer Event.Event (PS.SafeT IO) ()
+databaseOutput sessionId setStat getCfg =
+  C.consumeWith "database output" getCfg $ \case
+    Nothing -> drain
+    Just dbo -> PS.bracket (prepare dbo) finalize action
+ where
+    prepare dbo = do
+        (output, input) <- PC.spawn $ PC.bounded 1
+        qOfw <- liftIO $ newTVarIO DS.empty -- overflow queue
+        let dropEvents s = modifyTVar qOfw (|> s)
+            db = outDatabase dbo
+            onOfw = outDatabaseOnOverflow dbo
+            bufSend = outDatabaseBufferSend dbo
+            bufDrop = outDatabaseBufferDrop dbo
+
+        -- drop handler
+        a <- C.linkAsync $ do
+            let producer = forever $ do
+                    msgs <- liftIO $ atomically $ do
+                        msgs <- readTVar qOfw
+                        case DS.null msgs of
+                            True -> retry
+                            False -> do
+                                writeTVar qOfw DS.empty
+                                return msgs
+                    mapM_ yield msgs
+                (Event.SessionId sid) = sessionId
+                consumer = case onOfw of
+                    OnOverflowDrop -> drain
+                    OnOverflowFile fo -> do
+                        let fs1 = outFileStore fo
+                            fs2 = File.filePath fs1 ++ "-" ++ sid
+                            open = case fs1 of
+                                File.FileStore "-" -> File.streamStdout
+                                File.FileStore _ -> File.streamPath fs2
+                        PP.map (Enc.encode $ outFileEnc fo) >->
+                            File.rotatingFileWriter
+                                open (outFileRotate fo) (logM INFO)
+            PS.runSafeT $ runEffect $ producer >-> consumer
+            PC.performGC
+            fail "database drop handler terimnated"
+
+        -- database writer
+        b <- C.linkAsync $ do
+            PS.runSafeT $ runEffect $ PC.fromInput input >->
+                Db.databaseWriterProcess setStat bufSend bufDrop dropEvents db
+            PC.performGC
+            fail "database writer terimnated"
+
+        return (output, a, b)
+
+    finalize (_, a, b) = do
+        Async.cancel b
+        Async.cancel a
+
+    action (output, _, _) = do
+        PC.toOutput output
 
 logUptime :: Event.MonoTime -> Double -> IO b
 logUptime startTimeMono t = forever $ do
@@ -536,9 +542,9 @@ logUptime startTimeMono t = forever $ do
     logM INFO $
         "uptime: " ++ showFFloat (Just 3) uptimeDays "" ++ " days"
 
-startHttp :: Event.UtcTime -> Event.MonoTime -> TVar (Maybe Db.Status)
+httpServer :: Event.UtcTime -> Event.MonoTime -> TVar (Maybe Db.Status)
     -> (String, Warp.Port) -> IO ()
-startHttp startTimeUtc startTimeMono dbStatV (ip, port) = do
+httpServer startTimeUtc startTimeMono dbStatV (ip, port) = do
     let settings =
             Warp.setPort port $
             Warp.setHost (fromString ip) $
@@ -608,14 +614,14 @@ runCmd opts vcrOpts = case optArgs opts of
     logM INFO $
         "command 'record', opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
     recId <- do
-        hostname <- Event.sourceId . pack <$> getHostName
+        hostname <- Event.sourceId . Text.pack <$> getHostName
         return $ fromMaybe hostname $ optIdent opts
-    logM INFO $ show recId
+    logM INFO $ "recorder: " ++ show recId
 
     sessionId <- Event.sessionId . Data.UUID.toString <$> nextRandom
-    logM INFO $ show sessionId
+    logM INFO $ "session: " ++ show sessionId
 
-    -- Global configuration
+    -- Global configuration, either from file or command line.
     cfg <- newTVarIO emptyConfig
 
     doBootstrap <- case optArgs opts of
@@ -646,9 +652,7 @@ runCmd opts vcrOpts = case optArgs opts of
         TopCmd args -> do
             logM INFO $ show args
             let app = AppConfig
-                    { appStdin = optStdIn args
-                    , appInputs = Inputs $ optUdpIn args
-                    , appStdout = optStdOut args
+                    { appInputs = optInputs args
                     , appFileOutput = optFileOut args
                     , appDatabaseOutput = optDatabaseOut args
                     }
@@ -665,25 +669,30 @@ runCmd opts vcrOpts = case optArgs opts of
       Nothing -> do
         dbStat <- newTVarIO Nothing
         let updateDbStatus = writeTVar dbStat . Just
-            rtCheck = expedite 3.0 $ fail "real time error"
+            input = maybe
+                (udpInputs (appInputs <$> readTVar cfg) recId sessionId)
+                (stdInInput recId sessionId)
+                (optStdin opts)
+
         runAll
             [ process_ "uptime" $
                 maybe doNothing (logUptime startTimeMono) (optUptime opts)
             , process_ "http" $ maybe doNothing
-                (startHttp startTimeUtc startTimeMono dbStat)
+                (httpServer startTimeUtc startTimeMono dbStat)
                 (optHttp opts)
-            , process_ "data flow" $ runStream_ $
-                mergeProducers  -- inputs
-                    [ stdInInput (appStdin <$> readTVar cfg) recId sessionId
-                        >-> rtCheck
-                    , udpInputs (appInputs <$> readTVar cfg) recId sessionId
-                        >-> rtCheck
-                    ]
-                >-> forkConsumers   -- outputs
-                    [ stdOutOutput (appStdout <$> readTVar cfg)
-                    , fileOutput (appFileOutput <$> readTVar cfg)
-                    , databaseOutput sessionId updateDbStatus
-                        (appDatabaseOutput <$> readTVar cfg)
+            , process_ "data flow" $ PS.runSafeT $ runEffect $
+                input               -- inputs
+                >-> C.forkConsumers -- outputs
+                    [ bool drain stdOutOutput (optStdout opts)
+                    , (fileOutput (appFileOutput <$> readTVar cfg))
+                        >> liftIO (logM ERROR "file output terminated")
+                    , (databaseOutput sessionId updateDbStatus
+                        (appDatabaseOutput <$> readTVar cfg))
+                        >> liftIO (logM ERROR "database output terminated")
                     ]
             ]
+
+cmdRecord :: Opt.ParserInfo (C.VcrOptions -> IO ())
+cmdRecord = Opt.info ((runCmd <$> options) <**> Opt.helper)
+    (Opt.progDesc "Event recorder")
 

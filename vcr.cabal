@@ -2,7 +2,7 @@
 -- see http://haskell.org/cabal/users-guide/
 
 name:                vcr
-version:             0.4.0
+version:             0.5.0
 -- synopsis:
 -- description:
 license:             GPL-3
@@ -19,14 +19,12 @@ library
     default-language:   Haskell2010
     hs-source-dirs:     src
     exposed-modules:
-        Streams
         Event
         Encodings
         File
         Database
         Common
         CmdRecord
-        CmdReplay
         CmdArchive
     other-modules:
         Udp
@@ -72,6 +70,19 @@ library
         , attoparsec
         , transformers
         , ekg
+        , deepseq
+        , pipes
+        , pipes-concurrency
+        , pipes-parse
+        , pipes-safe
+        , pipes-group
+        , pipes-network
+        , pipes-binary
+        , pipes-attoparsec
+        , pipes-aeson
+        , pipes-bytestring
+        , pipes-postgresql-simple
+        , pipes-wai
 
 executable vcr
     default-language:   Haskell2010
@@ -81,7 +92,6 @@ executable vcr
     default-extensions: StrictData
     other-modules:
         CmdRecord
-        , CmdReplay
         , CmdArchive
         , Common
         , Encodings
@@ -90,7 +100,6 @@ executable vcr
         , Database
         , Udp
         , Process
-        , Streams
     build-depends:
         vcr
         , base < 5
@@ -131,20 +140,33 @@ executable vcr
         , attoparsec
         , transformers
         , ekg
+        , deepseq
+        , pipes
+        , pipes-concurrency
+        , pipes-parse
+        , pipes-safe
+        , pipes-group
+        , pipes-network
+        , pipes-binary
+        , pipes-attoparsec
+        , pipes-aeson
+        , pipes-bytestring
+        , pipes-postgresql-simple
+        , pipes-wai
 
 test-suite test-vcr
     type:               exitcode-stdio-1.0
     default-language:   Haskell2010
     hs-source-dirs:     tests
     main-is:            test.hs
-    ghc-options:        -O2 -Wall -rtsopts -funbox-strict-fields -threaded
+    ghc-options:        -O2 -Wall -rtsopts -funbox-strict-fields -with-rtsopts=-T -threaded
     default-extensions: StrictData
     other-modules:
         TestEncodings
         , TestEvent
-        , TestStreams
         , TestDatabase
         , TestCmdArchive
+        , TestPipes
     build-depends:
         vcr
         , stm
@@ -157,6 +179,8 @@ test-suite test-vcr
         , time
         , directory
         , containers
+        , pipes
+        , pipes-safe
         , temporary
         , tasty
         , tasty-hunit

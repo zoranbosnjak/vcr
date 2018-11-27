@@ -5,6 +5,8 @@
 -- This module provides common VCR definitions.
 --
 
+{-# LANGUAGE LambdaCase #-}
+
 module Common
 ( logM
 , threadDelaySec
@@ -14,13 +16,21 @@ module Common
 , timeOptions
 , subparserCmd
 , throw
-, check
 , kiloMega
+, drain
+, feed
+, forkConsumers
+, consumeWith
+, linkAsync
 ) where
 
+import           Data.Bool
+import qualified Control.Concurrent.Async as Async
 import           Control.Concurrent (threadDelay)
+import           Control.Concurrent.STM
 import           Control.Exception (throwIO, Exception)
-import           Control.Monad (unless)
+import           Control.Monad.Fix
+import           Control.DeepSeq
 import           Data.Monoid ((<>))
 import           Data.Time (UTCTime)
 import           Data.Typeable (Typeable)
@@ -31,6 +41,11 @@ import qualified System.Log.Logger as Log
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import           Text.Read (readMaybe)
+
+import           Pipes
+import qualified Pipes.Safe as PS
+import           Pipes.Internal (Proxy(Request, Respond, M, Pure), closed)
+import qualified Pipes.Concurrent as PC
 
 ------------------------------------------------------------------------------
 -- Logging and error reporting.
@@ -49,10 +64,6 @@ throw s = do
     let err = VcrError s
     logM Log.ERROR $ show err
     throwIO err
-
--- | Throw exception if the condition is not True.
-check :: Bool -> String -> IO ()
-check condition = unless condition . throw
 
 -- | Log a message.
 logM :: Log.Priority -> String -> IO ()
@@ -101,8 +112,6 @@ timeOptions _s = undefined
 
 -- | This is a copy of 'subparser' function with the addition
 -- of one more argument instead of fixed "COMMAND" string.
--- TODO: check if this can be implemented better or
--- move this function to Options.Applicative package.
 subparserCmd :: String -> Opt.Int.Mod Opt.Int.CommandFields a -> Opt.Parser a
 subparserCmd disp m = Opt.Int.mkParser d g rdr
   where
@@ -121,4 +130,87 @@ kiloMega = Opt.eitherReader $ \arg -> do
     case reads a of
         [(r, "")] -> return (r * (1024^(b::Int)))
         _         -> Left $ "cannot parse value `" ++ arg ++ "'"
+
+-- | Custom version of 'drain', where each element is
+-- fully evaluated, to prevent a leak.
+drain :: (NFData a, Monad m) => Consumer a m r
+drain = await >>= \x -> x `deepseq` drain
+
+-- | Check if the consumer is ready to accept new data.
+feed :: Monad m => Consumer a m r -> m (Either r (a -> Consumer a m r))
+feed = go
+  where
+    go p = case p of
+        Request _ fu -> return (Right fu)
+        Respond v _  -> closed v
+        M         m  -> m >>= go
+        Pure    r    -> return (Left r)
+
+-- | Distribute messages to multiple consumers.
+forkConsumers :: (NFData a, Monad m) => [Consumer a m r] -> Consumer a m r
+forkConsumers [] = drain
+forkConsumers cs = go cs
+  where
+    go lst = do
+        ready <- sequence <$> mapM (lift . feed) lst
+        case ready of
+            Left r -> return r
+            Right fs -> do
+                msg <- await
+                go (map ($ msg) fs)
+
+-- | Restart consumer on every reconfiguration.
+-- Make sure not to loose events even during reconfiguration.
+consumeWith :: (Eq t, Show t, PS.MonadSafe m) => String
+    -> STM t
+    -> (t -> Consumer a (PS.SafeT IO) r)
+    -> Consumer a m r
+consumeWith name getVar mkConsumer = do
+    q <- liftIO $ newEmptyTMVarIO
+    val <- liftIO $ atomically getVar
+    go q val
+  where
+    go q val = do
+        liftIO $ logM Log.INFO $ "restarting " ++ show name ++ ": " ++ show val
+        rv <- PS.bracket prepare finalize action
+        either return (go q) rv
+      where
+
+        newVal = getVar >>= \x -> bool retry (return x) (x /= val)
+
+        waitEmpty = isEmptyTMVar q >>= bool retry (return ())
+
+        p = fix $ \loop -> do
+            rv <- liftIO $ atomically $
+                fmap Left newVal `orElse` fmap Right (takeTMVar q)
+            case rv of
+                Left x -> return x
+                Right msg -> do
+                    yield msg
+                    loop
+
+        prepare = liftIO $ Async.async $ do
+            rv <- PS.runSafeT $ runEffect $
+                fmap Right p >-> fmap Left (mkConsumer val)
+            PC.performGC
+            return rv
+
+        finalize a = liftIO $ Async.cancel a
+
+        action a = fix $ \loop -> do
+            rv <- liftIO $ atomically $ do
+                fmap Left (Async.waitSTM a) `orElse` fmap Right waitEmpty
+            case rv of
+                Left r -> return r
+                Right () -> do
+                    msg <- await
+                    liftIO $ atomically $ putTMVar q msg
+                    loop
+
+-- | Start async process and link to the current thread.
+linkAsync :: IO a -> IO (Async.Async a)
+linkAsync act = do
+    a <- Async.async act
+    Async.link a
+    return a
 

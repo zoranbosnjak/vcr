@@ -22,14 +22,18 @@ import           System.Remote.Monitoring
 
 -- local imports
 import qualified Common as C
+import           CmdCapture (cmdCapture)
+{-
 import           CmdRecord    (cmdRecord)
 import           CmdArchive   (cmdArchive)
+-}
 
 -- | Available commands.
 commands :: [(String, Opt.ParserInfo (C.VcrOptions -> IO ()))]
 commands =
-    [ ("record",    cmdRecord)
-    , ("archive",   cmdArchive)
+    [ ("capture",    cmdCapture)
+    --("record",    cmdRecord)
+    --, ("archive",   cmdArchive)
     ]
 
 -- | Toplevel command line options.

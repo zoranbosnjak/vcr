@@ -11,15 +11,98 @@
 
 module Event where
 
-import           Data.String
-import qualified Data.Aeson
-import           Data.Aeson.Types (typeMismatch, object, (.=), (.:))
-import qualified Data.Serialize as Bin
+import           GHC.Generics (Generic)
+import           Data.Aeson
+import qualified Data.Time
+import qualified System.Clock
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Base64 as B64
+
+import Types
+import Encodings as Enc
+
+data Event = Event
+    { eChannel  :: Channel              -- name of the channel
+    , eSourceId :: SourceId             -- id of the recorder
+    , eUtcTime  :: Data.Time.UTCTime    -- capture utc time
+    , eMonoTime :: System.Clock.TimeSpec -- capture monotonic (boot) time
+    , eSessionId :: SessionId           -- monotonic time is valid only within
+    , eTrackId  :: TrackId              -- unique value for each channel startup
+                                        -- the same session ID
+    , eSequence :: Int                  -- incrementing (cyclic) sequence number
+    , eValue    :: BS.ByteString        -- the event value
+    } deriving (Generic, Eq, Show, Read)
+
+instance ToJSON Event where
+    toJSON (Event ch src tUtc tMono ses trk sn val) = object
+        [ "channel"     .= ch
+        , "recorder"    .= src
+        , "utcTime"     .= tUtc
+        , "monoTime"    .= System.Clock.toNanoSecs tMono
+        , "session"     .= ses
+        , "track"       .= trk
+        , "sequence"    .= sn
+        , "data"        .= Enc.hexlify val
+        ]
+
+instance FromJSON Event where
+    parseJSON = withObject "Event" $ \v -> Event
+        <$> v .: "channel"
+        <*> v .: "recorder"
+        <*> v .: "utcTime"
+        <*> fmap (System.Clock.fromNanoSecs) (v .: "monoTime")
+        <*> v .: "session"
+        <*> v .: "track"
+        <*> v .: "sequence"
+        <*> readStr (v .: "data")
+      where
+        readStr px = do
+            s <- px
+            maybe (fail "unable to parse") pure (Enc.unhexlify s)
+
+nextSequenceNum :: Int -> Int
+nextSequenceNum !i
+    | i == top = 0
+    | otherwise = succ i
+  where
+    top = 0x10000 - 1
+
+-- | Infinite list of pseudo random events for test purposes.
+randomEvents :: Rational -> Channel -> SourceId -> Data.Time.UTCTime
+    -> SessionId -> TrackId -> Int -> [Event]
+randomEvents dt ch rec startTime sid tid lnLimit =
+    loop e0
+  where
+    loop e = e:loop next where
+        utc = eUtcTime e
+        mono = eMonoTime e
+        nextMono =
+            let dtNano = round $ ((fromRational $ dt * 1000000000)::Double)
+            in System.Clock.fromNanoSecs $ (+ dtNano) $
+                System.Clock.toNanoSecs mono
+        next = e
+            { eUtcTime = Data.Time.addUTCTime (fromRational dt) utc
+            , eMonoTime = nextMono
+            , eSequence = nextSequenceNum $ eSequence e
+            , eValue = BS.take lnLimit $ B64.encode $ BS8.pack $ show e
+            }
+    e0 = Event
+        ch
+        rec
+        startTime
+        (System.Clock.TimeSpec 0 0)
+        sid
+        tid
+        minBound
+        (B64.encode "testData")
+
+{-
+import           Data.String
+import           Data.Aeson.Types (typeMismatch, object, (.=), (.:))
+import qualified Data.Serialize as Bin
+import qualified Data.ByteString as BS
 import           Data.Monoid ((<>))
-import           Control.DeepSeq
 
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Database.PostgreSQL.Simple.ToRow as PGTR
@@ -462,31 +545,5 @@ monoTimeToSeconds :: MonoTime -> Double
 monoTimeToSeconds (MonoTime t) =
     (/ (10^(9::Int))) $ fromInteger $ System.Clock.toNanoSecs t
 
--- | Infinite list of pseudo random events for test purposes.
-randomEvents :: Rational -> Channel -> SourceId -> Data.Time.UTCTime
-    -> SessionId -> TrackId -> Int -> [Event]
-randomEvents dt ch rec startTime sid tid lnLimit = loop e0 where
-    loop e = e:loop next where
-        UtcTime utc = eUtcTime e
-        MonoTime mono = eMonoTime e
-        nextMono =
-            let dtNano = round $ ((fromRational $ dt * 1000000000)::Double)
-            in System.Clock.fromNanoSecs $ (+ dtNano) $
-                System.Clock.toNanoSecs mono
-        next = e
-            { eUtcTime = UtcTime $ Data.Time.addUTCTime (fromRational dt) utc
-            , eMonoTime = MonoTime nextMono
-            , eSequence = nextSequenceNum $ eSequence e
-            , eValue =
-                Payload $ BS.take lnLimit $ B64.encode $ BS8.pack $ show e
-            }
-    e0 = Event
-        ch
-        rec
-        (UtcTime startTime)
-        (MonoTime $ System.Clock.TimeSpec 0 0)
-        sid
-        tid
-        minBound
-        (Payload $ B64.encode "testData")
+-}
 

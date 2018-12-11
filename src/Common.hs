@@ -8,7 +8,9 @@
 {-# LANGUAGE LambdaCase #-}
 
 module Common
-( logM
+( now, nowMono, nowUtc
+, monoTimeToSeconds
+, logM
 , threadDelaySec
 , Log.Priority(..)
 , VcrOptions(..)
@@ -41,11 +43,30 @@ import qualified System.Log.Logger as Log
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import           Text.Read (readMaybe)
+import qualified System.Clock
+import qualified Data.Time
 
 import           Pipes
 import qualified Pipes.Safe as PS
 import           Pipes.Internal (Proxy(Request, Respond, M, Pure), closed)
 import qualified Pipes.Concurrent as PC
+
+-- | Get current time (monotonic, UTC).
+now :: IO (System.Clock.TimeSpec, UTCTime)
+now = (,)
+    <$> System.Clock.getTime System.Clock.Boottime
+    <*> Data.Time.getCurrentTime
+
+nowMono :: IO System.Clock.TimeSpec
+nowMono = fst <$> now
+
+nowUtc :: IO UTCTime
+nowUtc = snd <$> now
+
+-- | Convert monotonic time to seconds.
+monoTimeToSeconds :: Fractional a => System.Clock.TimeSpec -> a
+monoTimeToSeconds t =
+    (/ (10^(9::Int))) $ fromInteger $ System.Clock.toNanoSecs t
 
 ------------------------------------------------------------------------------
 -- Logging and error reporting.

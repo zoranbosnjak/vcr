@@ -21,11 +21,10 @@ library
     exposed-modules:
         Event
         Encodings
-        File
-        Database
         Common
-        CmdRecord
-        CmdArchive
+        Types
+        Config
+        CmdCapture
     other-modules:
         Udp
         Process
@@ -83,6 +82,9 @@ library
         , pipes-bytestring
         , pipes-postgresql-simple
         , pipes-wai
+        , hw-kafka-client
+        , hzk
+        , dhall
 
 executable vcr
     default-language:   Haskell2010
@@ -91,15 +93,14 @@ executable vcr
     ghc-options:        -O2 -Wall -rtsopts -funbox-strict-fields -with-rtsopts=-T -threaded
     default-extensions: StrictData
     other-modules:
-        CmdRecord
-        , CmdArchive
-        , Common
-        , Encodings
-        , Event
-        , File
-        , Database
-        , Udp
-        , Process
+        Common
+        Event
+        Encodings
+        Udp
+        Process
+        Types
+        Config
+        CmdCapture
     build-depends:
         vcr
         , base < 5
@@ -153,6 +154,9 @@ executable vcr
         , pipes-bytestring
         , pipes-postgresql-simple
         , pipes-wai
+        , hw-kafka-client
+        , hzk
+        , dhall
 
 test-suite test-vcr
     type:               exitcode-stdio-1.0

@@ -10,7 +10,6 @@ import           GHC.Generics (Generic)
 import           Data.Text as Text
 import           Data.Aeson
 import           Data.Aeson.Types (typeMismatch)
-import qualified Data.HashMap.Strict as HMS
 import qualified Data.Map as Map
 
 type Host = Text
@@ -67,7 +66,7 @@ instance FromJSON UdpIn where
         _ -> typeMismatch "UdpIn" (Data.Aeson.String s)
     parseJSON t = typeMismatch "UdpIn" t
 
-type Channel = Text
+type Channel = String
 type SourceId = Text
 type SessionId = Text
 type TrackId = Text
@@ -75,14 +74,6 @@ type TrackId = Text
 newtype Inputs = Inputs (Map.Map Channel (Either String UdpIn))
     deriving (Generic, Eq, Show, Semigroup, Monoid)
 
-instance ToJSON Inputs where
-    toJSON (Inputs val) = object
-        [ key .= toJSON i | (key, i) <- Map.toList val ]
-
-instance FromJSON Inputs where
-    parseJSON (Data.Aeson.Object o) = do
-        lst <- sequence $ HMS.map parseJSON o
-        return $ Inputs $ Map.fromList
-            [(key, i) | (key, i) <- HMS.toList lst]
-    parseJSON t = typeMismatch "Inputs" t
+instance ToJSON Inputs
+instance FromJSON Inputs
 

@@ -203,8 +203,9 @@ processInputs getInputs act = do
                 "Auto restart input: ch: " ++ show ch ++ ", " ++ show param
 
 -- | Send consumed data to kafka cluster.
-toKafka :: [BrokerAddress] -> Consumer Event.Event (PS.SafeT IO) c
-toKafka kafka = PS.bracket prepare closeProducer go
+toKafka :: [BrokerAddress] -> TVar (Either String UTCTime)
+    -> Consumer Event.Event (PS.SafeT IO) c
+toKafka kafka lastKfk = PS.bracket prepare closeProducer go
   where
     prepare = newProducer producerProps >>= \case
         Left e -> fail $ show e
@@ -220,19 +221,28 @@ toKafka kafka = PS.bracket prepare closeProducer go
     producerProps :: ProducerProperties
     producerProps = brokersList kafka
          <> sendTimeout (Timeout 10000)
+         <> setCallback (deliveryCallback onDelivery)
 
     mkMessage :: Event.Event -> ProducerRecord
     mkMessage event = ProducerRecord
-        { prTopic = TopicName "test"
+        { prTopic = TopicName $ Event.eChannel event
         , prPartition = UnassignedPartition
         , prKey = Nothing
         , prValue = Just $ BSL.toStrict $ Data.Aeson.encode event
         }
 
+    onDelivery dr = do
+        t <- C.nowUtc
+        atomically $ writeTVar lastKfk $ case dr of
+            DeliverySuccess _ _ -> Right t
+            DeliveryFailure _ e -> Left $ "failure: " ++ show e
+            NoMessageError e -> Left $ "no message: " ++ show e
+
 -- | Single UDP input handler.
-udpInput :: [BrokerAddress] -> SourceId -> SessionId
+udpInput :: [BrokerAddress] -> TVar (Either String UTCTime)
+    -> SourceId -> SessionId
     -> (Channel, Either String UdpIn) -> IO ()
-udpInput kafka recId sesId (ch, eAddr) = case eAddr of
+udpInput kafka lastKfk recId sesId (ch, eAddr) = case eAddr of
     Left e -> do
         logM INFO $ "ch: " ++ show ch ++ "failure: " ++ e
         doNothing
@@ -243,7 +253,7 @@ udpInput kafka recId sesId (ch, eAddr) = case eAddr of
             Udp.udpReader addr
             >-> PP.map fst
             >-> go trackId 0
-            >-> toKafka kafka
+            >-> toKafka kafka lastKfk
   where
     go trackId !sn = do
         s <- await
@@ -269,8 +279,10 @@ logUptime start d = forever $ do
 -- | HTTP server for simple process monitoring.
 httpServer :: UTCTime -> Clk.TimeSpec -> SessionId
     -> TVar (Either String ZkConfig)
-    -> (String, Warp.Port) -> IO ()
-httpServer startTimeUtc startTimeMono sesId zkConfig (ip, port) = do
+    -> TVar (Either String UTCTime)
+    -> (String, Warp.Port)
+    -> IO ()
+httpServer startTimeUtc startTimeMono sesId zkConfig lastKfk (ip, port) = do
     let settings =
             Warp.setPort port $
             Warp.setHost (fromString ip) $
@@ -307,9 +319,11 @@ httpServer startTimeUtc startTimeMono sesId zkConfig (ip, port) = do
 
         go ["status"] GET = do
             zkConfig' <- atomically $ readTVar zkConfig
+            lastKfk' <- atomically $ readTVar lastKfk
             let stat = object
                     [ "session" .= sesId
                     , "config"  .= zkConfig'
+                    , "kafka update" .= lastKfk'
                     ]
             respond $ responseLBS status200 [("Content-Type", "text/plain")]
                 (Enc.jsonEncodePretty stat <> "\n")
@@ -356,6 +370,9 @@ runCmd opts vcrOpts = do
     let zkFailure = "Reading zookeeper config" :: String
     zkConfig <- newTVarIO $ Left zkFailure
 
+    -- either error or time of last kafka message delivery
+    lastKfk <- newTVarIO $ Left "init"
+
     ZK.setDebugLevel ZK.ZLogError
 
     runAll
@@ -378,11 +395,12 @@ runCmd opts vcrOpts = do
                     C.threadDelaySec 1
 
         , process_ "http" $ maybe doNothing
-            (httpServer startTimeUtc startTimeMono sesId zkConfig)
+            (httpServer startTimeUtc startTimeMono sesId zkConfig lastKfk)
             (optHttp opts)
 
         , process_ "data flow" $ whenRight cfgInputs zkConfig $ \i ->
-            processInputs (readTVar i) $ udpInput (optKafka opts) recId sesId
+            processInputs (readTVar i) $
+                udpInput (optKafka opts) lastKfk recId sesId
 
         ]
 

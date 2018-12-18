@@ -48,8 +48,8 @@ propEncodeDecodeMulti fmt lst =
 -- | test leap seconds
 propLeapEncodeDecode :: EncodeFormat -> Event -> Property
 propLeapEncodeDecode fmt e' = prop where
-    e = e' {eUtcTime = UtcTime t}
-    UtcTime u = eUtcTime e'
+    e = e' {eUtcTime = t}
+    u = eUtcTime e'
     t = UTCTime
             (utctDay u)
             (picosecondsToDiffTime (24*3600*(10^(12::Int))-1))

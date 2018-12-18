@@ -17,6 +17,7 @@ type Mcast = Text
 type Ip = Text
 type Port = Text
 type TTL = Int
+type ZkEndpoint = String
 
 skipWords :: Int -> String -> String
 skipWords n y

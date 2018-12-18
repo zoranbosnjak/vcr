@@ -5,9 +5,9 @@ import Test.Tasty
 import TestEncodings (testEncodings)
 import TestEvent (testEvent)
 import TestPipes (testPipes)
-import TestDatabase (testDatabase)
+-- import TestDatabase (testDatabase)
 
-import TestCmdArchive (testCmdArchive)
+-- import TestCmdArchive (testCmdArchive)
 
 main :: IO ()
 main = defaultMain $ testGroup "Tests"
@@ -15,10 +15,10 @@ main = defaultMain $ testGroup "Tests"
         [ testEncodings
         , testEvent
         , testPipes
-        , testDatabase
+        -- , testDatabase
         ]
     , testGroup "Commands"
-        [ testCmdArchive
+        [ --testCmdArchive
         ]
     ]
 

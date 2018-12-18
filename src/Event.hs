@@ -15,9 +15,14 @@ import           GHC.Generics (Generic)
 import           Data.Aeson
 import qualified Data.Time
 import qualified System.Clock
+import qualified Data.Text as T
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Base64 as B64
+import qualified Data.Serialize as Bin
+import qualified Data.Text.Encoding as TE
+import           Test.QuickCheck
+                    (Arbitrary, arbitrary, getPositive, choose, resize)
 
 import Types
 import Encodings as Enc
@@ -33,6 +38,66 @@ data Event = Event
     , eSequence :: Int                  -- incrementing (cyclic) sequence number
     , eValue    :: BS.ByteString        -- the event value
     } deriving (Generic, Eq, Show, Read)
+
+instance Arbitrary Event where
+    arbitrary = Event
+        <$> arbitrary
+        <*> fmap T.pack arbitrary
+        <*> utc
+        <*> mono
+        <*> fmap T.pack arbitrary
+        <*> fmap T.pack arbitrary
+        <*> arbitrary
+        <*> fmap BS.pack (resize 1000 arbitrary)
+      where
+        utc = do
+            a <- day
+            b <- diffT
+            return $ Data.Time.UTCTime a b
+          where
+            day = Data.Time.fromGregorian
+                <$> choose (1000, 9999)
+                <*> choose (1,12)
+                <*> choose (1,31)
+            diffT = Data.Time.picosecondsToDiffTime
+                <$> choose (0, (24*3600*(10^(12::Int))-1))
+        mono = do
+            a <- fmap getPositive arbitrary
+            b <- choose (0, 999999999)
+            return $ System.Clock.TimeSpec a b
+
+instance Bin.Serialize Event where
+    put e = do
+        Bin.put $ eChannel e
+        Bin.put $ TE.encodeUtf8 $ eSourceId e
+        Bin.put
+            ( Data.Time.toGregorian $ Data.Time.utctDay $ eUtcTime e
+            , Data.Time.diffTimeToPicoseconds $ Data.Time.utctDayTime $ eUtcTime e
+            )
+        Bin.put
+            ( System.Clock.sec $ eMonoTime e
+            , System.Clock.nsec $ eMonoTime e
+            )
+        Bin.put $ TE.encodeUtf8 $ eSessionId e
+        Bin.put $ TE.encodeUtf8 $ eTrackId e
+        Bin.put $ eSequence e
+        Bin.put $ eValue e
+
+    get = Event
+        <$> Bin.get
+        <*> fmap TE.decodeUtf8 Bin.get
+        <*> do
+            (a,b,c) <- Bin.get
+            ps <- Bin.get
+            return $ Data.Time.UTCTime (Data.Time.fromGregorian a b c) (Data.Time.picosecondsToDiffTime ps)
+        <*> do
+            a <- Bin.get
+            b <- Bin.get
+            return $ System.Clock.TimeSpec a b
+        <*> fmap TE.decodeUtf8 Bin.get
+        <*> fmap TE.decodeUtf8 Bin.get
+        <*> Bin.get
+        <*> Bin.get
 
 instance ToJSON Event where
     toJSON (Event ch src tUtc tMono ses trk sn val) = object
@@ -100,7 +165,6 @@ randomEvents dt ch rec startTime sid tid lnLimit =
 {-
 import           Data.String
 import           Data.Aeson.Types (typeMismatch, object, (.=), (.:))
-import qualified Data.Serialize as Bin
 import qualified Data.ByteString as BS
 import           Data.Monoid ((<>))
 
@@ -118,14 +182,11 @@ import qualified Database.SQLite.Simple.FromField as SLFF
 
 import           Text.Read
 import qualified Data.Time
-import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import           Data.Text (Text)
 import           GHC.Generics (Generic)
 import qualified Options.Applicative as Opt
 import qualified System.Clock
-import           Test.QuickCheck
-                    (Arbitrary, arbitrary, getPositive, choose, resize)
 
 -- local imports
 import qualified Encodings as Enc
@@ -206,7 +267,6 @@ instance SLFR.FromRow Event where
         <*> SLFR.field
         <*> SLFR.field
 
-instance Bin.Serialize Event
 
 -- | One possible way to order events (by distinct key).
 instance Ord Event where
@@ -214,17 +274,6 @@ instance Ord Event where
         compare (eChannel a) (eChannel b)
         `mappend` compare (eSessionId a) (eSessionId b)
         `mappend` compare (eMonoTime a) (eMonoTime b)
-
-instance Arbitrary Event where
-    arbitrary = Event
-        <$> arbitrary
-        <*> arbitrary
-        <*> arbitrary
-        <*> arbitrary
-        <*> arbitrary
-        <*> arbitrary
-        <*> arbitrary
-        <*> arbitrary
 
 instance Data.Aeson.ToJSON Event where
     toJSON
@@ -348,18 +397,6 @@ instance SLFF.FromField UtcTime where
     fromField f = UtcTime <$> SLFF.fromField f
 instance NFData UtcTime
 
-instance Arbitrary UtcTime where
-    arbitrary = do
-        a <- day
-        b <- diffT
-        return $ UtcTime $ Data.Time.UTCTime a b
-      where
-        day = Data.Time.fromGregorian
-            <$> choose (1000, 9999)
-            <*> choose (1,12)
-            <*> choose (1,31)
-        diffT = Data.Time.picosecondsToDiffTime
-            <$> choose (0, (24*3600*(10^(12::Int))-1))
 
 instance Bin.Serialize UtcTime where
     put (UtcTime t) = do
@@ -389,12 +426,6 @@ instance Read MonoTime where
 instance NFData MonoTime where
     rnf (MonoTime t) =
         System.Clock.sec t `deepseq` System.Clock.nsec t `deepseq` ()
-
-instance Arbitrary MonoTime where
-    arbitrary = do
-        a <- fmap getPositive arbitrary
-        b <- choose (0, 999999999)
-        return $ MonoTime $ System.Clock.TimeSpec a b
 
 instance Bin.Serialize MonoTime where
     put (MonoTime t) = do

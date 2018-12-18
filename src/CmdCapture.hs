@@ -3,12 +3,24 @@
 --
 -- 'capture' command
 --
+-- Configuration options:
+--  - configuration from file
+--  - configuration from zookeeper
+--      In this case, the file configuration will be automatically
+--      overwritten on each change from zookeeper.
+--      It makes sense to put dynamic config file to /var/run/...
+--
+-- Save data to (one or both):
+--  - rotating file
+--  - kafka cluster
+--
 -- TODO: - IPv6 support on unicast/multicast input "[ipv6]", "ip" syntax
 
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module CmdCapture where
 
@@ -21,6 +33,7 @@ import qualified Data.Map as Map
 import           Data.Text as Text
 import           Data.String (fromString)
 import           Data.Aeson
+import           Data.Bool
 import           Network.BSD (getHostName)
 import           Data.Maybe (fromMaybe)
 import qualified Data.UUID
@@ -35,9 +48,11 @@ import qualified System.Clock as Clk
 import           Network.Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import           Network.HTTP.Types
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import           Data.Time (UTCTime)
+import           System.Posix.Files (touchFile)
 import qualified Control.Exception as Ex
 import           Pipes
 import qualified Pipes.Safe as PS
@@ -54,47 +69,81 @@ import           Process
 import qualified Encodings as Enc
 import qualified Udp
 import qualified Event
+import qualified File
+
+type KafkaUpdate = Either String UTCTime
+
+data DstFile = DstFile File.FileStore Enc.EncodeFormat (Maybe File.Rotate)
+    deriving (Generic, Eq, Show)
+
+data DstKafka = DstKafka [BrokerAddress]
+    deriving (Generic, Eq, Show)
+
+data ZkConnection = ZkConnection ZkEndpoint ZK.Timeout
+    deriving (Generic, Eq, Show)
 
 -- | Speciffic command options.
 data CmdOptions = CmdOptions
-    { optZk         :: String
-    , optZkTimeout  :: ZK.Timeout
-    , optKafka      :: [BrokerAddress]
-    , optIdent      :: Maybe SourceId
+    { optIdent      :: Maybe SourceId
+    , optConfigFile :: Maybe FilePath
+    , optZookeeper  :: Maybe ZkConnection
+    , optDstFile    :: Maybe DstFile
+    , optDstKafka   :: Maybe DstKafka
     , optLogUptime  :: Maybe Double
     , optHttp       :: Maybe (String, Int)
-    } deriving (Eq, Show)
-
--- | Zookeeper configuration.
-data ZkConfig = ZkConfig
-    { cfgInputs :: Inputs
     } deriving (Generic, Eq, Show)
-instance ToJSON ZkConfig
-instance FromJSON ZkConfig
+
+dstFile :: Parser DstFile
+dstFile = C.subparserCmd "file ..." $
+    command "file" $ info
+        (opts <**> helper)
+        (progDesc "Store data to a (rotating) file")
+  where
+    opts = DstFile
+        <$> File.fileStoreOptions
+        <*> Enc.encodeFormatOptions
+        <*> optional File.rotateOptions
+
+dstKafka :: Parser DstKafka
+dstKafka = C.subparserCmd "kafka ..." $
+    command "kafka" $ info
+        (opts <**> helper)
+        (progDesc "Store data to a kafka cluster")
+  where
+    opts = DstKafka
+        <$> some ( BrokerAddress <$> strOption
+            ( long "kafka"
+           <> help "Broker address, eg: localhost:9092"
+            ))
 
 -- | Command option parser.
 options :: Parser CmdOptions
 options = CmdOptions
-    <$> strOption
-        ( long "zookeeper"
-       <> metavar "ZK"
-       <> help "zookeeper endpoint, eg: localhost:2181,localhost:2182/foobar"
-        )
-    <*> option auto
-        ( long "zookeeperTimeout"
-       <> metavar "ms"
-       <> help "zookeeper connection timeout in miliseconds"
-       <> value 6000
-        )
-    <*> some ( BrokerAddress <$> strOption
-        ( long "kafka"
-       <> help "Broker address, eg: localhost:9092"
-        ))
-    <*> optional ( strOption
+    <$> optional ( strOption
         ( long "ident"
        <> metavar "IDENT"
        <> help "Recorder identifier"
         ))
+    <*> optional ( strOption
+        ( long "config"
+       <> metavar "FILE"
+       <> help "config file"
+        ))
+    <*> optional ( ZkConnection
+        <$> strOption
+            ( long "zookeeper"
+           <> metavar "ZK"
+           <> help "zookeeper endpoint, eg: localhost:2181,localhost:2182/foobar"
+            )
+        <*> option auto
+            ( long "zookeeperTimeout"
+           <> metavar "ms"
+           <> help "zookeeper connection timeout in miliseconds"
+           <> value 6000
+            )
+        )
+    <*> optional dstFile
+    <*> optional dstKafka
     <*> optional ( option auto
         ( long "logUptime"
        <> help "Log uptime every N seconds"
@@ -202,47 +251,10 @@ processInputs getInputs act = do
             logM INFO $
                 "Auto restart input: ch: " ++ show ch ++ ", " ++ show param
 
--- | Send consumed data to kafka cluster.
-toKafka :: [BrokerAddress] -> TVar (Either String UTCTime)
-    -> Consumer Event.Event (PS.SafeT IO) c
-toKafka kafka lastKfk = PS.bracket prepare closeProducer go
-  where
-    prepare = newProducer producerProps >>= \case
-        Left e -> fail $ show e
-        Right prod -> return prod
-
-    go prod = forever $ do
-        event <- await
-        rv <- liftIO $ produceMessage prod (mkMessage event)
-        case rv of
-            Nothing -> return ()
-            Just e -> liftIO $ logM NOTICE $ show e
-
-    producerProps :: ProducerProperties
-    producerProps = brokersList kafka
-         <> sendTimeout (Timeout 10000)
-         <> setCallback (deliveryCallback onDelivery)
-
-    mkMessage :: Event.Event -> ProducerRecord
-    mkMessage event = ProducerRecord
-        { prTopic = TopicName $ Event.eChannel event
-        , prPartition = UnassignedPartition
-        , prKey = Nothing
-        , prValue = Just $ BSL.toStrict $ Data.Aeson.encode event
-        }
-
-    onDelivery dr = do
-        t <- C.nowUtc
-        atomically $ writeTVar lastKfk $ case dr of
-            DeliverySuccess _ _ -> Right t
-            DeliveryFailure _ e -> Left $ "failure: " ++ show e
-            NoMessageError e -> Left $ "no message: " ++ show e
-
 -- | Single UDP input handler.
-udpInput :: [BrokerAddress] -> TVar (Either String UTCTime)
-    -> SourceId -> SessionId
-    -> (Channel, Either String UdpIn) -> IO ()
-udpInput kafka lastKfk recId sesId (ch, eAddr) = case eAddr of
+udpInput :: SourceId -> SessionId -> Consumer Event.Event (PS.SafeT IO) ()
+    -> (Channel, Either [Char] UdpIn) -> IO ()
+udpInput recId sesId dst (ch, eAddr) = case eAddr of
     Left e -> do
         logM INFO $ "ch: " ++ show ch ++ "failure: " ++ e
         doNothing
@@ -253,7 +265,7 @@ udpInput kafka lastKfk recId sesId (ch, eAddr) = case eAddr of
             Udp.udpReader addr
             >-> PP.map fst
             >-> go trackId 0
-            >-> toKafka kafka lastKfk
+            >-> dst
   where
     go trackId !sn = do
         s <- await
@@ -278,11 +290,14 @@ logUptime start d = forever $ do
 
 -- | HTTP server for simple process monitoring.
 httpServer :: UTCTime -> Clk.TimeSpec -> SessionId
-    -> TVar (Either String ZkConfig)
-    -> TVar (Either String UTCTime)
+    -> TVar BS.ByteString
+    -> TVar (Maybe String)
+    -> TVar Inputs
+    -> TVar (Maybe String)
+    -> TVar KafkaUpdate
     -> (String, Warp.Port)
     -> IO ()
-httpServer startTimeUtc startTimeMono sesId zkConfig lastKfk (ip, port) = do
+httpServer startTimeUtc startTimeMono sesId rawConfig configError inputs zkError kfkStatus (ip,port) = do
     let settings =
             Warp.setPort port $
             Warp.setHost (fromString ip) $
@@ -317,13 +332,24 @@ httpServer startTimeUtc startTimeMono sesId zkConfig lastKfk (ip, port) = do
             [("Content-Type", "text/plain")]
             (BSL8.pack $ show sesId ++ "\n")
 
+        go ["config"] GET = do
+            val <- atomically $ readTVar rawConfig
+            respond $ responseLBS status200 [("Content-Type", "text/plain")]
+                (BSL8.fromStrict val <> "\n")
+
+        go ["inputs"] GET = do
+            val <- atomically $ readTVar inputs
+            respond $ responseLBS status200 [("Content-Type", "text/plain")]
+                (Enc.jsonEncodePretty val <> "\n")
+
         go ["status"] GET = do
-            zkConfig' <- atomically $ readTVar zkConfig
-            lastKfk' <- atomically $ readTVar lastKfk
+            configError' <- atomically $ readTVar configError
+            zkError' <- atomically $ readTVar zkError
+            kfkStatus' <- atomically $ readTVar kfkStatus
             let stat = object
-                    [ "session" .= sesId
-                    , "config"  .= zkConfig'
-                    , "kafka update" .= lastKfk'
+                    [ "config error"    .= configError'
+                    , "zookeeper error" .= zkError'
+                    , "kakfa status"    .= show kfkStatus'
                     ]
             respond $ responseLBS status200 [("Content-Type", "text/plain")]
                 (Enc.jsonEncodePretty stat <> "\n")
@@ -334,23 +360,110 @@ httpServer startTimeUtc startTimeMono sesId zkConfig lastKfk (ip, port) = do
             [("Content-Type", "text/plain")]
             "404 - Not Found\n"
 
--- | Start action when input value becomes 'Right', then update 'Right' values.
-whenRight :: (Eq c) => (b -> c) -> TVar (Either a b) -> (TVar c -> IO d) -> IO d
-whenRight getter x act = do
-    initial <- atomically (fetch >>= either (const retry) return)
-    var <- newTVarIO initial
-    withAsync (monitor var initial) $ \_ -> act var
+-- | Converter from raw input to (config error, inputs).
+configMonitor :: SourceId -> TVar BS.ByteString -> TVar (Maybe String)
+    -> TVar Inputs -> IO b
+configMonitor recId rawConfig configError inputs = do
+    (atomically $ readTVar rawConfig) >>= loop
   where
-    fetch = fmap getter <$> readTVar x
-    monitor var prev = do
-        current <- atomically $ fetch >>= \case
-            Left _ -> retry
-            Right val -> case val == prev of
-                True -> retry
-                False -> do
-                    writeTVar var val
+    loop raw = do
+        case inputConfig recId raw of
+            Left e -> atomically $ writeTVar configError $ Just e
+            Right val -> atomically $ do
+                writeTVar configError Nothing
+                writeTVar inputs val
+        y <- atomically $ do
+            y <- readTVar rawConfig
+            bool (return y) retry (y == raw)
+        loop y
+
+-- Auto write any change from 'rawConfig' to a file,
+-- assume initial file is up-to-date.
+monFile :: TVar BS.ByteString -> FilePath -> IO b
+monFile rawConfig f = (atomically $ readTVar rawConfig) >>= loop where
+    loop x = do
+        y <- atomically $ do
+            y <- readTVar rawConfig
+            bool (return y) retry (x == y)
+        logM INFO $ "config changed, writing to " ++ show f
+        BS.writeFile f y
+        loop y
+
+-- periodically update from zookeeper to 'rawConfig'
+monZk :: TVar (Maybe String) -> TVar BS.ByteString -> ZkConnection -> IO a
+monZk zkError rawConfig (ZkConnection zkEndpoint zkTimeout) = do
+    ZK.withZookeeper zkEndpoint zkTimeout Nothing Nothing $ \zk -> forever $ do
+        rv <- race (threadDelay (zkTimeout*1000)) $ fix $ \loop -> do
+            ZK.get zk "/inputs" Nothing >>= \case
+                Left e -> do
+                    atomically $ writeTVar zkError $ Just $ "ZKError: " ++ show e
+                    loop
+                Right (Nothing,_) -> do
+                    atomically $ writeTVar zkError $ Just "No content"
+                    loop
+                Right (Just val,_) -> do
                     return val
-        monitor var current
+        case rv of
+            Left _ -> do
+                atomically $ writeTVar zkError $ Just "ZK timeout"
+            Right s -> atomically $ do
+                writeTVar zkError Nothing
+                writeTVar rawConfig s
+        C.threadDelaySec 1
+
+-- | Send data to rotating file.
+toFile :: TChan Event.Event -> DstFile -> IO ()
+toFile q (DstFile fs enc mRot) = do
+    src <- atomically $ dupTChan q
+    let fromQueue = forever ((liftIO $ atomically $ readTChan src) >>= yield)
+    PS.runSafeT $ runEffect $
+        fromQueue
+        >-> PP.map (Enc.encode enc)
+        >-> File.rotatingFileWriter open mRot (logM INFO)
+  where
+    open = case fs of
+        File.FileStore "-" -> File.streamStdout
+        File.FileStore f -> File.streamHandle f
+
+-- | Send data to kafka cluster.
+toKafka :: TChan Event.Event -> (Either String UTCTime -> STM ()) -> DstKafka -> IO ()
+toKafka q setStatus (DstKafka kafka) = do
+    src <- atomically $ dupTChan q
+    let fromQueue = forever ((liftIO $ atomically $ readTChan src) >>= yield)
+    PS.runSafeT $ runEffect $
+        fromQueue
+        >-> PS.bracket prepare closeProducer go
+  where
+    prepare = newProducer producerProps >>= \case
+        Left e -> fail $ show e
+        Right prod -> return prod
+
+    go prod = forever $ do
+        event <- await
+        rv <- liftIO $ produceMessage prod (mkMessage event)
+        case rv of
+            Nothing -> return ()
+            Just e -> liftIO $ logM NOTICE $ show e
+
+    producerProps :: ProducerProperties
+    producerProps = brokersList kafka
+         <> sendTimeout (Timeout 10000)
+         <> setCallback (deliveryCallback onDelivery)
+
+    mkMessage :: Event.Event -> ProducerRecord
+    mkMessage event = ProducerRecord
+        { prTopic = TopicName $ Event.eChannel event
+        , prPartition = UnassignedPartition
+        , prKey = Nothing
+        , prValue = Just $ BSL.toStrict $ Data.Aeson.encode event
+        }
+
+    onDelivery dr = do
+        t <- C.nowUtc
+        atomically $ setStatus $ case dr of
+            DeliverySuccess _ _ -> Right t
+            DeliveryFailure _ e -> Left $ "failure: " ++ show e
+            NoMessageError e -> Left $ "no message: " ++ show e
 
 -- | Run command.
 runCmd :: CmdOptions -> C.VcrOptions -> IO ()
@@ -359,6 +472,7 @@ runCmd opts vcrOpts = do
     logM INFO $ "startup " ++ show startTimeUtc
     logM INFO $
         "command 'record', opts: " ++ show opts ++ ", vcrOpts: " ++ show vcrOpts
+
     recId <- do
         hostname <- Text.pack <$> getHostName
         return $ fromMaybe hostname $ optIdent opts
@@ -367,42 +481,54 @@ runCmd opts vcrOpts = do
     sesId <- Data.UUID.toText <$> nextRandom
     logM INFO $ "session: " ++ show sesId
 
-    let zkFailure = "Reading zookeeper config" :: String
-    zkConfig <- newTVarIO $ Left zkFailure
+    rawConfig <- newTVarIO =<< case optConfigFile opts of
+        Nothing -> return BS.empty
+        Just f -> touchFile f >> BS.readFile f
 
-    -- either error or time of last kafka message delivery
-    lastKfk <- newTVarIO $ Left "init"
+    configError <- newTVarIO Nothing
 
-    ZK.setDebugLevel ZK.ZLogError
+    inputs <- newTVarIO (mempty :: Inputs)
+
+    zkError <- newTVarIO Nothing
+
+    kfkStatus <- newTVarIO $ Right startTimeUtc
+
+    q <- newBroadcastTChanIO
+    let toQueue :: Consumer Event.Event (PS.SafeT IO) c
+        toQueue = PP.mapM_ (liftIO . atomically . writeTChan q)
 
     runAll
         [ process_ "uptime" $
-            maybe doNothing (logUptime startTimeMono) (optLogUptime opts)
+            runMaybe (optLogUptime opts) (logUptime startTimeMono)
 
-        , process_ "zkConfig" $ do
-            let timeout = optZkTimeout opts
-            ZK.withZookeeper (optZk opts) timeout Nothing Nothing $ \zk ->
-                forever $ do
-                    rv <- race (threadDelay (timeout*1000)) $ fix $ \loop -> do
-                        ZK.get zk "/inputs" Nothing >>= \case
-                            Left _ -> loop
-                            Right (Nothing,_) -> loop
-                            Right (Just val,_) -> return val
-                    let cfg = case rv of
-                            Left _ -> Left zkFailure
-                            Right s -> ZkConfig <$> inputConfig recId s
-                    atomically $ writeTVar zkConfig cfg
-                    C.threadDelaySec 1
+        , process_ "config -> inputs" $
+            configMonitor recId rawConfig configError inputs
+
+        , process_ "config file monitor" $      -- write config to a file
+            runMaybe (optConfigFile opts) (monFile rawConfig)
+
+        , process_ "zookeeper monitor" $        -- read config from zookeeper
+            runMaybe (optZookeeper opts) (monZk zkError rawConfig)
 
         , process_ "http" $ maybe doNothing
-            (httpServer startTimeUtc startTimeMono sesId zkConfig lastKfk)
+            (httpServer startTimeUtc startTimeMono sesId rawConfig
+                configError inputs zkError kfkStatus)
             (optHttp opts)
 
-        , process_ "data flow" $ whenRight cfgInputs zkConfig $ \i ->
-            processInputs (readTVar i) $
-                udpInput (optKafka opts) lastKfk recId sesId
+        , process_ "data capture" $
+            processInputs (readTVar inputs) $ udpInput recId sesId toQueue
 
+        , process_ "file writer" $
+            runMaybe (optDstFile opts) $ toFile q
+
+        , process_ "kafka writer" $
+            runMaybe (optDstKafka opts) $ \dst -> do
+                ZK.setDebugLevel ZK.ZLogError
+                let setStatus = writeTVar kfkStatus
+                toKafka q setStatus dst
         ]
+  where
+    runMaybe = flip (maybe doNothing)
 
 -- | toplevel command
 cmdCapture :: ParserInfo (C.VcrOptions -> IO ())

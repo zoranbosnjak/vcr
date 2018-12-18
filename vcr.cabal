@@ -24,6 +24,7 @@ library
         Common
         Types
         Config
+        File
         CmdCapture
     other-modules:
         Udp
@@ -100,6 +101,7 @@ executable vcr
         Process
         Types
         Config
+        File
         CmdCapture
     build-depends:
         vcr
@@ -168,8 +170,6 @@ test-suite test-vcr
     other-modules:
         TestEncodings
         , TestEvent
-        , TestDatabase
-        , TestCmdArchive
         , TestPipes
     build-depends:
         vcr

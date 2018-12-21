@@ -36,6 +36,7 @@ data Event = Event
     , eTrackId  :: TrackId              -- unique value for each channel startup
                                         -- the same session ID
     , eSequence :: Int                  -- incrementing (cyclic) sequence number
+    , eAddr     :: String               -- source address
     , eValue    :: BS.ByteString        -- the event value
     } deriving (Generic, Eq, Show, Read)
 
@@ -47,6 +48,7 @@ instance Arbitrary Event where
         <*> mono
         <*> fmap T.pack arbitrary
         <*> fmap T.pack arbitrary
+        <*> choose sequenceRange
         <*> arbitrary
         <*> fmap BS.pack (resize 1000 arbitrary)
       where
@@ -81,6 +83,7 @@ instance Bin.Serialize Event where
         Bin.put $ TE.encodeUtf8 $ eSessionId e
         Bin.put $ TE.encodeUtf8 $ eTrackId e
         Bin.put $ eSequence e
+        Bin.put $ eAddr e
         Bin.put $ eValue e
 
     get = Event
@@ -98,9 +101,10 @@ instance Bin.Serialize Event where
         <*> fmap TE.decodeUtf8 Bin.get
         <*> Bin.get
         <*> Bin.get
+        <*> Bin.get
 
 instance ToJSON Event where
-    toJSON (Event ch src tUtc tMono ses trk sn val) = object
+    toJSON (Event ch src tUtc tMono ses trk sn addr val) = object
         [ "channel"     .= ch
         , "recorder"    .= src
         , "utcTime"     .= tUtc
@@ -108,6 +112,7 @@ instance ToJSON Event where
         , "session"     .= ses
         , "track"       .= trk
         , "sequence"    .= sn
+        , "addr"        .= addr
         , "data"        .= Enc.hexlify val
         ]
 
@@ -120,18 +125,20 @@ instance FromJSON Event where
         <*> v .: "session"
         <*> v .: "track"
         <*> v .: "sequence"
+        <*> v .: "addr"
         <*> readStr (v .: "data")
       where
         readStr px = do
             s <- px
             maybe (fail "unable to parse") pure (Enc.unhexlify s)
 
+sequenceRange :: (Int, Int)
+sequenceRange = (0, 0x10000-1)
+
 nextSequenceNum :: Int -> Int
 nextSequenceNum !i
-    | i == top = 0
+    | i >= (snd sequenceRange) = fst sequenceRange
     | otherwise = succ i
-  where
-    top = 0x10000 - 1
 
 -- | Infinite list of pseudo random events for test purposes.
 randomEvents :: Rational -> Channel -> SourceId -> Data.Time.UTCTime
@@ -159,7 +166,8 @@ randomEvents dt ch rec startTime sid tid lnLimit =
         (System.Clock.TimeSpec 0 0)
         sid
         tid
-        minBound
+        (fst sequenceRange)
+        "test source"
         (B64.encode "testData")
 
 {-

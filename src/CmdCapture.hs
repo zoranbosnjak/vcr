@@ -263,14 +263,14 @@ udpInput recId sesId dst (ch, eAddr) = case eAddr of
         logM INFO $ "ch: " ++ show ch ++ " -> trackId: " ++ show trackId
         PS.runSafeT $ runEffect $
             Udp.udpReader addr
-            >-> go trackId 0
+            >-> go addr trackId 0
             >-> dst
   where
-    go trackId !sn = do
+    go listener trackId !sn = do
         (s, addr) <- await
         (tMono, tUtc) <- liftIO C.now
-        yield $ Event.Event ch recId tUtc tMono sesId trackId sn (show addr) s
-        go trackId (Event.nextSequenceNum sn)
+        yield $ Event.Event ch recId tUtc tMono sesId trackId sn (show addr) (show listener) s
+        go listener trackId (Event.nextSequenceNum sn)
 
 -- | Get uptime (in days)
 getUptimeDays :: Clk.TimeSpec -> IO Double

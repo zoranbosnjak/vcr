@@ -1,0 +1,6 @@
+{
+  "name": "nixos-pinned",
+  "url": "https://github.com/NixOS/nixpkgs-channels.git",
+  "ref": "nixos-unstable",
+  "rev": "7827d3f4497ed722fedca57fd4d5ca1a65c38256"
+}

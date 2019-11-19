@@ -80,12 +80,12 @@ runAlarm (Alarm t q alm) = waitMessage where
         waitMessage
 
 -- | Refresh alarm with new message.
-refreshAlarm :: Alarm a -> a -> IO ()
-refreshAlarm alm val = atomically $ writeTQueue (almQueue alm) val
+refreshAlarm :: Alarm a -> a -> STM ()
+refreshAlarm alm val = writeTQueue (almQueue alm) val
 
 -- | Get current alarm value.
-getAlarm :: Alarm a -> IO (Maybe a)
-getAlarm = atomically . readTVar . almAlm
+getAlarm :: Alarm a -> STM (Maybe a)
+getAlarm = readTVar . almAlm
 
 -- | Wait for given number of seconds.
 threadDelaySec :: Double -> IO ()
@@ -141,8 +141,9 @@ unhexlify st = do
 
 -- | Setup logging, return logM function.
 setupLogging :: Prog -> String -> Maybe Priority -> Maybe Priority
+    -> Maybe (Priority -> String -> String -> IO ())
     -> IO (LoggerName -> Priority -> String -> IO ())
-setupLogging pName cmdName optVerbose optSyslog = do
+setupLogging pName cmdName optVerbose optSyslog optAux = do
 
     -- setup logging
     when (isJust optVerbose || isJust optSyslog) $ do
@@ -162,6 +163,9 @@ setupLogging pName cmdName optVerbose optSyslog = do
     let logM :: LoggerName -> Priority -> String -> IO ()
         logM name prio s = do
             Log.logM fullName prio msg
+            case optAux of
+                Nothing -> return ()
+                Just func -> func prio cmdName s
           where
             fullName = pName ++ "/" ++ cmdName ++ "/" ++  name
             -- Make sure that a message is not too long (problems with syslog).

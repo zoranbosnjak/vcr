@@ -3,7 +3,7 @@ cabal-version:       >=1.10
 -- further documentation, see http://haskell.org/cabal/users-guide/
 
 name:                vcr-app
-version:             0.1.0
+version:             0.2.0
 synopsis:            event recorder
 -- description:
 -- bug-reports:
@@ -20,6 +20,7 @@ executable vcr
   main-is:             Main.hs
   other-modules:
     CmdCustom
+    CmdCapture
   -- other-extensions:
   hs-source-dirs:      vcr-app
   default-language:    Haskell2010
@@ -41,4 +42,22 @@ executable vcr
     , optparse-applicative
     , filepath
     , unix
+    , transformers
+    , stm
+    , async
+    , uuid
+    , containers
+    , text
+    , bytestring
+    , network
+    , wai
+    , warp
+    , http-types
+    , aeson
+    , aeson-pretty
+    , retry
+    , pipes
+    , pipes-concurrency
+    , pipes-safe
+    , regex-tdfa
 

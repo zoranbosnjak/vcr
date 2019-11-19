@@ -17,10 +17,12 @@ import           System.Exit (exitWith, ExitCode(ExitFailure,ExitSuccess))
 import           Common
 import           TH (getEnvVariableExpr)
 import           CmdCustom (cmdCustom)
+import           CmdCapture (cmdCapture)
 
 commands :: [(String, ParserInfo Command)]
 commands =
     [ ("custom", cmdCustom)
+    , ("capture", cmdCapture)
     ]
 
 data Options = Options

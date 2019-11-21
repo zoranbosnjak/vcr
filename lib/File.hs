@@ -127,13 +127,13 @@ isRecordingFile base filename = maybe False (const True) $ getFileSuffix base fi
 getRecordingFiles :: FilePath -> IO [FilePath]
 getRecordingFiles base = do
     listing <- listDirectory (takeDirectory base)
-    return $ sort $ Prelude.filter (isRecordingFile base) listing
+    return $ sort $ Prelude.filter (isRecordingFile $ takeFileName base) listing
 
 -- | Get recording files suffixes.
 getRecordingFileSuffixes:: FilePath -> IO [FileSuffix]
 getRecordingFileSuffixes base = do
     listing <- listDirectory (takeDirectory base)
-    return $ sort $ catMaybes $ fmap (getFileSuffix base) listing
+    return $ sort $ catMaybes $ fmap (getFileSuffix $ takeFileName base) listing
 
 -- | Stream events from given index.
 -- When end of file is reached, switch to the next recording file.

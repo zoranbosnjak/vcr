@@ -62,7 +62,11 @@ runhaskell -ilib vcr-app/Main.hs {args}
 ### Running custom script (inside nix-shell)
 ```bash
 nix-shell
-runhaskell -Wall -ilib -ivcr-app ./vcr-app/Main.hs custom --program /path/to/custom.hs --ghcOpts "-i/path/to -v1 -O2"
+runhaskell -Wall -ilib -ivcr-app ./vcr-app/Main.hs custom --program /path/to/custom.hs --ghcOpts "-O2 -v1 -i/path/to"
+
+# or
+nix-build
+./dist.../vcr custom --program /path/to/custom.hs --ghcOpts "-O2 -v1 -i/path/to -i/path/to/lib"
 ```
 
 ## Changes in cabal file
@@ -72,6 +76,7 @@ When changing `*.cabal` file, run:
 ```bash
 nix-shell --pure -p cabal2nix --run "cabal2nix ." > default.nix
 # or
-cabal2nix . > default.nix
+cabal2nix lib > lib.nix
+cabal2nix . > app.nix
 ```
 

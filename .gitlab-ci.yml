@@ -5,7 +5,7 @@ stages:
 nix_build:
     stage: build
     script:
-        - nix-build release.nix --argstr gitrev $CI_COMMIT_SHORT_SHA
+        - nix-build --argstr gitrev $CI_COMMIT_SHORT_SHA
 
 mirror latest master:
     stage: deliver
@@ -15,7 +15,7 @@ mirror latest master:
         - set -u
         - mkdir -p $TARGET
         - rm -f $TARGET/latest-master-*
-        - nix-build release.nix --argstr gitrev $CI_COMMIT_SHORT_SHA
+        - nix-build --argstr gitrev $CI_COMMIT_SHORT_SHA
         - nix-store --add-root $TARGET/latest-master-$CI_COMMIT_SHORT_SHA --indirect -r $(readlink result)
 
 mirror latest other:
@@ -26,7 +26,7 @@ mirror latest other:
         - set -u
         - mkdir -p $TARGET
         - rm -f $TARGET/latest-other-*
-        - nix-build release.nix --argstr gitrev $CI_COMMIT_SHORT_SHA
+        - nix-build --argstr gitrev $CI_COMMIT_SHORT_SHA
         - nix-store --add-root $TARGET/latest-other-$CI_COMMIT_SHORT_SHA --indirect -r $(readlink result)
 
 mirror manual:
@@ -35,6 +35,6 @@ mirror manual:
     script:
         - set -u
         - mkdir -p $TARGET
-        - nix-build release.nix --argstr gitrev $CI_COMMIT_SHORT_SHA
+        - nix-build --argstr gitrev $CI_COMMIT_SHORT_SHA
         - nix-store --add-root $TARGET/$(readlink result | awk -F"-" '{print $3}')-$CI_COMMIT_SHORT_SHA --indirect -r $(readlink result)
 

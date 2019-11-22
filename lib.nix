@@ -10,7 +10,7 @@
 mkDerivation {
   pname = "vcr";
   version = "0.0.0";
-  src = ./.;
+  src = ./lib;
   libraryHaskellDepends = [
     aeson aeson-pretty async base base16-bytestring base64-bytestring
     bytestring clock containers deepseq deseo directory filepath gi-gtk

@@ -298,7 +298,7 @@ httpServer logM startTimeMono startTimeUtc sesId config logAlarms cfgMethod (ip,
                                         write $ BSBB.byteString "\n"
                                     flush
                     try (streamFrom base processLine ix limit) >>= \case
-                        Left (e :: IOException) -> logM NOTICE $ show e
+                        Left (_e :: IOException) -> return ()
                         Right _ -> return ()
           where
             includeIndex = maybe False (const True) $ lookup "includeIndex" $ queryString request

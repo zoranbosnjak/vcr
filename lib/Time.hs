@@ -2,7 +2,6 @@
 module Time where
 
 import           Data.Time
-import           Data.Time.Format.ISO8601 (iso8601ParseM)
 import qualified Data.Time.Clock.POSIX as DTP
 import qualified System.Clock
 import           Numeric (showFFloat)
@@ -32,7 +31,12 @@ uptimeDaysStr t0 t =
 
 -- | Parse ISO time.
 parseIsoTime :: String -> Either String UtcTime
-parseIsoTime s = case iso8601ParseM s of
+parseIsoTime s = case parser s of
     Nothing -> Left $ "Can not parse time: " ++ show s
     Just val -> Right val
+  where
+    -- Once on ghc881, the original parser can be used:
+    -- import Data.Time.Format.ISO8601 (iso8601ParseM)
+    -- parser = iso8601ParseM
+    parser = parseTimeM True defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%QZ"))
 

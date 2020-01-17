@@ -18,6 +18,9 @@ To update particular `package` revision, which is included in nix rules:
 ```bash
 cabal2nix https://{path-to-git-repo}/{package} --revision {rev} > package-ver.nix
 
+# or if subdirectory is included
+cabal2nix https://{path-to-git-repo}/{package} --revision {rev} --subpath {path} > package-ver.nix
+
 # or for local development version
 cabal2nix path/to/package > package-ver.nix
 ```
@@ -49,7 +52,7 @@ cabal build -j
 
 ```bash
 nix-shell
-ghcid "--command=ghci -Wall -ilib vcr-app/Main.hs"
+ghcid "--command=ghci -Wall -ilib -ivcr-app vcr-app/Main.hs"
 ```
 
 ### Running (inside nix-shell)

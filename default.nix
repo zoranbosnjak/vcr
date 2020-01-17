@@ -1,20 +1,28 @@
 { gitrev ? "#devel"
-, compiler ? "ghc881" # "default"
+, compiler ? "default"
 }:
 
 let
   nixpkgs = builtins.fromJSON (builtins.readFile ./nixpkgs.json);
-  pkgs = import (builtins.fetchGit nixpkgs) { };
+  pkgs = import (builtins.fetchGit nixpkgs) {
+    overlays = [ replaceGTK ];
+  };
+
+  replaceGTK = self: super: {
+    wxGTK = super.wxGTK30;
+  };
 
   haskellPackages1 = if compiler == "default"
     then pkgs.haskellPackages
     else pkgs.haskell.packages.${compiler};
+
   haskellPackages = haskellPackages1.override {
     overrides = haskellPackagesNew: haskellpackagesOld: rec {
-      hslogger = haskellPackagesNew.hslogger_1_3_1_0;
-      RSA = haskellPackagesNew.RSA_2_4_1;
-      text-format = haskellPackagesNew.callPackage ./text-format.nix { };
-      authenticate-oauth = haskellPackagesNew.callPackage ./authenticate-oauth.nix { };
+      wx = haskellPackagesNew.callPackage ./wx.nix { };
+      wxcore = haskellPackagesNew.callPackage ./wxcore.nix { };
+      wxdirect = haskellPackagesNew.callPackage ./wxdirect.nix { };
+      wxc = haskellPackagesNew.callPackage ./wxc.nix { };
+
       deseo = haskellPackagesNew.callPackage ./deseo.nix { };
       vcr = vcrLib;
     };
@@ -44,7 +52,6 @@ let
     name = "vcr-environment";
     buildInputs =
       vcrLib.env.nativeBuildInputs
-      ++ vcrApp.env.nativeBuildInputs
       ++ [
         pkgs.haskellPackages.cabal-install
         pkgs.ghcid

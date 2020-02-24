@@ -22,6 +22,7 @@ let
       wxcore = haskellPackagesNew.callPackage ./wxcore.nix { };
       wxdirect = haskellPackagesNew.callPackage ./wxdirect.nix { };
       wxc = haskellPackagesNew.callPackage ./wxc.nix { };
+      req = haskellPackagesNew.callPackage ./req.nix { };
 
       deseo = haskellPackagesNew.callPackage ./deseo.nix { };
       vcr = vcrLib;

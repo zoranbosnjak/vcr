@@ -20,7 +20,8 @@ module Common
     , whenSpecified
     , restartOnChange
     , hexlify, unhexlify
-    , Alarm(..), newAlarm, runAlarm, refreshAlarm, getAlarm
+    , Alarm(..), newAlarmIO, runAlarm, refreshAlarm, getAlarm
+    , UpdatingVar(..), newUpdatingVarIO, updateVar, restartOnUpdate
     , setupLogging
     )
   where
@@ -42,7 +43,6 @@ import           System.Log.Handler.Simple (verboseStreamHandler)
 import           System.Log.Handler.Syslog (openlog, Option(PID), Facility(USER))
 import           System.IO
 
-
 type Prog = String
 type Args = [String]
 type Version = String
@@ -52,6 +52,25 @@ type Command = Prog -> Args -> Version -> GhcBase -> IO ()
 type LoggerName = String
 type ErrorMsg = String
 
+data UpdatingVar a = UpdatingVar a (TQueue a)
+
+-- | Create UpdatingVar
+newUpdatingVarIO :: a ->  IO (UpdatingVar a)
+newUpdatingVarIO val = UpdatingVar <$> pure val <*> newTQueueIO
+
+-- | Update 'UpdatingVar'
+updateVar :: UpdatingVar a -> a -> STM ()
+updateVar (UpdatingVar _initial queue) val = writeTQueue queue val
+
+-- | Restart process on variable update.
+restartOnUpdate :: UpdatingVar a -> (TVar a -> IO b) -> IO b
+restartOnUpdate (UpdatingVar initial queue) act = go initial where
+    go x = do
+        var <- newTVarIO x
+        race (act var) (atomically $ readTQueue queue) >>= \case
+            Left a -> return a
+            Right y -> go y
+
 -- | Alarm with automatic timeout.
 data Alarm a = Alarm
     { almTimeout :: Double      -- timeout in seconds
@@ -60,8 +79,8 @@ data Alarm a = Alarm
     }
 
 -- | Create alarm
-newAlarm :: Double -> IO (Alarm a)
-newAlarm t = Alarm
+newAlarmIO :: Double -> IO (Alarm a)
+newAlarmIO t = Alarm
     <$> pure t
     <*> newTQueueIO
     <*> newTVarIO Nothing

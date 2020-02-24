@@ -325,9 +325,11 @@ httpServer logM startTimeMono startTimeUtc sesId config logAlarms cfgMethod (ip,
                                     Right Nothing -> Right False
                                     Right _ -> Right True
                     return (ix, limit, channelFilter)
-                -- POST -> TODO:
+
                 --  In the case of complex arguments, it would be more convenient
-                --  to pass arguments in the request body, using POST method instead of GET.
+                --  to pass parameters in the request body, using POST method instead of GET.
+                -- POST -> ...
+
                 _ -> throwE "unsupported http method"
 
         go _ _ = notFound
@@ -428,7 +430,7 @@ runCmd opt pName pArgs version _ghc = do
     startTimeUtc <- getUtcTime
 
     -- last severe log event is held for some time
-    logAlarms <- newAlarm (optAlarmHold opt)
+    logAlarms <- newAlarmIO (optAlarmHold opt)
     let log2Alarm prio name msg = when (prio >= NOTICE) $ do
             atomically $ refreshAlarm logAlarms (prio, name, msg)
 

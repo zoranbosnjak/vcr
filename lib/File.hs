@@ -254,7 +254,7 @@ getStartIndex base = getRecordingFileSuffixes base >>= \case
     [] -> return $ Left "no recording found"
     (fs:_) -> return $ Right $ EventIndex fs 0
 
--- | Find EventIndex, based in the given utc time.
+-- | Find EventIndex, based on the given utc time.
 -- First locate the recording file, then use bisection to narrow the search.
 -- Finally, use linear search to locate the file offset.
 -- Assume a newline '\n' as record delimiter.

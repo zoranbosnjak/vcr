@@ -40,3 +40,7 @@ parseIsoTime s = case parser s of
     -- parser = iso8601ParseM
     parser = parseTimeM True defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%QZ"))
 
+-- | Format ISO time.
+fmtTime :: UtcTime -> String
+fmtTime = formatTime defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%QZ"))
+

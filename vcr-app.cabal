@@ -21,6 +21,7 @@ executable vcr
   other-modules:
     CmdCustom
     CmdCapture
+    CmdServer
   -- other-extensions:
   hs-source-dirs:      vcr-app
   default-language:    Haskell2010

@@ -6,11 +6,11 @@ import qualified Data.Time.Clock.POSIX as DTP
 import qualified System.Clock
 import           Numeric (showFFloat)
 
-type MonoTime = Integer
+type MonoTimeNs = Integer
 type UtcTime = UTCTime
 
 -- | Get current monotonic time in nanoseconds.
-getMonoTimeNs :: IO MonoTime
+getMonoTimeNs :: IO MonoTimeNs
 getMonoTimeNs = System.Clock.toNanoSecs <$> System.Clock.getTime System.Clock.Boottime
 
 -- | Get current UTC time.
@@ -22,7 +22,7 @@ getPOSIXTime :: IO DTP.POSIXTime
 getPOSIXTime = DTP.getPOSIXTime
 
 -- | Convert nanosecs time difference to days.
-uptimeDaysStr :: MonoTime -> MonoTime -> String
+uptimeDaysStr :: MonoTimeNs -> MonoTimeNs -> String
 uptimeDaysStr t0 t =
     let uptime = fromIntegral $ t - t0
         uptimeSec = uptime / (10^(9::Int))

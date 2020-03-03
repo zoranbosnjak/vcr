@@ -12,7 +12,6 @@ module CmdCapture where
 -- standard imports
 import           Control.Monad
 import           Control.Monad.Fix
-import           Control.Monad.Trans.Except
 import           Control.Exception (mask, try, finally, IOException)
 import           GHC.Generics (Generic)
 import           Control.Concurrent.STM
@@ -23,10 +22,8 @@ import           Data.UUID.V4 (nextRandom)
 import qualified Data.Map as Map
 import           Data.String (fromString)
 import qualified Data.Text as T
-import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import qualified Data.ByteString.Lazy as BSL
-import qualified Data.ByteString.Builder as BSBB
 import qualified Network.Socket as Net
 import           Network.Wai
 import qualified Network.Wai.Handler.Warp as Warp
@@ -36,12 +33,9 @@ import qualified Data.Aeson.Encode.Pretty as AesonP
 import           System.Posix.Signals
 import           Pipes
 import qualified Pipes.Safe as PS
-import           Text.Regex.TDFA
-import qualified Text.Regex.TDFA.String as TRS
 
 -- local imports
 import           Common
-import           Event
 import           Vcr
 import           Time
 import           Sequential
@@ -141,10 +135,6 @@ options = CmdOptions
             <*> flag HttpConfigDisabled HttpConfigEnabled (long "enableHttpConfig")
             <*> flag SigHUPConfigDisabled SigHUPConfigEnabled (long "enableSigHUPConfig")
 
--- | Encode to JSON.
-encodeCompact :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
-encodeCompact = Data.Aeson.encode
-
 -- | Encode (pretty) to JSON.
 encodePretty :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
 encodePretty = AesonP.encodePretty'
@@ -152,7 +142,7 @@ encodePretty = AesonP.encodePretty'
 
 httpServer ::
     (Priority -> String -> IO ())
-    -> MonoTime
+    -> MonoTimeNs
     -> UtcTime
     -> SessionId
     -> TVar Config
@@ -186,12 +176,6 @@ httpServer logM startTimeMono startTimeUtc sesId config logAlarms cfgMethod (ip,
                         _ -> INFO
                 logM level $ show request
                 act (pathInfo request) mtd
-
-        getArg :: BS8.ByteString -> Maybe (Maybe BS8.ByteString)
-        getArg label = lookup label (queryString request)
-
-        decodeEvent :: BS8.ByteString -> Either String UdpEvent
-        decodeEvent = eitherDecodeStrict
 
         go ["ping"] GET = respond $ responseLBS
             status200
@@ -252,85 +236,6 @@ httpServer logM startTimeMono startTimeUtc sesId config logAlarms cfgMethod (ip,
             respond $ responseLBS status200
                 [("Content-Type", "application/json")]
                 (jsonEncFormat status)
-
-        -- get event index from given UTC timestamp
-        -- ignore request if file output is not configured
-        go ["nextIndex"] GET = fmap confOutputFile (atomically (readTVar config)) >>= \case
-            Nothing -> notFound
-            Just (base, _mRotate) -> calculate base >>= dump
-          where
-            checkLine s = eTimeWall <$> decodeEvent s
-            calculate base = runExceptT $ do
-                utc <- return (getArg "t")
-                    >>= maybe (throwE "time query string not present") pure
-                    >>= maybe (throwE "time argument not present") (pure . parseIsoTime . BS8.unpack)
-                    >>= either throwE pure
-                (liftIO $ getNextIndex base checkLine utc) >>= \case
-                    Left e -> throwE e
-                    Right val -> pure val
-            dump = \case
-                Left err -> respond $ responseLBS status400
-                    [("Content-Type", "text/plain")] (BSL8.pack $ err ++ "\n")
-                Right result -> respond $ responseLBS status200
-                    [("Content-Type", "application/json")]
-                    (jsonEncFormat result)
-
-        -- fetch stream of events from the recording files
-        --  - optionally starting from some index
-        --  - optionally limit number of events
-        --  - generate (event, nextIndex) pairs, so that a client can resume request
-        --  - ignore request if file output is not configured
-        go ["events"] method = fmap confOutputFile (atomically (readTVar config)) >>= \case
-            Nothing -> notFound
-            Just (base, _mRotate) -> getParams base >>= \case
-                Left err -> respond $ responseLBS status400
-                    [("Content-Type", "text/plain")] (BSL8.pack $ err ++ "\n")
-                Right (ix, limit, eventPredicate) -> respond $ responseStream status200 [] $
-                  \write flush -> do
-                    let processLine line mNextIndex = case eitherDecodeStrict line of
-                            Left e -> fail e
-                            Right (event :: UdpEvent) -> case eventPredicate event of
-                                Left e -> fail e
-                                Right predicate -> when predicate $ do
-                                    write $ BSBB.byteString (line <> "\n")
-                                    when includeIndex $ do
-                                        write $ BSBB.byteString $ (BSL.toStrict $ encodeCompact mNextIndex) <> "\n"
-                                        write $ BSBB.byteString "\n"
-                                    flush
-                    try (streamFrom base processLine ix limit) >>= \case
-                        Left (_e :: IOException) -> return ()
-                        Right _ -> return ()
-          where
-            includeIndex = maybe False (const True) $ lookup "includeIndex" $ queryString request
-            getParams base = runExceptT $ case method of
-                GET -> do
-                    ix <- return (getArg "t") >>= \case
-                        Nothing -> (liftIO $ getStartIndex base) >>= either throwE pure
-                        Just (Nothing) -> throwE "time argument not present"
-                        Just (Just s) -> either throwE pure (eitherDecodeStrict s)
-                    limit <- return (getArg "limit") >>= \case
-                        Nothing -> return Nothing
-                        Just (Nothing) -> throwE "limit argument not present"
-                        Just (Just s) -> either throwE pure (eitherDecodeStrict s)
-                    channelFilter <- return (getArg "ch") >>= \case
-                        Nothing -> return (const $ Right True)
-                        Just (Nothing) -> throwE "ch argument not present"
-                        Just (Just s) -> case TRS.compile defaultCompOpt (ExecOption False) (BS8.unpack s) of
-                            Left e -> throwE e
-                            Right re -> return $ \event ->
-                                let ch = T.unpack $ eChannel event
-                                    result = TRS.execute re ch
-                                in case result of
-                                    Left e -> Left e
-                                    Right Nothing -> Right False
-                                    Right _ -> Right True
-                    return (ix, limit, channelFilter)
-
-                --  In the case of complex arguments, it would be more convenient
-                --  to pass parameters in the request body, using POST method instead of GET.
-                -- POST -> ...
-
-                _ -> throwE "unsupported http method"
 
         go _ _ = notFound
 
@@ -490,12 +395,13 @@ runCmd opt pName pArgs version _ghc = do
             , httpServer (logM "main") startTimeMono startTimeUtc sesId config logAlarms (optConfig opt)
                 `whenSpecified` (optHttp opt)
 
-            -- write to a file
+            -- send to recorder
             , do
                 ch <- atomically $ dupTChan q
                 let getConfig = confOutputFile <$> readTVar config
-                    fetchLine = BSL.toStrict . encodeCompact <$> readTChan ch
-                rotatingFileLineWriter (logM "fileWriter") getConfig fetchLine
+                    -- fetchLine = BSL.toStrict . encodeCompact <$> readTChan ch
+                -- rotatingFileLineWriter (logM "fileWriter") getConfig fetchLine
+                rotatingFileLineWriter (logM "fileWriter") getConfig (readTChan ch)
 
             -- input processing
             , processInputs sesId (logM "processInputs")

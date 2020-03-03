@@ -8,6 +8,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE BangPatterns #-}
 
 module File where
@@ -19,16 +20,16 @@ import           Control.Concurrent.STM
 import           Data.Aeson
 import           Data.Void
 import           Data.Maybe
+import           Data.Bool
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Char8 as BS8
-import           System.Posix.Files
+import qualified Data.ByteString.Lazy.Char8 as BSL8
 import qualified Control.Exception as Ex
 import qualified System.IO as IO
 import qualified Data.Time
-import           Data.List (sort)
+import           Data.List (sort, break)
 import           Data.Function ((&))
-import           System.IO (withFile, IOMode(ReadMode))
-import           System.IO.Error (isDoesNotExistError)
 import           System.Directory
 import           System.FilePath
 import           Text.Printf
@@ -94,7 +95,7 @@ utcToFileSuffix utc = FileSuffix
     , ixDay     = day
     , ixHour    = Data.Time.todHour tod
     , ixMinute  = Data.Time.todMin tod
-    , ixSecond  = round (Data.Time.todSec tod)
+    , ixSecond  = ceiling (Data.Time.todSec tod)
     }
   where
     (year, month, day) = Data.Time.toGregorian $ Data.Time.utctDay utc
@@ -135,6 +136,163 @@ getRecordingFileSuffixes base = do
     listing <- listDirectory (takeDirectory base)
     return $ sort $ catMaybes $ fmap (getFileSuffix $ takeFileName base) listing
 
+-- | Encode to JSON.
+encodeCompact :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
+encodeCompact = Data.Aeson.encode
+
+-- | File writer with 'rotation' support.
+rotatingFileLineWriter :: ToJSON a =>
+    (Priority -> String -> IO ())           -- log message
+    -> STM (Maybe (FilePath, Maybe Rotate)) -- get configuration
+    -> STM a                                -- get value to write
+    -> IO ()
+rotatingFileLineWriter logM getConfig fetchObject = do
+    logM INFO "startup"
+    idleState
+  where
+
+    getEvent cfg = atomically
+        (fmap Left cfgChange `orElse` fmap Right fetchObject)
+      where
+        cfgChange = do
+            newConfig <- getConfig
+            when (newConfig == cfg) retry
+            return newConfig
+
+    idleState = do
+        logM INFO "idle"
+        fix $ \loop -> do
+            getEvent Nothing >>= either (maybe loop recorderState) (const loop)
+
+    cleanup base keep = do
+        let dirName = takeDirectory base
+        olds <- drop keep . reverse <$> getRecordingFiles base
+        mapM_ removeFile (fmap (dirName </>) olds)
+        forM_ olds $ \i -> do
+            logM INFO $ "old file removed: " ++ i
+
+    recorderState cfg@(base, mRotate) = fix $ \loop -> do
+        maybe (return ()) (cleanup base) (rotateKeep <$> mRotate)
+        nowUtc <- getUtcTime
+        nowPosix <- getPOSIXTime
+        let recFile = fileSuffixToFileName base (utcToFileSuffix nowUtc)
+        logM INFO $ "recording to: " ++ show recFile ++ ", " ++ show mRotate
+        result <- do
+            let acquire = IO.openFile recFile IO.AppendMode
+                release h = do
+                    n <- IO.hFileSize h
+                    IO.hClose h
+                    when (n == 0) $ do
+                        logM INFO $ "removing empty file " ++ show recFile
+                        removeFile recFile
+            Ex.bracket acquire release $ \h -> do
+                recorder cfg (0::Integer) nowPosix h
+
+        case result of
+            Nothing -> loop             -- rotate file
+            Just cfg' -> case cfg' of   -- config change
+                Nothing -> idleState
+                Just newCfg -> recorderState newCfg
+
+    recorder cfg@(_base, mRotate) !n t0 h = getEvent (Just cfg) >>= \case
+        Left cfg' -> return (Just cfg')
+        Right event -> do
+            t <- getPOSIXTime
+            let str = encodeCompact event
+                n' = n + (fromIntegral $ BSL.length str)
+                fileAge = t - t0
+
+                sizeLimit = case join (fmap rotateSizeMegaBytes mRotate) of
+                    Nothing -> False
+                    Just mb -> n' >= round (mb*1024*1024)
+
+                timeLimit = case join (fmap rotateTimeHours mRotate) of
+                    Nothing -> False
+                    Just hours -> (round fileAge) >= ((round $ hours * 3600)::Integer)
+
+            BSL8.hPutStrLn h str
+            case (sizeLimit || timeLimit) of
+                True -> return Nothing
+                False -> recorder cfg n' t0 h
+
+getStartIndex :: FilePath -> IO (Either String EventIndex)
+getStartIndex base = getRecordingFileSuffixes base >>= \case
+    [] -> return $ Left "no recording found"
+    (fs:_) -> return $ Right $ EventIndex fs 0
+
+-- | Find EventIndex, based on the given utc time.
+-- Assume a newline '\n' as record delimiter.
+getNextIndex ::
+    FilePath
+    -> (BS.ByteString -> Either String UtcTime)
+    -> UtcTime
+    -> IO (Either String EventIndex)
+getNextIndex base checkLine utc = do
+    lst <- getRecordingFileSuffixes base
+    let candidates = catMaybes $ getCandidates lst
+    checkCandidates candidates
+  where
+    fs = utcToFileSuffix utc
+    getCandidates lst =
+        let (a,b) = break (> fs) lst
+            c1 = bool (Just $ last a) Nothing (a == [])
+            c2 = bool (Just $ head b) Nothing (b == [])
+        in [c1, c2]
+
+    checkCandidates [] = return $ Left "recordings exhausted"
+    checkCandidates (x:xs) = do
+        (b, result) <- IO.withFile (fileSuffixToFileName base x) IO.ReadMode $ \h -> do
+            IO.hSeek h IO.SeekFromEnd 0
+            b <- IO.hTell h
+            ix <- findIndex h 0 b
+            return (b, ix)
+        case result of
+            Nothing -> checkCandidates xs
+            Just ix -> case ix >= b of
+                True -> checkCandidates xs
+                False -> return $ Right $ EventIndex x ix
+
+    -- skip all lines where a timestamp is less then required
+    -- return first of the remaining lines
+    findIndex h = fix $ \loop a b -> case a >= b of
+        True -> return Nothing
+        False -> probe a >>= \case
+            (Left e0, _) -> fail e0     -- first read should be OK
+            (Right t0, _) -> case t0 >= utc of
+                True -> return $ Just a     -- got it
+                False -> case a >= b of
+                    True -> return Nothing  -- not found
+                    False -> do
+                        -- Jump to the middle of the interval.
+                        -- This will most likely position the file handle
+                        -- in the middle of the line. Two readlines might be necessary.
+                        let half = (a + b) `div` 2
+                        mMiddle <- probe half >>= \case
+                            (Right _, _) -> return $ Just half
+                            (Left _, i) -> return $ bool (Just i) Nothing (i >= b)
+                        case mMiddle of
+                            Nothing -> linearSearch a b
+                            Just i -> probe i >>= \case
+                                (Left e, _) -> fail e
+                                (Right t, j) -> case compare t utc of
+                                    EQ -> return $ Just i
+                                    LT -> bool (return $ Just i) (loop j b) (j > a)
+                                    GT -> bool (return $ Just i) (loop a j) (j < b)
+      where
+        probe ix = do
+            IO.hSeek h IO.AbsoluteSeek ix
+            line <- BS8.hGetLine h
+            ix' <- IO.hTell h
+            return (checkLine line, ix')
+
+        linearSearch a b
+            | a >= b = return $ Nothing
+            | otherwise = probe a >>= \case
+                (Left e, _) -> fail e
+                (Right t, i) -> case t >= utc of
+                    True -> return $ Just a
+                    False -> linearSearch i b
+
 -- | Stream events from given index.
 -- When end of file is reached, switch to the next recording file.
 -- Stop streaming when (optional) limit of the number of events is reached.
@@ -170,147 +328,4 @@ streamFrom base processLine = fix $ \loop1 index mLimit1 -> do
     case proceed of
         Nothing -> return ()
         Just (nextIndex, mLimit') -> loop1 nextIndex mLimit'
-
--- | File writer with 'rotation' support.
-rotatingFileLineWriter ::
-    (Priority -> String -> IO ())           -- log message
-    -> STM (Maybe (FilePath, Maybe Rotate)) -- get configuration
-    -> STM BS.ByteString                    -- get line
-    -> IO ()
-rotatingFileLineWriter logM getConfig fetchLine = do
-    atomically getConfig >>= maybe drain go
-  where
-    getEvent cfg = atomically (fmap Left cfgChange `orElse` fmap Right fetchLine)
-      where
-        cfgChange = do
-            newConfig <- getConfig
-            when (newConfig == cfg) retry
-            return newConfig
-
-    drain = do
-        logM INFO "idle"
-        fix $ \loop -> do
-            getEvent Nothing >>= either (maybe loop go) (const loop)
-
-    go (base, mRotate) = do
-        logM INFO $ "starting, base file: " ++ show base ++ ", rotate: " ++ show mRotate
-
-        -- get file status
-        st <- Ex.tryJust (guard . isDoesNotExistError) (getFileStatus base) >>= \case
-            Right st -> return st
-            Left _ -> do
-                IO.openFile base IO.AppendMode >>= IO.hClose
-                getFileStatus base
-        let size = fromIntegral $ fileSize st
-            access = accessTimeHiRes st
-        result <- IO.withFile base IO.AppendMode $ \h -> do
-            loop h (size::Integer) access
-        maybe drain go result
-
-      where
-
-        cleanup keep = do
-            let dirName = takeDirectory base
-            olds <- drop keep . reverse <$> getRecordingFiles base
-            mapM_ removeFile (fmap (dirName </>) olds)
-            return olds
-
-        loop h !currentSize lastRotateTime = getEvent (Just (base, mRotate)) >>= \case
-            Left newCfg -> do
-                logM INFO "config changed"
-                IO.hClose h
-                return newCfg
-            Right value -> do
-                (nowUtc, nowPosix) <- (,) <$> getUtcTime <*> getPOSIXTime
-                BS8.hPutStrLn h value
-                let newSize = currentSize + (fromIntegral $ BS.length value)
-                    rotateTo = do
-                        rot <- mRotate
-                        let sizeLimit = case rotateSizeMegaBytes rot of
-                                Nothing -> False
-                                Just mb -> newSize >= round (mb*1024*1024)
-                            fileAge = nowPosix - lastRotateTime
-                            timeLimit = case rotateTimeHours rot of
-                                Nothing -> False
-                                Just hours -> (round fileAge) >= ((round $ hours * 3600)::Integer)
-                        let tFormat = Data.Time.formatTime Data.Time.defaultTimeLocale
-                                (Data.Time.iso8601DateFormat (Just "%H-%M-%S"))
-                        guard $ sizeLimit || timeLimit
-                        Just (base ++ "-" ++ tFormat nowUtc, rotateKeep rot)
-                case rotateTo of
-                    Nothing -> loop h newSize lastRotateTime
-                    Just (newName, keep) -> do
-                        Ex.mask_ $ do
-                            IO.hClose h
-                            renameFile base newName
-                        removed <- cleanup keep
-                        logM INFO $ "output file rotated: " ++ newName
-                        forM_ removed $ \i -> do
-                            logM INFO $ "old file removed: " ++ i
-                        return $ Just (base, mRotate)
-
-getStartIndex :: FilePath -> IO (Either String EventIndex)
-getStartIndex base = getRecordingFileSuffixes base >>= \case
-    [] -> return $ Left "no recording found"
-    (fs:_) -> return $ Right $ EventIndex fs 0
-
--- | Find EventIndex, based on the given utc time.
--- First locate the recording file, then use bisection to narrow the search.
--- Finally, use linear search to locate the file offset.
--- Assume a newline '\n' as record delimiter.
-getNextIndex :: FilePath
-    -> (BS.ByteString -> Either String UtcTime)
-    -> UtcTime
-    -> IO (Either String EventIndex)
-getNextIndex base checkLine utc = getRecordingFileSuffixes base >>= \case
-    [] -> return $ Left "no recording found"
-    lst -> do
-        let fs = utcToFileSuffix utc
-            valid = dropWhile (< fs) lst
-        case valid of
-            [] -> return $ Left "recordings exhausted"
-            (x:_xs) -> withFile (fileSuffixToFileName base x) ReadMode $ \h -> do
-                let foundAt = Right . EventIndex x
-                IO.hSeek h IO.SeekFromEnd 0
-                b <- IO.hTell h
-                bisect foundAt h 0 b
-  where
-    -- first narrow down search interval with bisection
-    bisect foundAt h = fix $ \loop a b -> do
-        -- This seek will most likely position the file handle
-        -- in the middle of the line. Two readlines might be necessary.
-        let half = (a + b) `div` 2
-        IO.hSeek h IO.AbsoluteSeek half
-
-        line <- BS8.hGetLine h
-        fmap (>= b) (IO.hTell h ) >>= \case
-            -- interval is already small enough, switch to linear search
-            True -> do
-                IO.hSeek h IO.AbsoluteSeek a
-                linear foundAt h b
-            -- bisect some more
-            False -> do
-                (t,j) <- case checkLine line of
-                    Right t -> return (t, half)
-                    Left _ -> do
-                        j <- IO.hTell h
-                        fmap checkLine (BS8.hGetLine h) >>= \case
-                            Left e -> fail e
-                            Right t -> return (t, j)
-                i <- IO.hTell h
-                case compare t utc of
-                    EQ -> return $ foundAt j
-                    LT -> loop i b
-                    GT -> loop a j
-
-    -- finally use linear search to find the offset
-    linear foundAt h limit = fix $ \loop -> do
-        i <- IO.hTell h
-        case i >= limit of
-            True -> return $ Left "search exhausted"
-            False -> do
-                t <- fmap checkLine (BS8.hGetLine h) >>= either fail pure
-                case t >= utc of
-                    True -> return $ foundAt i
-                    False -> loop
 

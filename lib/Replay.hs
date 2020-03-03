@@ -13,7 +13,6 @@ import           Data.Void
 import           Control.Monad
 import           Control.Monad.Fix
 import           Pipes
-import           Data.Function ((&))
 import           Data.Ratio ((%))
 import qualified Data.Text as T
 import           Data.Text.Encoding (decodeUtf8)
@@ -44,8 +43,8 @@ import qualified Data.Aeson as AES
 -- local imports
 import           Common
 import           Time
-import           Event
 import           Vcr
+import           Udp
 
 type Name = String
 type Running = Bool
@@ -74,12 +73,9 @@ fetcher :: Maybe UtcTime -> (UdpEvent -> STM ()) -> Recorder -> [Channel] -> IO 
 fetcher _startTime _putToBuffer (Recorder _rec) [] = doNothing
 fetcher Nothing _putToBuffer (Recorder _rec) _channelList = doNothing
 fetcher (Just startTime) putToBuffer (Recorder rec) channelList = do
-    let to = responseTimeout $ round $ (1.0::Double) * 1000 * 1000
-
     -- get nextIndex from start utc time
     startIx <- case (mkURI (rec <> "/nextIndex") >>= useURI) of
-        Nothing -> do
-            doNothing
+        Nothing -> doNothing
         Just result -> do
             let request = case result of
                     Left  (url, opt) -> req GET url NoReqBody bsResponse (opt <> to <> ("t" =: (fmtTime startTime)))
@@ -87,35 +83,44 @@ fetcher (Just startTime) putToBuffer (Recorder rec) channelList = do
             fix $ \loop -> (try $ runReq defaultHttpConfig $ fmap responseBody request) >>= \case
                 Left (_error :: HttpException) -> threadDelaySec 1.0 >> loop
                 Right val -> return $ decodeUtf8 val
+    fetchFrom startIx
+  where
+    to = responseTimeout $ round $ (1.0::Double) * 1000 * 1000
+    fetchFrom startIx = do
+        -- Stream events to the buffer.
+        -- This process will block automatically when buffer gets full.
+        case (mkURI (rec <> "/events") >>= useURI) of
+            Nothing -> doNothing
+            Just result -> do
+                -- update this var on each successfull event,
+                -- to be able to continue in case of problems
+                ix <- newTVarIO startIx
+                let cl = foldr1 (\a b -> a <> "|" <> b) channelList
+                    toLines buffer = do
+                        let (a,b) = BS8.break (== '\n') buffer
+                        case BS.null b of
+                            True -> return $ Just buffer    -- line not complete
+                            False -> case AES.decodeStrict a of
+                                Nothing -> toLines $ BS.drop 1 b
+                                Just (_val, Nothing) -> return Nothing -- next index not known
+                                Just (val, Just nextIx) -> do
+                                    atomically $ do
+                                        putToBuffer (val :: UdpEvent)
+                                        writeTVar ix (nextIx :: T.Text)
+                                    toLines $ BS.drop 1 b
+                    consumer resp = do
+                        let getChunk = HTC.responseBody resp
+                            go accumulator = getChunk >>= \s -> case BS.null s of
+                                True -> return ()   -- no more data
+                                False -> toLines (accumulator <> s) >>= maybe (return ()) go
+                        go mempty
+                    request = case result of
+                        Left  (url, opt) -> reqBr GET url NoReqBody (opt <> to <> queryFlag "includeIndex" <> ("ch" =: cl) <> ("t" =: startIx)) consumer
+                        Right (url, opt) -> reqBr GET url NoReqBody (opt <> to <> queryFlag "includeIndex" <> ("ch" =: cl) <> ("t" =: startIx)) consumer
 
-    -- Stream events to the buffer.
-    -- This process will block automatically when buffer gets full.
-    case (mkURI (rec <> "/events") >>= useURI) of
-        Nothing -> doNothing
-        Just result -> do
-            let cl = foldr1 (\a b -> a <> "|" <> b) channelList
-                consumer resp = do
-                    let getChunk = HTC.responseBody resp
-                        go accumulator = getChunk >>= \s -> case BS.null s of
-                            True -> return ()
-                            False -> do
-                                s' <- (accumulator <> s) & (fix $ \loop x -> do
-                                    let (a,b) = BS8.break (== '\n') x
-                                    case AES.decodeStrict a of
-                                        Nothing -> return $ BS.drop 1 b
-                                        Just val -> do
-                                            -- TODO: do not drop if not a complete frame is received!!
-                                            atomically $ putToBuffer (val :: UdpEvent)
-                                            loop $ BS.drop 1 b
-                                    )
-                                go s'
-                    go mempty
-                request = case result of
-                    Left  (url, opt) -> reqBr GET url NoReqBody (opt <> to <> ("ch" =: cl) <> ("t" =: startIx)) consumer
-                    Right (url, opt) -> reqBr GET url NoReqBody (opt <> to <> ("ch" =: cl) <> ("t" =: startIx)) consumer
-            -- TODO: in case of problems, restart request from the last good index
-            -- (_result :: Either HttpException ()) <- try $ runReq defaultHttpConfig request
-            runReq defaultHttpConfig request
+                (_result :: Either HttpException ()) <- try $ runReq defaultHttpConfig request
+                threadDelaySec 1.0
+                atomically (readTVar ix) >>= fetchFrom
 
 -- | Sender process.
 -- Use "UTC" time for initial sync, then use monotonic time for actual replay.
@@ -139,7 +144,7 @@ sender (Just startUtcTime) getFromBuffer getRunning getSpeed updateT = do
     -- depending on current time, speed and pending event.
     startup tUtc speed evt = do
         tStartupMono <- getMonoTimeNs
-        let pendingUtc = eTimeWall evt
+        let pendingUtc = eTimeUtc evt
             pendingMono = eTimeMono evt
             deltaTNominal = pendingUtc `Clk.diffUTCTime` tUtc
             deltaTNs = round $ (1000*1000*1000)*toRational deltaTNominal
@@ -165,7 +170,7 @@ sender (Just startUtcTime) getFromBuffer getRunning getSpeed updateT = do
                         return (tUtc', pure evt)
                     True -> do
                         fire evt
-                        let tUtc' = eTimeWall evt
+                        let tUtc' = eTimeUtc evt
                         return (tUtc', getFromBuffer)
                 atomically $ updateT tUtc'
                 evt' <- atomically getNextEvent
@@ -176,7 +181,7 @@ sender (Just startUtcTime) getFromBuffer getRunning getSpeed updateT = do
                         Nothing -> notRunning tUtc' evt'
                         Just speed' -> startup tUtc' speed' evt'
 
-    fire evt = print (eChannel evt, eTimeWall evt)
+    fire evt = print (eChannel evt, eTimeUtc evt)
 
 replayEngine ::
     STM Recorder                    -- selected recorder
@@ -190,7 +195,7 @@ replayEngine ::
     -> (UtcTime -> STM ())          -- current Utc time updates for GUI
     -> (T.Text -> STM ())           -- console dump line action
     -> (Int -> STM ())              -- set buffer level indicator, [0..100]
-    -> IO ()
+    -> IO String                    -- reason for termination
 replayEngine getRecorder getChannelSelections getT1 updatesT0 _getT2
   _getAtLimit getSpeed getRunning setTCurrent _dumpConsole setBufferLevel = do
     restartOnUpdate updatesT0 $ \tVar -> do
@@ -228,7 +233,7 @@ replayEngine getRecorder getChannelSelections getT1 updatesT0 _getT2
                 (fetcher t putToBuffer rec channelList)
                 (sender t getFromBuffer getRunning getSpeed updateT)
             case result of
-                Left _ -> return ()     -- fetcher stopped, something went wrong
+                Left _ -> return "fetcher error"
                 Right _ -> do           -- restart from T1
                     atomically (getT1 >>= writeTVar tVar)
                     loop

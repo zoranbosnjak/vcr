@@ -48,6 +48,10 @@ let
       export GIT_REV=${gitrev}
       export GHC_BASE=${ghcBase}
       '';
+    postInstall = ''
+      ghc -Wall -O2 generator/generator.hs
+      cp generator/generator $out/bin
+    '';
   });
 
   env = pkgs.stdenv.mkDerivation {

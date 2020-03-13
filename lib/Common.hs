@@ -137,12 +137,12 @@ whenSpecified _act Nothing = doNothing
 whenSpecified act (Just val) = act val
 
 -- | Restart process on STM value change.
-restartOnChange :: Eq a => STM a -> (a -> IO b) -> IO b
-restartOnChange getVar act = atomically getVar >>= go where
+restartOnChange :: Eq c => STM a -> (a -> c) -> (a -> IO b) -> IO b
+restartOnChange getVar compareValue act = atomically getVar >>= go where
     go x = do
         result <- race (act x) $ atomically $ do
             y <- getVar
-            bool (return y) retry (y == x)
+            bool (return y) retry (compareValue y == compareValue x)
         case result of
             Left a -> return a
             Right y -> go y

@@ -13,6 +13,7 @@ import           Data.Void
 import           Control.Monad
 import           Control.Monad.Fix
 import           Pipes
+import           Data.List (find)
 import           Data.Ratio ((%))
 import qualified Data.Text as T
 import           Data.Text.Encoding (decodeUtf8)
@@ -54,8 +55,8 @@ newtype Recorder = Recorder T.Text deriving (Eq, Show)
 
 data ChannelSelection = ChannelSelection
     { chName    :: Channel                  -- recorder channel name
-    , chDump    :: Bool                     -- dump to console
-    , chOutput  :: Maybe (Consumer BS.ByteString IO ()) -- send output
+    , chDump    :: Maybe (UdpEvent -> String) -- dump to console
+    , chOutput  :: Maybe (Consumer UdpEvent IO ()) -- send output
     }
 
 data AtLimit = Continue | Wrap | Stop
@@ -68,7 +69,7 @@ speedChoices = [10 ** (x/10) | x <- [-10..10]]
 prefetch :: Int
 prefetch = 100
 
--- | Fetch events from http(s) to buffer
+-- | Fetch events from http(s) to memory buffer.
 fetcher :: Maybe UtcTime -> (UdpEvent -> STM ()) -> Recorder -> [Channel] -> IO ()
 fetcher _startTime _putToBuffer (Recorder _rec) [] = doNothing
 fetcher Nothing _putToBuffer (Recorder _rec) _channelList = doNothing
@@ -124,9 +125,15 @@ fetcher (Just startTime) putToBuffer (Recorder rec) channelList = do
 
 -- | Sender process.
 -- Use "UTC" time for initial sync, then use monotonic time for actual replay.
-sender :: Maybe UtcTime -> STM UdpEvent -> STM Bool -> STM Speed -> (UtcTime -> STM ()) -> IO UtcTime
-sender Nothing _getFromBuffer _getRunning _getSpeed _setTCurrent = doNothing
-sender (Just startUtcTime) getFromBuffer getRunning getSpeed updateT = do
+sender :: Maybe UtcTime -> STM UdpEvent -> STM Bool -> STM Speed -> (UtcTime -> STM ()) -> [ChannelSelection] -> IO UtcTime
+sender Nothing _getFromBuffer _getRunning _getSpeed _setTCurrent _channelList = doNothing
+sender (Just startUtcTime) getFromBuffer getRunning getSpeed updateT channelList = do
+    -- start processes for each channel
+    realSenders <- forM channelList $ \(ChannelSelection name mDump mOut) -> do
+        -- , chDump    :: Maybe (UdpEvent -> String) -- dump to console
+        -- , chOutput  :: Maybe (Consumer UdpEvent IO ()) -- send output
+        undefined
+
     (evt, mSp) <- atomically ((,) <$> getFromBuffer <*> getRunningSpeed)
     case mSp of
         Nothing -> notRunning startUtcTime evt
@@ -181,7 +188,15 @@ sender (Just startUtcTime) getFromBuffer getRunning getSpeed updateT = do
                         Nothing -> notRunning tUtc' evt'
                         Just speed' -> startup tUtc' speed' evt'
 
-    fire evt = print (eChannel evt, eTimeUtc evt)
+    fire :: UdpEvent -> IO ()
+    fire evt = case find (\x -> chName x == eChannel evt) channelList of
+        Nothing -> return ()
+        Just (ChannelSelection _name mDump mOut) -> do
+            case mOut of
+                Nothing -> return ()
+            case mDump of
+                Nothing -> return ()
+                Just dump -> print (dump evt)
 
 replayEngine ::
     STM Recorder                    -- selected recorder
@@ -199,7 +214,7 @@ replayEngine ::
 replayEngine getRecorder getChannelSelections getT1 updatesT0 _getT2
   _getAtLimit getSpeed getRunning setTCurrent _dumpConsole setBufferLevel = do
     restartOnUpdate updatesT0 $ \tVar -> do
-      restartOnChange getReplayConfig $ \(rec, channelList) -> do
+      restartOnChange getReplayConfig compareValue $ \(rec, channelList) -> do
         atomically $ setBufferLevel 0
         -- Use initial delay, to prevent fast respawn during initial channel
         -- selection (on each channel change, this process will restart).
@@ -230,8 +245,8 @@ replayEngine getRecorder getChannelSelections getT1 updatesT0 _getT2
 
             t <- atomically $ readTVar tVar
             result <- race
-                (fetcher t putToBuffer rec channelList)
-                (sender t getFromBuffer getRunning getSpeed updateT)
+                (fetcher t putToBuffer rec (fmap chName channelList))
+                (sender t getFromBuffer getRunning getSpeed updateT channelList)
             case result of
                 Left _ -> return "fetcher error"
                 Right _ -> do           -- restart from T1
@@ -239,14 +254,18 @@ replayEngine getRecorder getChannelSelections getT1 updatesT0 _getT2
                     loop
 
   where
+    compareValue (_rec, channelList) = do
+        ChannelSelection channel console out <- channelList
+        return (channel, isJust console, isJust out)
+
     getReplayConfig = (,)
         <$> getRecorder
         <*> do
             cs <- getChannelSelections
             let channelList = do
-                    ChannelSelection channel console out <- cs
-                    guard (console || isJust out)
-                    return channel
+                    c@(ChannelSelection _channel console out) <- cs
+                    guard (isJust console || isJust out)
+                    return c
             return channelList
 
 
@@ -272,10 +291,9 @@ pTimeEntry = do
 replayGUI ::
     [(Name, Recorder)]
     -> [(Name, Channel {-outputChannelName-} -> Channel {-recorderChannelName-})]
-    -> [(Name, [(Channel {-outputChannelName-}, Consumer BS.ByteString IO ())])]
-    -> (a -> [String])
+    -> [(Name, [(Channel {-outputChannelName-}, UdpEvent -> String, Consumer UdpEvent IO ())])]
     -> IO ()
-replayGUI recorders channelMaps outputs _dumpEvent = start gui
+replayGUI recorders channelMaps outputs = start gui
   where
 
     gui = do
@@ -466,7 +484,7 @@ replayGUI recorders channelMaps outputs _dumpEvent = start gui
         outputPanels <- forM outputs $ \(name, lst) -> do
             cp <- scrolledWindow nb [ scrollRate := sz 20 20 ]
 
-            controls <- forM lst $ \(channel, consumer) -> do
+            controls <- forM lst $ \(channel, dump, consumer) -> do
                 enableConsole <- toggleButton cp
                     [ text := "console"
                     , bgcolor := lightgrey
@@ -484,7 +502,9 @@ replayGUI recorders channelMaps outputs _dumpEvent = start gui
                         set channelChange [ value := True ]
                     ]
 
-                let isConsoleEnabled = get enableConsole checked
+                let getDumpFunction = get enableConsole checked >>= \case
+                        False -> return Nothing
+                        True -> return $ Just dump
 
                     getOutputConsumer = get enableOutput checked >>= \case
                         False -> return Nothing
@@ -496,7 +516,7 @@ replayGUI recorders channelMaps outputs _dumpEvent = start gui
                         , label $ T.unpack channel
                         ]
 
-                return (channel, isConsoleEnabled, getOutputConsumer, chLayout)
+                return (channel, getDumpFunction, getOutputConsumer, chLayout)
 
             return
                 ( name

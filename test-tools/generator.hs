@@ -55,18 +55,24 @@ main = execParser options >>= \(out, payload, rate) -> do
   where
     options = info (parser <**> helper) ( progDesc "UDP generator")
 
-    acquire out = do
-        sock <- Net.socket Net.AF_INET Net.Datagram Net.defaultProtocol
-        dst <- case out of
-            Unicast ip port -> do
-                (serveraddr:_) <- Net.getAddrInfo Nothing (Just ip) (Just port)
-                return (Net.addrAddress serveraddr)
-            Multicast mcast port local ttl -> do
-                (serveraddr:_) <- Net.getAddrInfo Nothing (Just mcast) (Just port)
-                Mcast.setInterface sock local
-                Mcast.setTimeToLive sock ttl
-                return (Net.addrAddress serveraddr)
-        return (sock, dst)
+    acquire addr = do
+        let (ip, port, mLocal, mTTL) = case addr of
+                Unicast ip' port' ->
+                    (ip', port', Nothing, Nothing)
+                Multicast mcast' port' local' ttl' ->
+                    (mcast', port', Just local', Just ttl')
+
+        (serveraddr:_) <- Net.getAddrInfo
+            (Just (Net.defaultHints {Net.addrFlags = [Net.AI_PASSIVE]}))
+            (Just ip)
+            (Just port)
+
+        sock <- Net.socket
+            (Net.addrFamily serveraddr) Net.Datagram Net.defaultProtocol
+
+        maybe (return ()) (Mcast.setInterface sock) mLocal
+        maybe (return ()) (Mcast.setTimeToLive sock) mTTL
+        return (sock, Net.addrAddress serveraddr)
 
     release = Net.close . fst
 

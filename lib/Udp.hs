@@ -61,8 +61,8 @@ data UdpOut
 
 -- | UDP network reader.
 udpReader :: UdpIn -> Producer (BS.ByteString, Net.SockAddr) (SafeT IO) c
-udpReader addr = bracket acquire Net.close action where
-
+udpReader addr = bracket acquire Net.close action
+  where
     acquire = do
         let (ip, port, mc) = case addr of
                 UdpInUnicast ip' port' ->
@@ -87,4 +87,28 @@ udpReader addr = bracket acquire Net.close action where
     action sock = forever $ do
         msg <- liftIO $ NB.recvFrom sock (2^(16::Int))
         yield msg
+
+udpWriter :: UdpOut -> Consumer BS.ByteString (SafeT IO) c
+udpWriter addr = bracket acquire (Net.close . fst) action
+  where
+    acquire = do
+        let (ip, port, mLocal, mTTL) = case addr of
+                UdpOutUnicast ip' port' ->
+                    ( Text.unpack ip', Text.unpack port', Nothing, Nothing)
+                UdpOutMulticast mcast' port' mLocal' mTTL' ->
+                    ( Text.unpack mcast', Text.unpack port'
+                    , Text.unpack <$> mLocal' , mTTL')
+        (serveraddr:_) <- Net.getAddrInfo
+            (Just (Net.defaultHints {Net.addrFlags = [Net.AI_PASSIVE]}))
+            (Just ip)
+            (Just port)
+        sock <- Net.socket
+            (Net.addrFamily serveraddr) Net.Datagram Net.defaultProtocol
+        maybe (return ()) (Mcast.setInterface sock) mLocal
+        maybe (return ()) (Mcast.setTimeToLive sock) mTTL
+        return (sock, Net.addrAddress serveraddr)
+
+    action (sock, dst) = forever $ do
+        msg <- await
+        liftIO $ NB.sendAllTo sock msg dst
 

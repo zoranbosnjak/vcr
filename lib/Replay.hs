@@ -13,9 +13,10 @@ import           Data.Void
 import           Control.Monad
 import           Control.Monad.Fix
 import           Pipes
-import           Data.List (find)
+import qualified Pipes.Safe as PS
 import           Data.Ratio ((%))
 import qualified Data.Text as T
+import qualified Data.Map as Map
 import           Data.Text.Encoding (decodeUtf8)
 import           Data.Char (toLower)
 import           Text.Printf
@@ -35,7 +36,6 @@ import           Control.Exception (try)
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
---import qualified Data.ByteString.Lazy as BSL
 import           Network.HTTP.Req
 import           Text.URI (mkURI)
 import qualified Network.HTTP.Client as HTC
@@ -56,7 +56,7 @@ newtype Recorder = Recorder T.Text deriving (Eq, Show)
 data ChannelSelection = ChannelSelection
     { chName    :: Channel                  -- recorder channel name
     , chDump    :: Maybe (UdpEvent -> String) -- dump to console
-    , chOutput  :: Maybe (Consumer UdpEvent IO ()) -- send output
+    , chOutput  :: Maybe (Consumer UdpEvent (PS.SafeT IO) ()) -- send output
     }
 
 data AtLimit = Continue | Wrap | Stop
@@ -125,31 +125,47 @@ fetcher (Just startTime) putToBuffer (Recorder rec) channelList = do
 
 -- | Sender process.
 -- Use "UTC" time for initial sync, then use monotonic time for actual replay.
-sender :: Maybe UtcTime -> STM UdpEvent -> STM Bool -> STM Speed -> (UtcTime -> STM ()) -> [ChannelSelection] -> IO UtcTime
-sender Nothing _getFromBuffer _getRunning _getSpeed _setTCurrent _channelList = doNothing
-sender (Just startUtcTime) getFromBuffer getRunning getSpeed updateT channelList = do
-    -- start processes for each channel
-    realSenders <- forM channelList $ \(ChannelSelection name mDump mOut) -> do
-        -- , chDump    :: Maybe (UdpEvent -> String) -- dump to console
-        -- , chOutput  :: Maybe (Consumer UdpEvent IO ()) -- send output
-        undefined
+sender :: Maybe UtcTime -> STM UdpEvent -> STM Bool -> STM Speed -> (String -> STM ()) -> (UtcTime -> STM ()) -> [ChannelSelection] -> IO UtcTime
+sender Nothing _getFromBuffer _getRunning _getSpeed _dumpConsole _setTCurrent _channelList = doNothing
+sender (Just startUtcTime) getFromBuffer getRunning getSpeed dumpConsole updateT channelList = do
 
-    (evt, mSp) <- atomically ((,) <$> getFromBuffer <*> getRunningSpeed)
-    case mSp of
-        Nothing -> notRunning startUtcTime evt
-        Just speed -> startup startUtcTime speed evt
+    -- input queue and process is required for each channel
+    realSenders <- forM channelList $ \(ChannelSelection name mDump mOut) -> do
+        q <- newTBQueueIO $ intToNatural prefetch
+        let consumer = maybe (forever $ await) id mOut
+            producer = forever $ do
+                event <- liftIO $ atomically $ readTBQueue q
+                yield event     -- send via provided consumer
+                case mDump of   -- dump to console
+                    Nothing -> return ()
+                    Just f -> liftIO $ atomically $ dumpConsole $ f event
+
+        return (name, (q, PS.runSafeT $ runEffect $ producer >-> consumer))
+
+    let senderMap = Map.fromList [(name, q) | (name, (q, _)) <- realSenders]
+
+    result <- race (runAll (snd . snd <$> realSenders)) $ do
+        (evt, mSp) <- atomically ((,) <$> getFromBuffer <*> getRunningSpeed)
+        case mSp of
+            Nothing -> notRunning senderMap startUtcTime evt
+            Just speed -> startup senderMap startUtcTime speed evt
+    case result of
+        Left n -> fail $ "sender " ++ show n ++ " failed"
+        Right val -> return val
+
   where
+
     getRunningSpeed :: STM (Maybe Speed)
     getRunningSpeed = getRunning >>= bool (pure Nothing) (fmap Just getSpeed)
 
     -- We don't want to drop events when switching between notRunning and running modes.
-    notRunning tUtc evt = do
+    notRunning senderMap tUtc evt = do
         speed <- atomically (getRunningSpeed >>= maybe retry return)
-        startup tUtc speed evt
+        startup senderMap tUtc speed evt
 
     -- Calculate how the virtual time will progress,
     -- depending on current time, speed and pending event.
-    startup tUtc speed evt = do
+    startup senderMap tUtc speed evt = do
         tStartupMono <- getMonoTimeNs
         let pendingUtc = eTimeUtc evt
             pendingMono = eTimeMono evt
@@ -160,13 +176,13 @@ sender (Just startUtcTime) getFromBuffer getRunning getSpeed updateT channelList
                 dtReal <- (\t -> t - tStartupMono) <$> getMonoTimeNs
                 let dt = round (fromIntegral dtReal * speed)
                 return (t0Mono + dt)
-        running (eSessionId evt) speed getVirtualMonotonicTime tUtc evt
+        running senderMap (eSessionId evt) speed getVirtualMonotonicTime tUtc evt
 
     -- Timing is only valid within the same session.
-    running session speed getVirtualMonotonicTime = fix $ \loop tUtc evt -> do
+    running senderMap session speed getVirtualMonotonicTime = fix $ \loop tUtc evt -> do
         case eSessionId evt == session of
             -- new session detected, restart
-            False -> startup tUtc speed evt
+            False -> startup senderMap tUtc speed evt
             True -> do
                 tMono <- getVirtualMonotonicTime
                 (tUtc', getNextEvent) <- case tMono >= eTimeMono evt of
@@ -176,7 +192,7 @@ sender (Just startUtcTime) getFromBuffer getRunning getSpeed updateT channelList
                             tUtc' = Clk.addUTCTime deltaT tUtc
                         return (tUtc', pure evt)
                     True -> do
-                        fire evt
+                        fire senderMap evt
                         let tUtc' = eTimeUtc evt
                         return (tUtc', getFromBuffer)
                 atomically $ updateT tUtc'
@@ -185,18 +201,13 @@ sender (Just startUtcTime) getFromBuffer getRunning getSpeed updateT channelList
                 case mSpeed' /= (Just speed) of
                     False -> loop tUtc' evt'
                     True -> case mSpeed' of
-                        Nothing -> notRunning tUtc' evt'
-                        Just speed' -> startup tUtc' speed' evt'
+                        Nothing -> notRunning senderMap tUtc' evt'
+                        Just speed' -> startup senderMap tUtc' speed' evt'
 
-    fire :: UdpEvent -> IO ()
-    fire evt = case find (\x -> chName x == eChannel evt) channelList of
+    -- fire event
+    fire senderMap evt = case Map.lookup (eChannel evt) senderMap of
         Nothing -> return ()
-        Just (ChannelSelection _name mDump mOut) -> do
-            case mOut of
-                Nothing -> return ()
-            case mDump of
-                Nothing -> return ()
-                Just dump -> print (dump evt)
+        Just q -> atomically $ writeTBQueue q evt
 
 replayEngine ::
     STM Recorder                    -- selected recorder
@@ -208,14 +219,16 @@ replayEngine ::
     -> STM Speed                    -- selected replay speed
     -> STM Running                  -- running switch
     -> (UtcTime -> STM ())          -- current Utc time updates for GUI
-    -> (T.Text -> STM ())           -- console dump line action
+    -> (Maybe String -> STM ())     -- console dump line action
     -> (Int -> STM ())              -- set buffer level indicator, [0..100]
     -> IO String                    -- reason for termination
 replayEngine getRecorder getChannelSelections getT1 updatesT0 _getT2
-  _getAtLimit getSpeed getRunning setTCurrent _dumpConsole setBufferLevel = do
+  _getAtLimit getSpeed getRunning setTCurrent dumpConsole setBufferLevel = do
     restartOnUpdate updatesT0 $ \tVar -> do
       restartOnChange getReplayConfig compareValue $ \(rec, channelList) -> do
-        atomically $ setBufferLevel 0
+        atomically $ do
+            setBufferLevel 0
+            dumpConsole Nothing
         -- Use initial delay, to prevent fast respawn during initial channel
         -- selection (on each channel change, this process will restart).
         -- The same applies for startTime and the recorder.
@@ -246,7 +259,7 @@ replayEngine getRecorder getChannelSelections getT1 updatesT0 _getT2
             t <- atomically $ readTVar tVar
             result <- race
                 (fetcher t putToBuffer rec (fmap chName channelList))
-                (sender t getFromBuffer getRunning getSpeed updateT channelList)
+                (sender t getFromBuffer getRunning getSpeed (dumpConsole . Just) updateT channelList)
             case result of
                 Left _ -> return "fetcher error"
                 Right _ -> do           -- restart from T1
@@ -289,11 +302,12 @@ pTimeEntry = do
 
 -- | Replay GUI.
 replayGUI ::
-    [(Name, Recorder)]
+    Int
+    -> [(Name, Recorder)]
     -> [(Name, Channel {-outputChannelName-} -> Channel {-recorderChannelName-})]
-    -> [(Name, [(Channel {-outputChannelName-}, UdpEvent -> String, Consumer UdpEvent IO ())])]
+    -> [(Name, [(Channel {-outputChannelName-}, UdpEvent -> String, Consumer UdpEvent (PS.SafeT IO) ())])]
     -> IO ()
-replayGUI recorders channelMaps outputs = start gui
+replayGUI maxDump recorders channelMaps outputs = start gui
   where
 
     gui = do
@@ -337,31 +351,13 @@ replayGUI recorders channelMaps outputs = start gui
         p1 <- panel sp []
         p2 <- panel sp []
 
-        {-
-        TODO: limit number of entries!
-        --textCtrlMakeLogActiveTarget dumpWindow
-        -- let dump = logMessage
-        -}
-        -- dumpWindow <- button p2 [ text := "test2" ]
         dumpWindow <- do
             control <- textCtrlRich p2
-                [ font := fontFixed -- { _fontSize = 12 }
-                -- , bgcolor := black
-                -- , textColor := red
+                [ font := fontFixed
                 , wrap := WrapNone
-                -- , enabled := False
                 ]
             textCtrlSetEditable control False
             return control
-
-        {-
-        -- dump some lines to the dumpWindow
-        let dump = appendText dumpWindow
-        forM_ [1..30] $ \i -> do
-            dump $ "test" ++ show (i::Int)
-            dump " test test test...  test test test...  test test test...  test test test...  test test test...  test test test..."
-            dump "\n"
-        -}
 
         let timeToolTip = "YYYY-MM-DD HH:MM:SS[.MMM]"
 
@@ -553,11 +549,6 @@ replayGUI recorders channelMaps outputs = start gui
             , on closing := do
                 cancel engine
                 propagateEvent
-            {-
-            , on idle := do
-                tick f engine
-                return False
-            -}
             ]
 
         set p [ layout := column 5
@@ -652,6 +643,17 @@ replayGUI recorders channelMaps outputs = start gui
                     [ selection := x
                     , bgcolor := lightgrey
                     ]
+
+            -- handle console messages
+            do
+                messages <- atomically $ flushTQueue consoleMessagesQueue
+                forM_ messages $ \case
+                    Nothing -> set dumpWindow [ text := "" ]
+                    Just msg -> appendText dumpWindow msg
+                s <- get dumpWindow text
+                let n = length s
+                Control.Monad.when (n > 2*maxDump) $ do
+                    set dumpWindow [ text := drop (n - maxDump) s ]
             ]
 
     checkTime w = do

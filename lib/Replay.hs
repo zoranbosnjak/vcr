@@ -310,9 +310,13 @@ pTimeEntry = do
     void $ MC.char ' '
     timePart <- do
         h <- ML.decimal
+        guard $ h < 24
         m <- (MC.char ':' *> ML.decimal )
+        guard $ m < 60
         s <- (MC.char ':' *> ML.decimal )
+        guard $ s < 62 -- leap seconds
         ms <- MP.try (MC.char '.' *> ML.decimal ) MP.<|> pure 0
+        guard $ ms < 1000
         let pico = ((((h * 60) + m) * 60 + s) * 1000 + ms) * 1000 * 1000 * 1000
         return $ Clk.picosecondsToDiffTime pico
     return $ Clk.UTCTime datePart timePart
@@ -369,6 +373,18 @@ replayGUI maxDump recorders channelMaps outputs = start gui
         p1 <- panel sp []
         p2 <- panel sp []
 
+        now <- getUtcTime
+
+        bigClock <- do
+            control <- textCtrlRich p
+                [ font := fontFixed { _fontSize = 40 }
+                , wrap := WrapNone
+                , bgcolor := black
+                , textColor := green
+                ]
+            textCtrlSetEditable control False
+            return control
+
         dumpWindow <- do
             control <- textCtrlRich p2
                 [ font := fontFixed
@@ -379,12 +395,12 @@ replayGUI maxDump recorders channelMaps outputs = start gui
 
         let timeToolTip = "YYYY-MM-DD HH:MM:SS[.MMM]"
 
-        ((t1Var,t1), (tCurrentVar,tCurrent), (t2Var,t2)) <- getUtcTime >>= \now -> (,,)
+        ((t1Var,t1), (tCurrentVar,tCurrent), (t2Var,t2)) <- (,,)
             <$> do
                 var <- newTVarIO (Just now)
                 ctr <- textEntry p
                     [ tooltip := timeToolTip
-                    , text := showTimeEntry now
+                    , text := fst $ showTimeEntry now
                     , on update ::= \w -> do
                         result <- MP.parseMaybe pTimeEntry <$> get w text
                         atomically $ writeTVar var result
@@ -394,7 +410,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 var <- newUpdatingVarIO (Just now)
                 ctr <- textEntry p
                     [ tooltip := timeToolTip
-                    , text := showTimeEntry now
+                    , text := fst $ showTimeEntry now
                     , on update ::= \w -> do
                         result <- MP.parseMaybe pTimeEntry <$> get w text
                         atomically $ updateVar var result
@@ -404,7 +420,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 var <- newTVarIO (Just now)
                 ctr <- textEntry p
                     [ tooltip := timeToolTip
-                    , text := showTimeEntry now
+                    , text := fst $ showTimeEntry now
                     , on update ::= \w -> do
                         result <- MP.parseMaybe pTimeEntry <$> get w text
                         atomically $ writeTVar var result
@@ -590,7 +606,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                     [ margin 10 $ row 5 [label "speed:", widget speedSelector ]
                     , margin 20 $ widget runButton
                     ]
-                , boxed "replay time" $ fill $ empty
+                , boxed "replay time" $ fill $ widget bigClock
                 ]
             , fill $ hsplit sp 5 160
                 (widget p1)
@@ -614,7 +630,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
             -- update current time from the engine
             atomically (swapTVar tUpdates Nothing) >>= \case
                 Nothing -> return ()
-                Just t -> set tCurrent [ text := showTimeEntry t ]
+                Just t -> set tCurrent [ text := fst $ showTimeEntry t ]
 
             -- check time selectors
             checkTime t1
@@ -630,7 +646,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                         let k = 10 * ((fromIntegral sel / 100) ^ (7::Int))
                             dt = k * Clk.nominalDay
                             y = Clk.addUTCTime dt x
-                        set tCurrent [ text := showTimeEntry y ]
+                        set tCurrent [ text := fst $ showTimeEntry y ]
                         atomically $ updateVar tCurrentVar (Just y)
 
             -- update channel selection
@@ -673,6 +689,12 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 let n = length s
                 Control.Monad.when (n > 2*maxDump) $ do
                     set dumpWindow [ text := drop (n - maxDump) s ]
+
+            -- update big clock
+            do
+                mt <- MP.parseMaybe pTimeEntry <$> get tCurrent text
+                let s = maybe "" (snd . showTimeEntry) mt
+                set bigClock [ text := s ]
             ]
 
     checkTime w = do
@@ -687,5 +709,8 @@ replayGUI maxDump recorders channelMaps outputs = start gui
             hours = sec `div` 3600
             minutes = (sec - hours*3600) `div` 60
             seconds = (sec - hours*3600) `mod` 60
-        in printf "%d-%02d-%02d %02d:%02d:%02d.%03d" year month day hours minutes seconds (ms - (1000 * sec))
+        in
+            ( printf "%d-%02d-%02d %02d:%02d:%02d.%03d" year month day hours minutes seconds (ms - (1000 * sec)) :: String
+            , printf "%d-%02d-%02d\n%02d:%02d:%02d.%03d" year month day hours minutes seconds (ms - (1000 * sec)) :: String
+            )
 

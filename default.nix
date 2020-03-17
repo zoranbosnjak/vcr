@@ -49,8 +49,10 @@ let
       export GHC_BASE=${ghcBase}
       '';
     postInstall = ''
-      ghc -Wall -O2 generator/generator.hs
-      cp generator/generator $out/bin
+      ghc -Wall -O2 test-tools/generator.hs
+      ghc -Wall -O2 test-tools/receiver.hs
+      cp test-tools/generator $out/bin
+      cp test-tools/receiver $out/bin
     '';
   });
 

@@ -323,7 +323,7 @@ replayGUI ::
     Int
     -> [(Name, Recorder)]
     -> [(Name, Channel {-outputChannelName-} -> Channel {-recorderChannelName-})]
-    -> [(Name, [(Channel {-outputChannelName-}, UdpEvent -> String, Consumer UdpEvent (PS.SafeT IO) ())])]
+    -> [(Name, [(Channel {-outputChannelName-}, UdpEvent -> String, Consumer UdpEvent (PS.SafeT IO) (), String)])]
     -> IO ()
 replayGUI maxDump recorders channelMaps outputs = start gui
   where
@@ -498,7 +498,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
         outputPanels <- forM outputs $ \(name, lst) -> do
             cp <- scrolledWindow nb [ scrollRate := sz 20 20 ]
 
-            controls <- forM lst $ \(channel, dump, consumer) -> do
+            controls <- forM lst $ \(channel, dump, consumer, outTip) -> do
                 enableConsole <- toggleButton cp
                     [ text := "console"
                     , bgcolor := lightgrey
@@ -509,6 +509,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                     ]
                 enableOutput <- toggleButton cp
                     [ text := "output"
+                    , tooltip := outTip
                     , bgcolor := lightgrey
                     , on command ::= \w -> do
                         x <- get w checked

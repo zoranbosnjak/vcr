@@ -1,6 +1,7 @@
 
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -125,9 +126,9 @@ fetcher (Just startTime) putToBuffer (Recorder rec) channelList = do
 
 -- | Sender process.
 -- Use "UTC" time for initial sync, then use monotonic time for actual replay.
-sender :: Maybe UtcTime -> STM UdpEvent -> STM Bool -> STM Speed -> (String -> STM ()) -> (UtcTime -> STM ()) -> [ChannelSelection] -> IO UtcTime
-sender Nothing _getFromBuffer _getRunning _getSpeed _dumpConsole _setTCurrent _channelList = doNothing
-sender (Just startUtcTime) getFromBuffer getRunning getSpeed dumpConsole updateT channelList = do
+sender :: Maybe UtcTime -> STM UdpEvent -> STM (Maybe UtcTime) -> STM AtLimit -> STM Bool -> STM Speed -> (String -> STM ()) -> (UtcTime -> STM ()) -> [ChannelSelection] -> IO ()
+sender Nothing _getFromBuffer _getT2 _getAtLimit _getRunning _getSpeed _dumpConsole _setTCurrent _channelList = doNothing
+sender (Just startUtcTime) getFromBuffer getT2 getAtLimit getRunning getSpeed dumpConsole updateT channelList = do
 
     -- input queue and process is required for each channel
     realSenders <- forM channelList $ \(ChannelSelection name mDump mOut) -> do
@@ -198,11 +199,27 @@ sender (Just startUtcTime) getFromBuffer getRunning getSpeed dumpConsole updateT
                 atomically $ updateT tUtc'
                 evt' <- atomically getNextEvent
                 mSpeed' <- atomically getRunningSpeed
-                case mSpeed' /= (Just speed) of
-                    False -> loop tUtc' evt'
-                    True -> case mSpeed' of
+                case mSpeed' == (Just speed) of
+                    False -> case mSpeed' of
                         Nothing -> notRunning senderMap tUtc' evt'
                         Just speed' -> startup senderMap tUtc' speed' evt'
+                    True -> do
+                        atLimit <- atomically getAtLimit
+                        mT2 <- atomically getT2
+                        let limitReached = maybe False (\t2 -> tUtc' >= t2) mT2
+                        if
+                            -- finish sending, caller will restart it from T1
+                            | limitReached && atLimit == Wrap -> return ()
+
+                            -- wait until something changes, then recalculate
+                            | limitReached && atLimit == Stop -> do
+                                atomically $ do
+                                    result <- (,) <$> getAtLimit <*> getT2
+                                    Control.Monad.when (result == (atLimit, mT2)) $ retry
+                                startup senderMap tUtc' speed evt'
+
+                            -- normal case
+                            | otherwise -> loop tUtc' evt'
 
     -- fire event
     fire senderMap evt = case Map.lookup (eChannel evt) senderMap of
@@ -222,13 +239,14 @@ replayEngine ::
     -> (Maybe String -> STM ())     -- console dump line action
     -> (Int -> STM ())              -- set buffer level indicator, [0..100]
     -> IO String                    -- reason for termination
-replayEngine getRecorder getChannelSelections getT1 updatesT0 _getT2
-  _getAtLimit getSpeed getRunning setTCurrent dumpConsole setBufferLevel = do
+replayEngine getRecorder getChannelSelections getT1 updatesT0 getT2
+  getAtLimit getSpeed getRunning setTCurrent dumpConsole setBufferLevel = do
     restartOnUpdate updatesT0 $ \tVar -> do
       restartOnChange getReplayConfig compareValue $ \(rec, channelList) -> do
         atomically $ do
             setBufferLevel 0
             dumpConsole Nothing
+
         -- Use initial delay, to prevent fast respawn during initial channel
         -- selection (on each channel change, this process will restart).
         -- The same applies for startTime and the recorder.
@@ -259,7 +277,7 @@ replayEngine getRecorder getChannelSelections getT1 updatesT0 _getT2
             t <- atomically $ readTVar tVar
             result <- race
                 (fetcher t putToBuffer rec (fmap chName channelList))
-                (sender t getFromBuffer getRunning getSpeed (dumpConsole . Just) updateT channelList)
+                (sender t getFromBuffer getT2 getAtLimit getRunning getSpeed (dumpConsole . Just) updateT channelList)
             case result of
                 Left _ -> return "fetcher error"
                 Right _ -> do           -- restart from T1

@@ -428,7 +428,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 return (var, ctr)
 
         t1Button <- button p
-            [ text := "start"
+            [ text := "begin"
             , on command := do
                 s <- get tCurrent text
                 set t1 [ text := s ]

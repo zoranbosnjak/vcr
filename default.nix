@@ -47,6 +47,7 @@ let
       export SW_VERSION=$(cat *.cabal | grep "^version:" | awk '{print $2}')
       export GIT_REV=${gitrev}
       export GHC_BASE=${ghcBase}
+      export WXC_LIB=${haskellPackages.wxc}/lib
       '';
     postInstall = ''
       ghc -Wall -O2 test-tools/generator.hs
@@ -68,6 +69,7 @@ let
       export SW_VERSION="devel"
       export GIT_REV=${gitrev}
       export GHC_BASE=$(which ghc | cut -d '/' -f-4)
+      export WXC_LIB=${haskellPackages.wxc}/lib
     '';
   };
 

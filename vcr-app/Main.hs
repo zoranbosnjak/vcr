@@ -72,6 +72,9 @@ main = do
         ghcBase :: String
         ghcBase = $( getEnvVariableExpr "GHC_BASE" )
 
+        wxcLib :: String
+        wxcLib = $( getEnvVariableExpr "WXC_LIB" )
+
     -- parse options
     opt <- do
         let showVersion = flag' True (long "version" <> help "Show version and exit")
@@ -90,5 +93,5 @@ main = do
             hPutStrLn stderr $ show e
             exitWith $ ExitFailure 1
 
-    (optCommand opt) pName pArgs versionString ghcBase `catch` onError
+    (optCommand opt) pName pArgs versionString ghcBase wxcLib `catch` onError
 

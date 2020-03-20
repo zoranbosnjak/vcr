@@ -8,7 +8,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Common
-    ( Prog, Args, Version, Command, GhcBase
+    ( Prog, Args, Version, Command, GhcBase, WxcLib
     , LoggerName
     , ErrorMsg
     , Priority(..)
@@ -47,7 +47,8 @@ type Prog = String
 type Args = [String]
 type Version = String
 type GhcBase = String
-type Command = Prog -> Args -> Version -> GhcBase -> IO ()
+type WxcLib = String
+type Command = Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()
 
 type LoggerName = String
 type ErrorMsg = String

@@ -18,7 +18,7 @@ extra-source-files:  CHANGELOG.md
 
 library
   exposed-modules:
-    TH, Vcr, Common, Sequential, Time, File, Udp
+    TH, Vcr, Common, Sequential, Time, File, Udp, Replay
   -- other-modules:
   -- other-extensions:
   -- hs-source-dirs:
@@ -78,4 +78,7 @@ library
     --, pipes-binary
     --, pipes-bytestring
     , wx
+    , wxcore
+    , modern-uri
+    , http-client
 

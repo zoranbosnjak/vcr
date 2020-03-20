@@ -27,16 +27,20 @@ options = CmdOptions
     <$> strOption (long "program" <> metavar "FILE" <> help "custom program file")
     <*> optional (strOption (long "ghcOpts" <> metavar "OPTS" <> help "arguments to ghc"))
 
-runCmd :: CmdOptions -> Prog -> Args -> Version -> GhcBase -> IO ()
-runCmd opt _pName _pArgs _version ghcBase = do
+runCmd :: CmdOptions -> Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()
+runCmd opt _pName _pArgs _version ghcBase wxcLib = do
     -- recompile configuration file and execute it
     withSystemTempDirectory "vcr" $ \tmp -> do
         let target = tmp <> "vcr"
         ghcProc <- runProcess (ghcBase </> "bin" </> "ghc")
             (
             [ "--make"
+            , "-O2"
+            , "-Wall"
+            , "-threaded"
             , "-v0"
             , "-outputdir", tmp
+            , "-L"++wxcLib
             , "-o", target
             , optProgram opt
             ]

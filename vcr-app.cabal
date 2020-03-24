@@ -62,4 +62,5 @@ executable vcr
     , pipes-safe
     , regex-tdfa
     , time
+    , ekg
 

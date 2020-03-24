@@ -57,7 +57,6 @@ library
     , clock
     , async
     , transformers
-    --, ekg
     , hslogger
     , hsyslog
     , deepseq
@@ -78,4 +77,5 @@ library
     , wxcore
     , modern-uri
     , http-client
+    , ekg
 

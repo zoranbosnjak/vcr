@@ -1,7 +1,7 @@
 { mkDerivation, aeson, aeson-pretty, async, base, base16-bytestring
 , base64-bytestring, bytestring, clock, containers, deepseq, deseo
-, directory, filepath, hslogger, hsyslog, http-client, http-types
-, megaparsec, modern-uri, network, network-multicast
+, directory, ekg, filepath, hslogger, hsyslog, http-client
+, http-types, megaparsec, modern-uri, network, network-multicast
 , optparse-applicative, pipes, pipes-concurrency, pipes-safe
 , process, QuickCheck, regex-tdfa, req, retry, stdenv, stm
 , template-haskell, temporary, text, text-format, time
@@ -14,7 +14,7 @@ mkDerivation {
   src = ./lib;
   libraryHaskellDepends = [
     aeson aeson-pretty async base base16-bytestring base64-bytestring
-    bytestring clock containers deepseq deseo directory filepath
+    bytestring clock containers deepseq deseo directory ekg filepath
     hslogger hsyslog http-client http-types megaparsec modern-uri
     network network-multicast optparse-applicative pipes
     pipes-concurrency pipes-safe process QuickCheck regex-tdfa req

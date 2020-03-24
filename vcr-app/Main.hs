@@ -9,9 +9,13 @@ module Main where
 -- standard imports
 import           Options.Applicative
 import           Control.Exception (catch, SomeException)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 import qualified System.Environment
+import           Text.Read (readMaybe)
 import           System.IO (stderr, hPutStrLn)
 import           System.Exit (exitWith, ExitCode(ExitFailure,ExitSuccess))
+import qualified System.Remote.Monitoring as Ekg
 
 -- local imports
 import           Common
@@ -29,27 +33,23 @@ commands =
 
 data Options = Options
     { optCommand :: Command
-    --, optEkg        :: Maybe (BS.ByteString, Int)
+    , optEkg        :: Maybe (BS.ByteString, Int)
     }
 
 options :: Parser Options
 options = Options
     <$> subparser (mconcat [command a b | (a,b) <- commands])
-    {-
     <*> optional (option ekgOption
         ( long "ekg"
        <> metavar "IP:PORT"
        <> help "Enable EKG monitor"
         ))
-    -}
   where
-    {-
     ekgOption = maybeReader $ \s -> do
         let (a,b) = break (==':') s
             ip = BS8.pack a
         port <- readMaybe $ drop 1 b
         Just (ip, port)
-    -}
 
 main :: IO ()
 main = do
@@ -86,6 +86,11 @@ main = do
                 putStrLn $ pName ++ ", " ++ versionString
                 exitWith ExitSuccess
             Just opt -> return opt
+
+    -- EKG monitor
+    runMaybe (optEkg opt) $ \(ip, port) -> do
+        _ <- Ekg.forkServer ip port
+        return ()
 
     let onError :: SomeException -> IO ()
         onError e = do

@@ -54,6 +54,8 @@ let
       ghc -Wall -O2 test-tools/receiver.hs
       cp test-tools/generator $out/bin
       cp test-tools/receiver $out/bin
+      mkdir $out/replay
+      cp replay/* $out/replay
     '';
   });
 

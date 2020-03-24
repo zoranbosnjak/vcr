@@ -20,18 +20,26 @@ import           Common
 data CmdOptions = CmdOptions
     { optProgram :: FilePath
     , optGhcOpts :: Maybe String
+    , optCompileOnly :: Bool
     } deriving (Generic, Eq, Show)
 
 options :: Parser CmdOptions
 options = CmdOptions
-    <$> strOption (long "program" <> metavar "FILE" <> help "custom program file")
-    <*> optional (strOption (long "ghcOpts" <> metavar "OPTS" <> help "arguments to ghc"))
+    <$> strOption (long "program" <> metavar "CMD"
+        <> help "custom program file with optional arguments")
+    <*> optional (strOption (long "ghcOpts" <> metavar "OPTS"
+        <> help "arguments to ghc"))
+    <*> switch (long "compile-only"
+        <> help "stop after compile stage, do not run the program")
 
+-- Recompile configuration file and execute it.
 runCmd :: CmdOptions -> Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()
 runCmd opt _pName _pArgs _version ghcBase wxcLib = do
-    -- recompile configuration file and execute it
     withSystemTempDirectory "vcr" $ \tmp -> do
         let target = tmp <> "vcr"
+            commandLine = words $ optProgram opt
+            cmd = head commandLine
+            cmdArgs = tail commandLine
         ghcProc <- runProcess (ghcBase </> "bin" </> "ghc")
             (
             [ "--make"
@@ -42,7 +50,7 @@ runCmd opt _pName _pArgs _version ghcBase wxcLib = do
             , "-outputdir", tmp
             , "-L"++wxcLib
             , "-o", target
-            , optProgram opt
+            , cmd
             ]
             ++ words (maybe "" id (optGhcOpts opt))
             )
@@ -53,9 +61,11 @@ runCmd opt _pName _pArgs _version ghcBase wxcLib = do
             Nothing
         waitForProcess ghcProc >>= \case
             ExitFailure _rc -> return ()
-            ExitSuccess -> executeFile target False
-                []          -- args
-                Nothing     -- env
+            ExitSuccess -> case optCompileOnly opt of
+                True -> return ()
+                False -> executeFile target False
+                    cmdArgs
+                    Nothing     -- env
 
 cmdCustom :: ParserInfo Command
 cmdCustom = info

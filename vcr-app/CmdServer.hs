@@ -38,7 +38,6 @@ import           File
 
 data Store
     = StoreDir FilePath
-    -- | StoreKafka :: ...
     deriving (Generic, Eq, Show)
 
 -- | Speciffic command options.

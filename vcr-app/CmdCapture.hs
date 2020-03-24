@@ -45,7 +45,6 @@ import           File
 data Config = Config
     { confInputs :: Map.Map Channel UdpIn
     , confOutputFile :: Maybe (FilePath, Maybe Rotate)
-    --, confOutputKafka :: Maybe ...
     } deriving (Generic, Eq, Show, ToJSON, FromJSON)
 
 emptyConfig :: Config
@@ -65,8 +64,6 @@ data SigHUPConfig = SigHUPConfigEnabled | SigHUPConfigDisabled
 data ConfigMethod
     = ConfigArguments Config Bootstrap
     | ConfigFile FilePath HttpConfig SigHUPConfig
-    -- | ConfigZookeeper FilePath ZkConnection
-        --data ZkConnection = ZkConnection ZkEndpoint ZK.Timeout deriving (Generic, Eq, Show)
     deriving (Generic, Eq, Show)
 
 -- | Speciffic command options.
@@ -78,6 +75,7 @@ data CmdOptions = CmdOptions
     , optAlarmHold  :: Double
     } deriving (Generic, Eq, Show)
 
+-- | Option parser.
 options :: Parser CmdOptions
 options = CmdOptions
     <$> optional (option auto
@@ -140,6 +138,7 @@ encodePretty :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
 encodePretty = AesonP.encodePretty'
     AesonP.defConfig {AesonP.confCompare = compare}
 
+-- | Http server.
 httpServer ::
     (Priority -> String -> IO ())
     -> MonoTimeNs
@@ -399,8 +398,6 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
             , do
                 ch <- atomically $ dupTChan q
                 let getConfig = confOutputFile <$> readTVar config
-                    -- fetchLine = BSL.toStrict . encodeCompact <$> readTChan ch
-                -- rotatingFileLineWriter (logM "fileWriter") getConfig fetchLine
                 rotatingFileLineWriter (logM "fileWriter") getConfig (readTChan ch)
 
             -- input processing

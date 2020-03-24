@@ -6,7 +6,7 @@
 }:
 mkDerivation {
   pname = "vcr-app";
-  version = "0.2.0";
+  version = "0.5.0";
   src = ./.;
   isLibrary = false;
   isExecutable = true;

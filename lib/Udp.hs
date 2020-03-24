@@ -88,6 +88,7 @@ udpReader addr = bracket acquire Net.close action
         msg <- liftIO $ NB.recvFrom sock (2^(16::Int))
         yield msg
 
+-- | UDP network writer.
 udpWriter :: UdpOut -> Consumer BS.ByteString (SafeT IO) c
 udpWriter addr = bracket acquire (Net.close . fst) action
   where

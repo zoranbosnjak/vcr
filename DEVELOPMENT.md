@@ -65,7 +65,7 @@ runhaskell -ilib vcr-app/Main.hs {args}
 ### Running custom script (inside nix-shell)
 ```bash
 nix-shell
-runhaskell -Wall -ilib -ivcr-app ./vcr-app/Main.hs custom --program /path/to/custom.hs --ghcOpts "-O2 -v1 -i/path/to"
+runhaskell -Wall -ilib -ivcr-app ./vcr-app/Main.hs custom --program "/path/to/custom.hs --custom args" --ghcOpts "-O2 -v1 -i/path/to"
 
 # or
 nix-build

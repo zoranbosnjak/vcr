@@ -74,9 +74,6 @@ library
     , pipes-concurrency
     , pipes-safe
     , regex-tdfa
-    --, pipes-group
-    --, pipes-binary
-    --, pipes-bytestring
     , wx
     , wxcore
     , modern-uri

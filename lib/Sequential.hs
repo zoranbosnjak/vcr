@@ -32,7 +32,13 @@ instance Sequential Integer where
     countSequential     = [0..]
 
 data Periodic (n :: Nat) = UnsafeMkPeriodic { getPeriodic :: !Integer}
-    deriving (Generic, Eq, ToJSON, FromJSON)
+    deriving (Generic, Eq)
+
+instance ToJSON (Periodic n) where
+    toJSON = toJSON . getPeriodic
+
+instance FromJSON (Periodic n) where
+    parseJSON val = UnsafeMkPeriodic <$> parseJSON val
 
 instance KnownNat n => Sequential (Periodic n) where
     sequenceToInteger   = getPeriodic

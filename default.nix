@@ -18,14 +18,13 @@ let
 
   haskellPackages = haskellPackages1.override {
     overrides = haskellPackagesNew: haskellpackagesOld: rec {
-      wx = haskellPackagesNew.callPackage ./wx.nix { };
-      wxcore = haskellPackagesNew.callPackage ./wxcore.nix { };
-      wxdirect = haskellPackagesNew.callPackage ./wxdirect.nix { };
-      wxc = haskellPackagesNew.callPackage ./wxc.nix { };
-      req = haskellPackagesNew.callPackage ./req.nix { };
-      modern-uri = haskellPackagesNew.callPackage ./modern-uri.nix { };
-
-      deseo = haskellPackagesNew.callPackage ./deseo.nix { };
+      wx = haskellPackagesNew.callPackage ./nix/wx.nix { };
+      wxcore = haskellPackagesNew.callPackage ./nix/wxcore.nix { };
+      wxdirect = haskellPackagesNew.callPackage ./nix/wxdirect.nix { };
+      wxc = haskellPackagesNew.callPackage ./nix/wxc.nix { };
+      req = haskellPackagesNew.callPackage ./nix/req.nix { };
+      modern-uri = haskellPackagesNew.callPackage ./nix/modern-uri.nix { };
+      deseo = haskellPackagesNew.callPackage ./nix/deseo.nix { };
       vcr = vcrLib;
     };
   };
@@ -52,8 +51,8 @@ let
     postInstall = ''
       ghc -Wall -O2 test-tools/generator.hs
       ghc -Wall -O2 test-tools/receiver.hs
-      cp test-tools/generator $out/bin
-      cp test-tools/receiver $out/bin
+      cp test-tools/generator $out/bin/vcr-generator
+      cp test-tools/receiver $out/bin/vcr-receiver
       mkdir $out/replay
       cp replay/* $out/replay
     '';

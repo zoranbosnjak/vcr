@@ -16,28 +16,28 @@ To update revision of `nixpkgs`, update `nixpkgs.json` file.
 To update particular `package` revision, which is included in nix rules:
 
 ```bash
-cabal2nix https://{path-to-git-repo}/{package} --revision {rev} > package-ver.nix
+cabal2nix https://{path-to-git-repo}/{package} --revision {rev} > nix/package-ver.nix
 
 # or if subdirectory is included
-cabal2nix https://{path-to-git-repo}/{package} --revision {rev} --subpath {path} > package-ver.nix
+cabal2nix https://{path-to-git-repo}/{package} --revision {rev} --subpath {path} > nix/package-ver.nix
 
 # or for local development version
-cabal2nix path/to/package > package-ver.nix
+cabal2nix path/to/package > nix/package-ver.nix
 ```
 
 ## Default build using nix-build
 
 ```bash
 # default
-nix-build release.nix
+nix-build
 ./result/bin/{prog} --version
 
 # override git revision
-nix-build release.nix --argstr gitrev {some-revision}
+nix-build --argstr gitrev {some-revision}
 ./result/bin/{prog} --version
 
 # build from gitlab CI
-nix-build release.nix --argstr gitrev $CI_COMMIT_SHORT_SHA
+nix-build --argstr gitrev $CI_COMMIT_SHORT_SHA
 ```
 
 ### Development build from nix-shell
@@ -65,11 +65,11 @@ runhaskell -ilib vcr-app/Main.hs {args}
 ### Running custom script (inside nix-shell)
 ```bash
 nix-shell
-runhaskell -Wall -ilib -ivcr-app ./vcr-app/Main.hs custom --program "/path/to/custom.hs --custom args" --ghcOpts "-O2 -v1 -i/path/to"
+runhaskell -Wall -ilib -ivcr-app ./vcr-app/Main.hs custom --program "/path/to/custom.hs --custom args" --ghcOpts "-i/path/to -more-opts"
 
 # or
 nix-build
-./dist.../vcr custom --program /path/to/custom.hs --ghcOpts "-O2 -v1 -i/path/to -i/path/to/lib"
+./dist.../vcr custom --program /path/to/custom.hs --ghcOpts "-i/path/to/lib -more-opts"
 ```
 
 ## Changes in cabal file
@@ -77,9 +77,13 @@ nix-build
 When changing `*.cabal` file, run:
 
 ```bash
-nix-shell --pure -p cabal2nix --run "cabal2nix ." > default.nix
-# or
 cabal2nix lib > lib.nix
 cabal2nix . > app.nix
+```
+
+# Running replay in devel mode (inside nix-shell)
+```bash
+nix-shell
+runhaskell -Wall -ilib -ivcr-app ./replay/example.hs --asterix path/to/xml
 ```
 

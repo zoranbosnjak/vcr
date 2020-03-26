@@ -34,7 +34,6 @@ import           Control.Concurrent.STM
 import           Control.Concurrent.Async
 import           Control.Exception (try)
 
-
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import           Network.HTTP.Req
@@ -228,6 +227,7 @@ sender (Just startUtcTime) getFromBuffer getT2 getAtLimit getRunning getSpeed du
 
 replayEngine ::
     STM Recorder                    -- selected recorder
+    -> STM Int                      -- session index
     -> STM [ChannelSelection]       -- replay channels
     -> STM (Maybe UtcTime)          -- t1
     -> UpdatingVar (Maybe UtcTime)  -- starting Utc time updates
@@ -239,10 +239,10 @@ replayEngine ::
     -> (Maybe String -> STM ())     -- console dump line action
     -> (Int -> STM ())              -- set buffer level indicator, [0..100]
     -> IO String                    -- reason for termination
-replayEngine getRecorder getChannelSelections getT1 updatesT0 getT2
+replayEngine getRecorder getSessionIx getChannelSelections getT1 updatesT0 getT2
   getAtLimit getSpeed getRunning setTCurrent dumpConsole setBufferLevel = do
     restartOnUpdate updatesT0 $ \tVar -> do
-      restartOnChange getReplayConfig compareValue $ \(rec, channelList) -> do
+      restartOnChange getReplayConfig compareValue $ \(rec, _sesIx, channelList) -> do
         atomically $ do
             setBufferLevel 0
             dumpConsole Nothing
@@ -285,12 +285,15 @@ replayEngine getRecorder getChannelSelections getT1 updatesT0 getT2
                     loop
 
   where
-    compareValue (_rec, channelList) = do
-        ChannelSelection channel console out <- channelList
-        return (channel, isJust console, isJust out)
+    compareValue (rec, sessionIx, channelList) = (rec, sessionIx, channels)
+      where
+        channels = do
+            ChannelSelection channel console out <- channelList
+            return (channel, isJust console, isJust out)
 
-    getReplayConfig = (,)
+    getReplayConfig = (,,)
         <$> getRecorder
+        <*> getSessionIx
         <*> do
             cs <- getChannelSelections
             let channelList = do
@@ -498,18 +501,20 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                     atomically $ writeTVar var x
                     set w [ bgcolor := bool lightgrey green x ]
                     set tSlider [ enabled := not x ]
-                    set t1ButtonApply [ enabled := not x ]
                     set tCurrent [ enabled := not x ]
                 ]
             return (var, ctr)
 
         -- Unfortunately, the "on click" triggers before the change,
         -- so the actual "notebookGetSelection" must be called later.
-        nb <- notebook p1
-            [ on click := \_clickPoint -> do
-                set channelChange [ value := True ]
-                propagateEvent
-            ]
+        (nbVar, nb) <- do
+            var <- newTVarIO 0
+            ctr <- notebook p1
+                [ on click := \_clickPoint -> do
+                    set channelChange [ value := True ]
+                    propagateEvent
+                ]
+            return (var, ctr)
 
         outputPanels <- forM outputs $ \(name, lst) -> do
             cp <- scrolledWindow nb [ scrollRate := sz 20 20 ]
@@ -565,6 +570,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
 
         engine <- async $ replayEngine
             (readTVar recorderVar)
+            (readTVar nbVar)
             (readTVar channelsVar)
             (readTVar t1Var)
             tCurrentVar
@@ -666,7 +672,9 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                         b <- toOutput
                         return $ ChannelSelection (mapper ch) a b
 
-                    atomically $ writeTVar channelsVar lst
+                    atomically $ do
+                        writeTVar nbVar ix
+                        writeTVar channelsVar lst
 
             -- refresh buffer level
             atomically (readTVar bufferLevelVar) >>= \case

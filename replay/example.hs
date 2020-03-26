@@ -20,6 +20,7 @@ import           Data.Time
 import           Data.List (nub)
 import           Data.Bool
 import           Data.Char (toUpper)
+import           Data.Word
 import           Text.Printf
 import           System.Directory (getDirectoryContents)
 import           System.FilePath ((</>))
@@ -77,6 +78,10 @@ dump evt = printf "%s: %-10s: 0x%-10s...\n"
     (fmap toUpper $ take 10 $ hexlify $ Udp.udpDatagram $ eValue evt)
   where
     tf = formatTime defaultTimeLocale "%H:%M:%S%3Q"
+
+-- | Replay filter example - prepend byte to datagram.
+prepend :: MonadIO m => Word8 -> Pipe BS.ByteString BS.ByteString m ()
+prepend b = PP.map (\bs -> BS.singleton b <> bs)
 
 -- | Replay filter example.
 -- It manipulates timestamp in some asterix records,
@@ -141,19 +146,25 @@ outputs ::
          ])
        ]
 outputs uaps =
-    [ ("replay1",   -- normal replay
+    [ ("normal",   -- normal replay
         [ ("ch1", dump, dg >-> txUnicast "127.0.0.1" "59001", "local 59001")
         , ("ch2", dump, dg >-> txUnicast "127.0.0.1" "59002", "local 59002")
         , ("ch3", dump, dg >-> txUnicast "127.0.0.1" "59003", "local 59003")
         , ("ch4", dump, dg >-> txUnicast "127.0.0.1" "59004", "local 59004")
         ])
-    , ("replay2",   -- restamp each channel
+    , ("prepend",   -- prepend byte
+        [ ("ch1", dump, dg >-> prepend 1 >-> txUnicast "127.0.0.1" "59001", "local 59001")
+        , ("ch2", dump, dg >-> prepend 2 >-> txUnicast "127.0.0.1" "59002", "local 59002")
+        , ("ch3", dump, dg >-> prepend 3 >-> txUnicast "127.0.0.1" "59003", "local 59003")
+        , ("ch4", dump, dg >-> prepend 4 >-> txUnicast "127.0.0.1" "59004", "local 59004")
+        ])
+    , ("restamp",   -- restamp asterix
         [ ("ch1", dump, dg >-> restamp uaps >-> txUnicast "127.0.0.1" "59001", "local 59001")
         , ("ch2", dump, dg >-> restamp uaps >-> txUnicast "127.0.0.1" "59002", "local 59002")
         , ("ch3", dump, dg >-> restamp uaps >-> txUnicast "127.0.0.1" "59003", "local 59003")
         , ("ch4", dump, dg >-> restamp uaps >-> txUnicast "127.0.0.1" "59004", "local 59004")
         ])
-    , ("replay3",   -- send to multicast
+    , ("multicast",   -- send to multicast
         [ ("ch1", dump, dg >-> txMulticast "239.0.0.1" "59001" "127.0.0.1" 32, "mc 59001")
         , ("ch2", dump, dg >-> txMulticast "239.0.0.1" "59002" "127.0.0.1" 32, "mc 59002")
         , ("ch3", dump, dg >-> txMulticast "239.0.0.1" "59003" "127.0.0.1" 32, "mc 59003")

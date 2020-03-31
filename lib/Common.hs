@@ -23,6 +23,7 @@ module Common
     , Alarm(..), newAlarmIO, runAlarm, refreshAlarm, getAlarm
     , UpdatingVar(..), newUpdatingVarIO, updateVar, restartOnUpdate
     , setupLogging
+    , encodeCompact
     )
   where
 
@@ -32,8 +33,10 @@ import           Control.Concurrent (threadDelay)
 import           Control.Concurrent.Async (race)
 import           Data.Bool
 import           Data.Maybe
+import           Data.Aeson
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Base16 as B16
 
@@ -195,4 +198,8 @@ setupLogging pName cmdName optVerbose optSyslog optAux = do
                 False -> s
 
     return logM
+
+-- | Encode to JSON.
+encodeCompact :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
+encodeCompact = Data.Aeson.encode
 

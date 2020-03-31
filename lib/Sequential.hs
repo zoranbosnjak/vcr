@@ -14,6 +14,8 @@ import           Data.Proxy
 import           Data.Bool
 import           Data.Aeson
 
+import           Test.QuickCheck
+
 class Sequential a where
     sequenceToInteger   :: a -> Integer
     firstSequence       :: a
@@ -62,6 +64,11 @@ instance KnownNat n => Sequential (Periodic n) where
 
 instance KnownNat n => Show (Periodic n) where
     show x = show (sequenceToInteger x) ++ "/" ++ show (top :: Integer)
+      where
+        top = fromIntegral (natVal (Proxy @n))
+
+instance KnownNat n => Arbitrary (Periodic n) where
+    arbitrary = UnsafeMkPeriodic <$> choose (0, pred top)
       where
         top = fromIntegral (natVal (Proxy @n))
 

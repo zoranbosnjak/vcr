@@ -9,6 +9,8 @@ import           GHC.Generics (Generic)
 import           Data.Aeson
 import           Data.Text as Text
 
+import           Test.QuickCheck
+
 -- local imports
 import           Time
 import           Sequential
@@ -51,4 +53,22 @@ instance (FromJSON a) => FromJSON (Event a) where
         <*> v .: "track"
         <*> v .: "sequence"
         <*> v .: "value"
+
+instance (Arbitrary a) => Arbitrary (Event a) where
+    arbitrary = Event
+        <$> fmap Text.pack arbitrary
+        <*> arbitrary
+        <*> arbitraryUtc
+        <*> fmap Text.pack arbitrary
+        <*> fmap Text.pack arbitrary
+        <*> arbitrary
+        <*> arbitrary
+
+-- | Add delta-t (nanoseconds) to event.
+nextEvents :: MonoTimeNs -> Event a -> [Event a]
+nextEvents dt e0 = e:nextEvents dt e where
+    e = e0
+        { eTimeMono = eTimeMono e + dt
+        , eTimeUtc = addUtcTime dt (eTimeUtc e)
+        }
 

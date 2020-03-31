@@ -6,6 +6,8 @@ import qualified Data.Time.Clock.POSIX as DTP
 import qualified System.Clock
 import           Numeric (showFFloat)
 
+import           Test.QuickCheck
+
 type MonoTimeNs = Integer
 type UtcTime = UTCTime
 
@@ -43,4 +45,14 @@ parseIsoTime s = case parser s of
 -- | Format ISO time.
 fmtTime :: UtcTime -> String
 fmtTime = formatTime defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%QZ"))
+
+-- | Helper function to generate arbitrary Utc time.
+arbitraryUtc :: Gen UtcTime
+arbitraryUtc = UTCTime
+    <$> (fromGregorian <$> arbitrary <*> choose (1,12) <*> choose (1,31))
+    <*> (picosecondsToDiffTime <$> arbitrary)
+
+-- | Helper function to increment Utc time:
+addUtcTime :: MonoTimeNs -> UtcTime -> UtcTime
+addUtcTime deltaNs t = addUTCTime (fromRational (toRational deltaNs / (1000*1000*1000))) t
 

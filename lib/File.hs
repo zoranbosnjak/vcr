@@ -136,10 +136,6 @@ getRecordingFileSuffixes base = do
     listing <- listDirectory (takeDirectory base)
     return $ sort $ catMaybes $ fmap (getFileSuffix $ takeFileName base) listing
 
--- | Encode to JSON.
-encodeCompact :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
-encodeCompact = Data.Aeson.encode
-
 -- | File writer with 'rotation' support.
 rotatingFileLineWriter :: ToJSON a =>
     (Priority -> String -> IO ())           -- log message

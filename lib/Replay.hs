@@ -12,7 +12,9 @@ import           Data.Maybe
 import           Data.Bool
 import           Data.Void
 import           Control.Monad
+import           Control.Exception (SomeException)
 import           Control.Monad.Fix
+import           Control.Monad.Trans.Except
 import           Pipes
 import qualified Pipes.Safe as PS
 import           Data.Ratio ((%))
@@ -26,6 +28,8 @@ import qualified Text.Megaparsec.Char as MC
 import qualified Text.Megaparsec.Char.Lexer as ML
 import qualified Data.Time.Clock as Clk
 import qualified Data.Time.Calendar as Cal
+import           System.IO
+import           System.Directory (doesPathExist)
 
 import           Graphics.UI.WXCore
 import           Graphics.UI.WX
@@ -35,6 +39,7 @@ import           Control.Concurrent.Async
 import           Control.Exception (try)
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Char8 as BS8
 import           Network.HTTP.Req
 import           Text.URI (mkURI)
@@ -65,15 +70,15 @@ data AtLimit = Continue | Wrap | Stop
 speedChoices :: [Speed]
 speedChoices = [10 ** (x/10) | x <- [-10..10]]
 
--- | Pre-fetch buffer size per channel.
+-- | Pre-fetch buffer size.
 prefetch :: Int
-prefetch = 100
+prefetch = 1000
 
 -- | Fetch events from http(s) to memory buffer.
-fetcher :: Maybe UtcTime -> (UdpEvent -> STM ()) -> Recorder -> [Channel] -> IO ()
-fetcher _startTime _putToBuffer (Recorder _rec) [] = doNothing
+fetcher :: Maybe UtcTime -> (UdpEvent -> STM ()) -> Recorder -> Maybe [Channel] -> IO ()
+fetcher _startTime _putToBuffer (Recorder _rec) (Just []) = doNothing
 fetcher Nothing _putToBuffer (Recorder _rec) _channelList = doNothing
-fetcher (Just startTime) putToBuffer (Recorder rec) channelList = do
+fetcher (Just startTime) putToBuffer (Recorder rec) mChannelList = do
     -- get nextIndex from start utc time
     startIx <- case (mkURI (rec <> "/nextIndex") >>= useURI) of
         Nothing -> doNothing
@@ -96,7 +101,7 @@ fetcher (Just startTime) putToBuffer (Recorder rec) channelList = do
                 -- update this var on each successfull event,
                 -- to be able to continue in case of problems
                 ix <- newTVarIO startIx
-                let cl = foldr1 (\a b -> a <> "|" <> b) channelList
+                let cl = (foldr1 (\a b -> a <> "|" <> b)) <$> mChannelList
                     toLines buffer = do
                         let (a,b) = BS8.break (== '\n') buffer
                         case BS.null b of
@@ -116,8 +121,8 @@ fetcher (Just startTime) putToBuffer (Recorder rec) channelList = do
                                 False -> toLines (accumulator <> s) >>= maybe (return ()) go
                         go mempty
                     request = case result of
-                        Left  (url, opt) -> reqBr GET url NoReqBody (opt <> to <> queryFlag "includeIndex" <> ("ch" =: cl) <> ("t" =: startIx)) consumer
-                        Right (url, opt) -> reqBr GET url NoReqBody (opt <> to <> queryFlag "includeIndex" <> ("ch" =: cl) <> ("t" =: startIx)) consumer
+                        Left  (url, opt) -> reqBr GET url NoReqBody (opt <> to <> queryFlag "includeIndex" <> maybe mempty (\lst -> "ch" =: lst) cl <> ("t" =: startIx)) consumer
+                        Right (url, opt) -> reqBr GET url NoReqBody (opt <> to <> queryFlag "includeIndex" <> maybe mempty (\lst -> "ch" =: lst) cl <> ("t" =: startIx)) consumer
 
                 (_result :: Either HttpException ()) <- try $ runReq defaultHttpConfig request
                 threadDelaySec 1.0
@@ -255,8 +260,7 @@ replayEngine getRecorder getSessionIx getChannelSelections getT1 updatesT0 getT2
 
         fix $ \loop -> do
             atomically $ setBufferLevel 0
-            let bufferLength = length channelList * prefetch
-
+            let bufferLength = prefetch
             buffer <- newTBQueueIO $ intToNatural bufferLength
 
             let percent x = (x * 100) `div` bufferLength
@@ -276,7 +280,7 @@ replayEngine getRecorder getSessionIx getChannelSelections getT1 updatesT0 getT2
 
             t <- atomically $ readTVar tVar
             result <- race
-                (fetcher t putToBuffer rec (fmap chName channelList))
+                (fetcher t putToBuffer rec (Just (fmap chName channelList)))
                 (sender t getFromBuffer getT2 getAtLimit getRunning getSpeed (dumpConsole . Just) updateT channelList)
             case result of
                 Left _ -> return "fetcher error"
@@ -291,6 +295,7 @@ replayEngine getRecorder getSessionIx getChannelSelections getT1 updatesT0 getT2
             ChannelSelection channel console out <- channelList
             return (channel, isJust console, isJust out)
 
+    getReplayConfig :: STM (Recorder, Int, [ChannelSelection])
     getReplayConfig = (,,)
         <$> getRecorder
         <*> getSessionIx
@@ -348,12 +353,12 @@ replayGUI maxDump recorders channelMaps outputs = start gui
 
         -- recorder selector
         (recorderVar, recorderSelector) <- do
-            var <- newTVarIO $ snd (recorders !! 0)
+            var <- newTVarIO $ (recorders !! 0)
             ctr <- choice p
                 [ items := (fmap fst recorders), selection := 0
                 , on select ::= \w -> do
                     x <- get w selection
-                    let rec = (fmap snd recorders) !! x
+                    let rec = recorders !! x
                     atomically $ writeTVar var rec
                 ]
             return (var, ctr)
@@ -569,7 +574,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
         tUpdates <- newTVarIO Nothing
 
         engine <- async $ replayEngine
-            (readTVar recorderVar)
+            (snd <$> readTVar recorderVar)
             (readTVar nbVar)
             (readTVar channelsVar)
             (readTVar t1Var)
@@ -582,6 +587,147 @@ replayGUI maxDump recorders channelMaps outputs = start gui
             (writeTQueue consoleMessagesQueue)
             (writeTVar bufferLevelVar)
 
+        -- menu bar
+        mb <- menuBarCreate 0
+        fm <- menuCreate "" 0
+        menuAppend fm wxID_SAVEAS "&SaveAs" "Save selection to a file" False
+        menuAppendSeparator fm
+        menuAppend fm wxID_EXIT "&Quit\tCtrl-Q" "Quit application"  False
+        _  <- menuBarAppend mb fm "&File"
+
+        frameSetMenuBar f mb
+        evtHandlerOnMenuCommand f wxID_EXIT $ close f
+        evtHandlerOnMenuCommand f wxID_SAVEAS $ do
+            (recName, rec) <- atomically $ readTVar recorderVar
+            (mT1, mT2) <- atomically ( (,) <$> readTVar t1Var <*> readTVar t2Var)
+            result <- runExceptT $ do
+                let timeInterval = do
+                        a <- mT1
+                        b <- mT2
+                        guard $ b > a
+                        return (a,b)
+                (a,b) <- case timeInterval of
+                    Nothing -> do
+                        liftIO $ errorDialog f "error" "start/stop time error"
+                        throwE ()
+                    Just val -> return val
+
+                targetFile <- do
+                    result <- liftIO $ fileSaveDialog f True False "Save selection"
+                        [ ("Recordings",["*.vcr"])
+                        , ("Any file", ["*.*"])
+                        ] "" (snd ( snd $ showTimeEntry a) ++ "-" ++ recName ++ ".vcr")
+                    targetFile <- maybe (throwE ()) pure result
+                    exists <- liftIO $ doesPathExist targetFile
+                    Control.Monad.when exists $ do
+                        yes <- liftIO $ confirmDialog f "confirm" (show targetFile ++ " exists. Overwrite?") False
+                        unless yes $ throwE ()
+                    return targetFile
+
+                channelSelection <- do
+                    d   <- liftIO $ dialog f [text := "Channel selection"]
+                    ctr <- liftIO $ radioBox d Vertical
+                        [ "session selected channels", "all channels" ]
+                        [ text := "channels" ]
+                    bCancel <- liftIO $ button d [text := "Cancel"]
+                    bOk     <- liftIO $ button d [text := "Ok"]
+                    liftIO $ set d [ layout := column 20
+                        [ margin 5 $ widget ctr
+                        , margin 5 $ row 5
+                            [ widget bCancel
+                            , widget bOk
+                            ]]]
+                    result <- liftIO $ showModal d (\fin -> do
+                        set bCancel [ on command := fin Nothing ]
+                        set bOk [ on command := do
+                            sel <- get ctr selection
+                            fin (Just sel)]
+                        )
+                    case result of
+                        -- cancel
+                        Nothing -> throwE ()
+                        -- selected channels only
+                        Just 0 -> do
+                            cs <- liftIO $ atomically $ readTVar channelsVar
+                            let channelList = do
+                                    (ChannelSelection channel console out) <- cs
+                                    guard (isJust console || isJust out)
+                                    return channel
+                            Control.Monad.when (null channelList) $ do
+                                liftIO $ errorDialog f "error" "channel list is empty"
+                                throwE ()
+                            return $ Just channelList
+                        -- all channels
+                        Just 1 -> return Nothing
+                        _ -> error $ "internal error, unexpected value: " ++ show result
+
+                return (a, b, rec, targetFile, channelSelection)
+
+            -- perform file save
+            case result of
+                Left _ -> return ()
+                Right (utc1, utc2, recorder, targetFile, channelSelection) -> do
+                    ioResult <- try $ withFile targetFile WriteMode $ \h -> do
+                        buffer <- newTBQueueIO $ intToNatural prefetch
+                        tSaved <- newTVarIO Nothing
+
+                        d <- dialog f [text := "Save progress"]
+                        lab <- staticText d [text := snd (snd (showTimeEntry utc1)) ]
+                        bCancel <- button d [text := "Cancel"]
+                        set d
+                            [ layout := margin 5 $ column 5
+                                [ label "saved:"
+                                , widget lab
+                                , widget bCancel
+                                ]
+                            ]
+                        set lab [ text := "-" ]
+
+                        let saveToFile = fix $ \loop -> do
+                                (events1, events2) <- atomically $ do
+                                    events <- flushTBQueue buffer
+                                    case events of
+                                        [] -> retry
+                                        lst -> return $ span (\evt -> eTimeUtc evt < utc2) lst
+                                case events1 of
+                                    [] -> return ()
+                                    lst -> do
+                                        let s = mconcat $ fmap (\evt -> encodeCompact evt <> "\n") lst
+                                        BSL.hPut h s
+                                        atomically $ writeTVar tSaved $ Just $ eTimeUtc $ last lst
+                                case events2 of
+                                    [] -> loop
+                                    _ -> return ()
+                            saveAction = race
+                                (fetcher (Just utc1) (writeTBQueue buffer) recorder channelSelection)
+                                (saveToFile) >>= \case
+                                    Left _ -> fail "event fetcher failed"
+                                    Right _ -> return ()
+
+                        withAsync saveAction $ \saveLoop -> showModal d $ \fin -> do
+                            let closeDialog val = do
+                                    set d [ on idle := return False ]
+                                    fin val
+                            set bCancel [on command := closeDialog Nothing]
+                            set d [on idle := do
+                                atomically (readTVar tSaved) >>= \case
+                                    Nothing -> return ()
+                                    Just x -> set lab [text := snd (snd (showTimeEntry x)) ]
+                                poll saveLoop >>= \case
+                                    Nothing -> return ()
+                                    Just (Left e) -> fail $ show e
+                                    Just (Right _) -> do
+                                        closeDialog (Just ())
+                                -- insert minor delay to prevent looping too fast
+                                threadDelaySec 0.05
+                                return False
+                                ]
+
+                    case ioResult of
+                        Left e -> errorDialog f "error" $ "fatal error: " ++ show (e :: SomeException)
+                        Right transferResult -> Control.Monad.when (isJust transferResult) $
+                            infoDialog f "done" "Transfer finished!"
+
         status <- statusField [text := "Ready..."]
         set f
             [ statusBar := [ status ]
@@ -593,8 +739,11 @@ replayGUI maxDump recorders channelMaps outputs = start gui
             ]
 
         set p [ layout := column 5
-            [ hfill $ row 20
-                        [ boxed "recorder" $ margin 5 $ widget recorderSelector
+            [ hfill $ hrule 1
+            , hfill $ row 20
+                        [ boxed "source" $ margin 5 $ widget recorderSelector
+                            -- - recorder (recorder selector)
+                            -- - file (file select popup)
                         , boxed "channel map" $ margin 5 $ widget channelMapSelector
                         , boxed "buffer level" $ margin 5 $ widget bufferLevel
                         ]
@@ -701,7 +850,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
             -- update big clock
             do
                 mt <- MP.parseMaybe pTimeEntry <$> get tCurrent text
-                let s = maybe "" (snd . showTimeEntry) mt
+                let s = maybe "" (fst . snd . showTimeEntry) mt
                 set bigClock [ text := s ]
             ]
 
@@ -709,6 +858,10 @@ replayGUI maxDump recorders channelMaps outputs = start gui
         result <- MP.parseMaybe pTimeEntry <$> get w text
         set w [ bgcolor := maybe red (const white) result ]
 
+    -- TODO: split this function...
+        -- showAsFormat1
+        -- showAsFormat2
+        -- showAsFormat3
     showTimeEntry t =
         let (year, month, day) = Cal.toGregorian $ Clk.utctDay t
             ps = Clk.diffTimeToPicoseconds $ Clk.utctDayTime t
@@ -719,6 +872,8 @@ replayGUI maxDump recorders channelMaps outputs = start gui
             seconds = (sec - hours*3600) `mod` 60
         in
             ( printf "%d-%02d-%02d %02d:%02d:%02d.%03d" year month day hours minutes seconds (ms - (1000 * sec)) :: String
-            , printf "%d-%02d-%02d\n%02d:%02d:%02d.%03d" year month day hours minutes seconds (ms - (1000 * sec)) :: String
+            , ( printf "%d-%02d-%02d\n%02d:%02d:%02d.%03d" year month day hours minutes seconds (ms - (1000 * sec)) :: String
+              , printf "%d-%02d-%02d-%02d:%02d:%02d" year month day hours minutes seconds :: String
+              )
             )
 

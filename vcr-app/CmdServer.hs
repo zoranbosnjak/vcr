@@ -110,8 +110,8 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
         getArg label = lookup label (queryString request)
 
         -- process argument's value
-        withArgValue :: Monad m
-            => BS8.ByteString   -- label
+        withArgValue ::
+            BS8.ByteString   -- label
             -> m a -- action if argument not present
             -> m a -- action if argument is present, but without value
             -> (BS8.ByteString -> m a) -- action on argument's value

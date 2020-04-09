@@ -77,5 +77,6 @@ library
     , wxcore
     , modern-uri
     , http-client
+    , vector
     , ekg
 

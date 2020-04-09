@@ -2,8 +2,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 module Replay where
 
@@ -174,7 +172,8 @@ fetcher startTime putToBuffer recorder mChannelList = do
 
 -- | Sender process.
 -- Use "UTC" time for initial sync, then use monotonic time for actual replay.
-sender :: UtcTime -> STM UdpEvent -> STM (Maybe UtcTime) -> STM AtLimit -> STM Bool -> STM Speed -> (String -> STM ()) -> (UtcTime -> STM ()) -> [ChannelSelection] -> IO ()
+sender :: UtcTime -> STM UdpEvent -> STM (Maybe UtcTime) -> STM AtLimit -> STM Bool
+    -> STM Speed -> (String -> STM ()) -> (UtcTime -> STM ()) -> [ChannelSelection] -> IO ()
 sender startUtcTime getFromBuffer getT2 getAtLimit getRunning getSpeed dumpConsole updateT channelList = do
 
     -- input queue and process is required for each channel
@@ -388,11 +387,9 @@ replayGUI ::
     -> IO ()
 replayGUI maxDump recorders channelMaps outputs = start gui
   where
-
     gui = do
-
+        -- main frame and panel
         f <- frame [ text := "VCR replay" ]
-
         p <- panel f []
 
         -- A variable to indicate channel selection change.
@@ -426,12 +423,14 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 , bgcolor := red
                 ]
 
+        -- splitter window for ch. selector and console
         sp <- splitterWindow p []
         p1 <- panel sp []
         p2 <- panel sp []
 
         now <- getUtcTime
 
+        -- show clock in big fonts
         bigClock <- do
             control <- textCtrlRich p
                 [ font := fontFixed { _fontSize = 40 }
@@ -442,6 +441,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
             textCtrlSetEditable control False
             return control
 
+        -- console
         dumpWindow <- do
             control <- textCtrlRich p2
                 [ font := fontFixed
@@ -452,6 +452,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
 
         let timeToolTip = "YYYY-MM-DD HH:MM:SS[.MMM]"
 
+        -- time pointers
         ((t1Var,t1), (tCurrentVar,tCurrent), (t2Var,t2)) <- (,,)
             <$> do
                 var <- newTVarIO (Just now)
@@ -484,6 +485,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                     ]
                 return (var, ctr)
 
+        -- 'begin' time button
         t1Button <- button p
             [ text := "begin"
             , on command := do
@@ -492,6 +494,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 atomically $ writeTVar t1Var $ MP.parseMaybe pTimeEntry s
             ]
 
+        -- 'reset' time button
         t1ButtonApply <- button p
             [ text := "reset"
             , on command := do
@@ -500,6 +503,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 atomically $ updateVar tCurrentVar $ MP.parseMaybe pTimeEntry s
             ]
 
+        -- 'end' time button
         t2Button <- button p
             [ text := "end"
             , on command := do
@@ -508,6 +512,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 atomically $ writeTVar t2Var $ MP.parseMaybe pTimeEntry s
             ]
 
+        -- time slider
         tSlider <- hslider p True (-100) 100
             [ selection := 0
             , on mouse ::= \w event -> do
@@ -521,6 +526,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                     _ -> return ()
             ]
 
+        -- limit action selector
         (atLimitVar, atLimit) <- do
             var <- newTVarIO minBound
             ctr <- radioBox p Vertical
@@ -532,6 +538,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 ]
             return (var, ctr)
 
+        -- speed selector
         (speedVar, speedSelector) <- do
             let initial = div (length speedChoices) 2
             var <- newTVarIO (speedChoices !! initial)
@@ -546,6 +553,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                     ]
             return (var, ctr)
 
+        -- run button
         (runVar, runButton) <- do
             var <- newTVarIO False
             ctr <- toggleButton p
@@ -570,6 +578,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 ]
             return (var, ctr)
 
+        -- console and output selections
         outputPanels <- forM outputs $ \(name, lst) -> do
             cp <- scrolledWindow nb [ scrollRate := sz 20 20 ]
 
@@ -622,6 +631,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
         -- when the engine is running, it will periodically update time
         tUpdates <- newTVarIO Nothing
 
+        -- replay engine task
         engine <- async $ replayEngine
             (snd <$> readTVar recorderVar)
             (readTVar nbVar)
@@ -645,11 +655,19 @@ replayGUI maxDump recorders channelMaps outputs = start gui
         _  <- menuBarAppend mb fm "&File"
 
         frameSetMenuBar f mb
+
+        -- menu exit action
         evtHandlerOnMenuCommand f wxID_EXIT $ close f
+
+        -- menu 'save as' action
+        -- The save action might go to a separate function (a lot of code)
+        -- however, there are too many arguments to be passed around,
+        -- so it's inlined instead.
         evtHandlerOnMenuCommand f wxID_SAVEAS $ do
             (recName, rec) <- atomically $ readTVar recorderVar
             (mT1, mT2) <- atomically ( (,) <$> readTVar t1Var <*> readTVar t2Var)
             result <- runExceptT $ do
+                -- get time interval
                 let timeInterval = do
                         a <- mT1
                         b <- mT2
@@ -661,6 +679,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                         throwE ()
                     Just val -> return val
 
+                -- get target file
                 targetFile <- do
                     result <- liftIO $ fileSaveDialog f True False "Save selection"
                         [ ("Recordings",["*.vcr"])
@@ -673,6 +692,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                         unless yes $ throwE ()
                     return targetFile
 
+                -- get channel selection
                 channelSelection <- do
                     d   <- liftIO $ dialog f [text := "Channel selection"]
                     ctr <- liftIO $ radioBox d Vertical
@@ -712,14 +732,16 @@ replayGUI maxDump recorders channelMaps outputs = start gui
 
                 return (a, b, rec, targetFile, channelSelection)
 
-            -- perform file save
+            -- perform file save if all selections are correct
             case result of
                 Left _ -> return ()
                 Right (utc1, utc2, recorder, targetFile, channelSelection) -> do
+                    -- with open target file
                     ioResult <- try $ withFile targetFile WriteMode $ \h -> do
                         buffer <- newTBQueueIO $ intToNatural prefetch
                         tSaved <- newTVarIO Nothing
 
+                        -- use progress dialog with 'Cancel' button
                         d <- dialog f [text := "Save progress"]
                         lab <- staticText d [text := snd (snd (showTimeEntry utc1)) ]
                         bCancel <- button d [text := "Cancel"]
@@ -732,7 +754,8 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                             ]
                         set lab [ text := "-" ]
 
-                        let saveToFile = fix $ \loop -> do
+                        let -- save to a file until t2 reached
+                            saveToFile = fix $ \loop -> do
                                 (events1, events2) <- atomically $ do
                                     events <- flushTBQueue buffer
                                     case events of
@@ -747,12 +770,16 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                                 case events2 of
                                     [] -> loop
                                     _ -> return ()
+
+                            -- run 'fetcher' and 'saveToFile' actions in parallel
+                            -- terminate, when 'saveToFile' is done
                             saveAction = race
                                 (fetcher utc1 (writeTBQueue buffer) recorder channelSelection)
                                 (saveToFile) >>= \case
                                     Left _ -> fail "event fetcher failed"
                                     Right _ -> return ()
 
+                        -- run saveAction as async, so that a GUI will respond during save
                         withAsync saveAction $ \saveLoop -> showModal d $ \fin -> do
                             let closeDialog val = do
                                     set d [ on idle := return False ]
@@ -772,11 +799,13 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                                 return False
                                 ]
 
+                    -- save to file finished
                     case ioResult of
                         Left e -> errorDialog f "error" $ "fatal error: " ++ show (e :: SomeException)
                         Right transferResult -> Control.Monad.when (isJust transferResult) $
                             infoDialog f "done" "Transfer finished!"
 
+        -- setup status bar
         status <- statusField [text := "Ready..."]
         set f
             [ statusBar := [ status ]
@@ -787,6 +816,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 propagateEvent
             ]
 
+        -- set panel layout
         set p [ layout := column 5
             [ hfill $ hrule 1
             , hfill $ row 20
@@ -817,12 +847,15 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 (widget p2)
             ] ]
 
+        -- set p1 layout
         set p1 [ layout := fill $ minsize (sz (-1) 200) $
             tabs nb [ tab name $ container pnl $ empty | (name, pnl, _, _) <- outputPanels] ]
         forM_ outputPanels $ \(_name, pnl, outLayout, _) -> set pnl [ layout := outLayout ]
 
+        -- set p2 layout
         set p2 [ layout := boxed "console output" $ fill $ widget dumpWindow]
 
+        -- run periodic action (checks, updates...)
         void $ timer f [ interval := 100, on command := do
             -- check engine
             poll engine >>= \case
@@ -903,14 +936,12 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 set bigClock [ text := s ]
             ]
 
+    -- highlight wrong time entry
     checkTime w = do
         result <- MP.parseMaybe pTimeEntry <$> get w text
         set w [ bgcolor := maybe red (const white) result ]
 
-    -- TODO: split this function...
-        -- showAsFormat1
-        -- showAsFormat2
-        -- showAsFormat3
+    -- display time in different formats
     showTimeEntry t =
         let (year, month, day) = Cal.toGregorian $ Clk.utctDay t
             ps = Clk.diffTimeToPicoseconds $ Clk.utctDayTime t

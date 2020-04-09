@@ -19,6 +19,7 @@ import           Pipes
 import qualified Pipes.Safe as PS
 import           Data.Ratio ((%))
 import qualified Data.Text as T
+import qualified Data.List.NonEmpty as NEL
 import qualified Data.Map as Map
 import           Data.Text.Encoding (decodeUtf8)
 import           Data.Char (toLower)
@@ -40,9 +41,7 @@ import           Control.Exception (try)
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import qualified Data.ByteString.Char8 as BS8
 import           Network.HTTP.Req
-import           Text.URI (mkURI)
 import qualified Network.HTTP.Client as HTC
 import qualified Data.Aeson as AES
 
@@ -51,12 +50,16 @@ import           Common
 import           Time
 import           Vcr
 import           Udp
+import           File
 
 type Name = String
 type Running = Bool
 type Speed = Double
 
-newtype Recorder = Recorder T.Text deriving (Eq, Show)
+data Recorder
+    = RecorderHttp T.Text Int
+    | RecorderHttps T.Text Int
+    deriving (Eq, Show)
 
 data ChannelSelection = ChannelSelection
     { chName    :: Channel                  -- recorder channel name
@@ -74,65 +77,105 @@ speedChoices = [10 ** (x/10) | x <- [-10..10]]
 prefetch :: Int
 prefetch = 1000
 
--- | Fetch events from http(s) to memory buffer.
-fetcher :: Maybe UtcTime -> (UdpEvent -> STM ()) -> Recorder -> Maybe [Channel] -> IO ()
-fetcher _startTime _putToBuffer (Recorder _rec) (Just []) = doNothing
-fetcher Nothing _putToBuffer (Recorder _rec) _channelList = doNothing
-fetcher (Just startTime) putToBuffer (Recorder rec) mChannelList = do
-    -- get nextIndex from start utc time
-    startIx <- case (mkURI (rec <> "/nextIndex") >>= useURI) of
-        Nothing -> doNothing
-        Just result -> do
-            let request = case result of
-                    Left  (url, opt) -> req GET url NoReqBody bsResponse (opt <> to <> ("t" =: (fmtTime startTime)))
-                    Right (url, opt) -> req GET url NoReqBody bsResponse (opt <> to <> ("t" =: (fmtTime startTime)))
-            fix $ \loop -> (try $ runReq defaultHttpConfig $ fmap responseBody request) >>= \case
-                Left (_error :: HttpException) -> threadDelaySec 1.0 >> loop
-                Right val -> return $ decodeUtf8 val
-    fetchFrom startIx
-  where
-    to = responseTimeout $ round $ (1.0::Double) * 1000 * 1000
-    fetchFrom startIx = do
-        -- Stream events to the buffer.
-        -- This process will block automatically when buffer gets full.
-        case (mkURI (rec <> "/events") >>= useURI) of
-            Nothing -> doNothing
-            Just result -> do
-                -- update this var on each successfull event,
-                -- to be able to continue in case of problems
-                ix <- newTVarIO startIx
-                let cl = (foldr1 (\a b -> a <> "|" <> b)) <$> mChannelList
-                    toLines buffer = do
-                        let (a,b) = BS8.break (== '\n') buffer
-                        case BS.null b of
-                            True -> return $ Just buffer    -- line not complete
-                            False -> case AES.decodeStrict a of
-                                Nothing -> toLines $ BS.drop 1 b
-                                Just (_val, Nothing) -> return Nothing -- next index not known
-                                Just (val, Just nextIx) -> do
-                                    atomically $ do
-                                        putToBuffer (val :: UdpEvent)
-                                        writeTVar ix (nextIx :: T.Text)
-                                    toLines $ BS.drop 1 b
-                    consumer resp = do
-                        let getChunk = HTC.responseBody resp
-                            go accumulator = getChunk >>= \s -> case BS.null s of
-                                True -> return ()   -- no more data
-                                False -> toLines (accumulator <> s) >>= maybe (return ()) go
-                        go mempty
-                    request = case result of
-                        Left  (url, opt) -> reqBr GET url NoReqBody (opt <> to <> queryFlag "includeIndex" <> maybe mempty (\lst -> "ch" =: lst) cl <> ("t" =: startIx)) consumer
-                        Right (url, opt) -> reqBr GET url NoReqBody (opt <> to <> queryFlag "includeIndex" <> maybe mempty (\lst -> "ch" =: lst) cl <> ("t" =: startIx)) consumer
+-- | Convert JSON object to Text.
+objToText :: AES.ToJSON a => a -> T.Text
+objToText = decodeUtf8 . BSL.toStrict . encodeCompact
 
-                (_result :: Either HttpException ()) <- try $ runReq defaultHttpConfig request
-                threadDelaySec 1.0
-                atomically (readTVar ix) >>= fetchFrom
+-- | Make http(s) GET request and perform some action on response.
+runGetRequest :: Url scheme -> T.Text -> Option scheme
+    -> (HTC.Response HTC.BodyReader -> IO a)
+    -> IO (Either HttpException a)
+runGetRequest url path opts act = do
+    let timeout = responseTimeout $ round $ (1.0::Double) * 1000 * 1000
+        request = reqBr GET (url /: path) NoReqBody (opts <> timeout) act
+    try $ runReq defaultHttpConfig request
+
+-- | Fetch text via GET.
+fetchFromRecorder :: AES.FromJSON a => Url scheme -> T.Text -> Option scheme -> IO a
+fetchFromRecorder url path opts = fix $ \loop -> do
+    result <- runGetRequest url path opts consumer >>= \case
+        Left _ -> return Nothing
+        Right val -> return $ AES.decodeStrict' val
+    maybe (threadDelaySec 1.0 >> loop) return result
+  where
+    consumer resp = accumulate mempty where
+        accumulate x = HTC.responseBody resp >>= \s -> case BS.null s of
+            True -> return x
+            False -> accumulate (x <> s)
+
+-- | Get starting index, based on utc time.
+fetchStartIndex :: Recorder -> UtcTime -> IO Index
+fetchStartIndex recorder startTime = case recorder of
+    RecorderHttp  a b -> fetchFromRecorder (http  a) "nextIndexFromUtc" (port b <> "t" =: t)
+    RecorderHttps a b -> fetchFromRecorder (https a) "nextIndexFromUtc" (port b <> "t" =: t)
+  where
+    t = fmtTime startTime
+
+-- | Get next index.
+fetchNextIndex :: Recorder -> Index -> IO Index
+fetchNextIndex recorder ix = case recorder of
+    RecorderHttp  a b -> fetchFromRecorder (http  a) "nextIndexFromIndex" (port b <> "ix" =: objToText ix)
+    RecorderHttps a b -> fetchFromRecorder (https a) "nextIndexFromIndex" (port b <> "ix" =: objToText ix)
+
+-- | Fetch events from http(s) to memory buffer.
+fetcher :: UtcTime -> (UdpEvent -> STM ()) -> Recorder -> Maybe (NEL.NonEmpty Channel) -> IO ()
+fetcher startTime putToBuffer recorder mChannelList = do
+    fetchStartIndex recorder startTime >>= fetchFrom
+  where
+    -- Stream events to the buffer.
+    -- This process will block automatically when buffer gets full.
+    -- In case of problems, restart from the last fetched event.
+    fetchFrom :: Index -> IO ()
+    fetchFrom = fix $ \loop startIndex -> do
+        lastIx <- newTVarIO Nothing
+        let chSelection = foldr1 (\a b -> a <> "|" <> b) <$> mChannelList
+            action resp = runEffect (getData >-> toLines mempty >-> decode >-> save)
+              where
+                getData :: Producer BS.ByteString IO ()
+                getData = do
+                    chunk <- liftIO $ HTC.responseBody resp
+                    case BS.null chunk of
+                        True -> return ()   -- no more data
+                        False -> yield chunk >> getData
+
+                toLines :: Functor m => BS.ByteString -> Pipe BS.ByteString BS.ByteString m c
+                toLines accumulator = do
+                    chunk <- await
+                    remaining <- process (accumulator <> chunk)
+                    toLines remaining
+                  where
+                    process buffer = case BS.elemIndex newline buffer of
+                        Nothing -> return buffer
+                        Just ix -> do
+                            let (a,b) = BS.splitAt ix buffer
+                            yield a
+                            process $ BS.drop 1 b -- drop newline
+
+                decode :: Pipe BS.ByteString (Index, UdpEvent) IO c
+                decode = forever $ do
+                    s <- await
+                    maybe (return ()) yield (AES.decodeStrict' s)
+
+                save :: Consumer (Index, UdpEvent) IO c
+                save = forever $ do
+                    (ix, event) <- await
+                    liftIO $ atomically $ do
+                        putToBuffer event
+                        writeTVar lastIx $ Just ix
+
+        void $ case recorder of
+            RecorderHttp  a b -> runGetRequest (http  a) "events" (port b <> queryFlag "includeIndex" <> maybe mempty (\lst -> "ch" =: lst) chSelection <> "ix" =: objToText startIndex) action
+            RecorderHttps a b -> runGetRequest (https a) "events" (port b <> queryFlag "includeIndex" <> maybe mempty (\lst -> "ch" =: lst) chSelection <> "ix" =: objToText startIndex) action
+        threadDelaySec 1.0
+        ix <- atomically (readTVar lastIx) >>= \case
+            Nothing -> return startIndex
+            Just ix -> fetchNextIndex recorder ix
+        loop ix
 
 -- | Sender process.
 -- Use "UTC" time for initial sync, then use monotonic time for actual replay.
-sender :: Maybe UtcTime -> STM UdpEvent -> STM (Maybe UtcTime) -> STM AtLimit -> STM Bool -> STM Speed -> (String -> STM ()) -> (UtcTime -> STM ()) -> [ChannelSelection] -> IO ()
-sender Nothing _getFromBuffer _getT2 _getAtLimit _getRunning _getSpeed _dumpConsole _setTCurrent _channelList = doNothing
-sender (Just startUtcTime) getFromBuffer getT2 getAtLimit getRunning getSpeed dumpConsole updateT channelList = do
+sender :: UtcTime -> STM UdpEvent -> STM (Maybe UtcTime) -> STM AtLimit -> STM Bool -> STM Speed -> (String -> STM ()) -> (UtcTime -> STM ()) -> [ChannelSelection] -> IO ()
+sender startUtcTime getFromBuffer getT2 getAtLimit getRunning getSpeed dumpConsole updateT channelList = do
 
     -- input queue and process is required for each channel
     realSenders <- forM channelList $ \(ChannelSelection name mDump mOut) -> do
@@ -278,15 +321,22 @@ replayEngine getRecorder getSessionIx getChannelSelections getT1 updatesT0 getT2
                     writeTVar tVar $ Just t
                     setTCurrent t
 
-            t <- atomically $ readTVar tVar
-            result <- race
-                (fetcher t putToBuffer rec (Just (fmap chName channelList)))
-                (sender t getFromBuffer getT2 getAtLimit getRunning getSpeed (dumpConsole . Just) updateT channelList)
-            case result of
-                Left _ -> return "fetcher error"
-                Right _ -> do           -- restart from T1
-                    atomically (getT1 >>= writeTVar tVar)
-                    loop
+            mt <- atomically (readTVar tVar)
+            let params = do
+                    t <- mt
+                    guard $ not $ null channelList
+                    return (t, NEL.nonEmpty $ fmap chName channelList)
+            case params of
+                Nothing -> doNothing
+                Just (t, channels) -> do
+                    result <- race
+                        (fetcher t putToBuffer rec channels)
+                        (sender t getFromBuffer getT2 getAtLimit getRunning getSpeed (dumpConsole . Just) updateT channelList)
+                    case result of
+                        Left _ -> return "fetcher error"
+                        Right _ -> do           -- restart from T1
+                            atomically (getT1 >>= writeTVar tVar)
+                            loop
 
   where
     compareValue (rec, sessionIx, channelList) = (rec, sessionIx, channels)
@@ -306,7 +356,6 @@ replayEngine getRecorder getSessionIx getChannelSelections getT1 updatesT0 getT2
                     guard (isJust console || isJust out)
                     return c
             return channelList
-
 
 -- Date/Time parser YYYY-MM-DD HH:MM:SS[.MM]
 pTimeEntry :: MP.Parsec Void String UtcTime
@@ -656,7 +705,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                             Control.Monad.when (null channelList) $ do
                                 liftIO $ errorDialog f "error" "channel list is empty"
                                 throwE ()
-                            return $ Just channelList
+                            return $ NEL.nonEmpty channelList
                         -- all channels
                         Just 1 -> return Nothing
                         _ -> error $ "internal error, unexpected value: " ++ show result
@@ -699,7 +748,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                                     [] -> loop
                                     _ -> return ()
                             saveAction = race
-                                (fetcher (Just utc1) (writeTBQueue buffer) recorder channelSelection)
+                                (fetcher utc1 (writeTBQueue buffer) recorder channelSelection)
                                 (saveToFile) >>= \case
                                     Left _ -> fail "event fetcher failed"
                                     Right _ -> return ()

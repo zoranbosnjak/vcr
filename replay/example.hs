@@ -42,8 +42,8 @@ import qualified Data.BitString as Bits
 -- List of recorders.
 recorders :: [(Name, Recorder)]
 recorders =
-    [ ("rec1", Recorder "http://127.0.0.1:12345")
-    , ("rec2", Recorder "http://127.0.0.1:12346")
+    [ ("rec1", RecorderHttp "127.0.0.1" 12345)
+    , ("rec2", RecorderHttp "127.0.0.1" 12346)
     -- add more recorders as necessary
     ]
 

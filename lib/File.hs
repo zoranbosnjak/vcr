@@ -19,6 +19,7 @@ import           Control.Monad.Fix
 import           Control.Concurrent.STM
 import           Data.Aeson
 import           Data.Void
+import qualified Data.Vector as V
 import           Data.Maybe
 import           Data.Bool
 import qualified Data.ByteString as BS
@@ -29,13 +30,15 @@ import qualified Control.Exception as Ex
 import qualified System.IO as IO
 import qualified Data.Time
 import           Data.List (sort, break)
-import           Data.Function ((&))
 import           System.Directory
 import           System.FilePath
 import           Text.Printf
 import qualified Text.Megaparsec as MP
 import qualified Text.Megaparsec.Char as MPC
 import qualified Text.Megaparsec.Char.Lexer as L
+
+import           Pipes
+import           Pipes.Safe
 
 -- local imports
 import           Common
@@ -62,30 +65,42 @@ data FileSuffix = FileSuffix
     , ixSecond  :: Int
     } deriving (Generic, Eq, Show)
 
-instance ToJSON FileSuffix
-instance FromJSON FileSuffix
+instance ToJSON FileSuffix where
+    toJSON (FileSuffix year month day hour minute second) =
+        toJSON (year, month, day, hour, minute, second)
+
+instance FromJSON FileSuffix where
+    parseJSON = withArray "FilxSuffix" $ \v -> case V.length v of
+        6 ->
+            let f n = parseJSON (v V.! n)
+            in FileSuffix <$> f 0 <*> f 1 <*> f 2 <*> f 3 <*> f 4 <*> f 5
+        _ -> mzero
 
 instance Ord FileSuffix where
-    compare e1 e2
-        = compare  (ixYear e1)   (ixYear e2)
-        <> compare (ixMonth e1)  (ixMonth e2)
-        <> compare (ixDay e1)    (ixDay e2)
-        <> compare (ixHour e1)   (ixHour e2)
-        <> compare (ixMinute e1) (ixMinute e2)
-        <> compare (ixSecond e1) (ixSecond e2)
+    compare e1 e2 = mconcat
+        [f ixYear, f ixMonth, f ixDay, f ixHour, f ixMinute, f ixSecond]
+      where
+        f attr = compare (attr e1) (attr e2)
 
--- | Global event index
+-- | Global (line) index
 type Offset = Integer
-data EventIndex = EventIndex
-    { eixSuffix :: FileSuffix
-    , eixOffset :: Offset
+data Index = Index
+    { ixSuffix :: FileSuffix
+    , ixOffset :: Offset
     } deriving (Generic, Eq, Show)
 
-instance ToJSON EventIndex
-instance FromJSON EventIndex
+instance ToJSON Index where
+    toJSON (Index a b) = toJSON (a,b)
 
-instance Ord EventIndex where
-    compare (EventIndex fs1 offset1) (EventIndex fs2 offset2) =
+instance FromJSON Index where
+    parseJSON = withArray "Index" $ \v -> case V.length v of
+        2 ->
+            let f n = parseJSON (v V.! n)
+            in Index <$> f 0 <*> f 1
+        _ -> mzero
+
+instance Ord Index where
+    compare (Index fs1 offset1) (Index fs2 offset2) =
         compare fs1 fs2 <> compare offset1 offset2
 
 utcToFileSuffix :: UtcTime -> FileSuffix
@@ -174,14 +189,14 @@ rotatingFileLineWriter logM getConfig fetchObject = do
         let recFile = fileSuffixToFileName base (utcToFileSuffix nowUtc)
         logM INFO $ "recording to: " ++ show recFile ++ ", " ++ show mRotate
         result <- do
-            let acquire = IO.openFile recFile IO.AppendMode
-                release h = do
+            let acquireResource = IO.openFile recFile IO.AppendMode
+                releaseResource h = do
                     n <- IO.hFileSize h
                     IO.hClose h
                     when (n == 0) $ do
                         logM INFO $ "removing empty file " ++ show recFile
                         removeFile recFile
-            Ex.bracket acquire release $ \h -> do
+            Ex.bracket acquireResource releaseResource $ \h -> do
                 recorder cfg (0::Integer) nowPosix h
 
         case result of
@@ -211,19 +226,34 @@ rotatingFileLineWriter logM getConfig fetchObject = do
                 True -> return Nothing
                 False -> recorder cfg n' t0 h
 
-getStartIndex :: FilePath -> IO (Either String EventIndex)
+-- | Get the first index.
+getStartIndex :: FilePath -> IO (Either String Index)
 getStartIndex base = getRecordingFileSuffixes base >>= \case
     [] -> return $ Left "no recording found"
-    (fs:_) -> return $ Right $ EventIndex fs 0
+    (fs:_) -> return $ Right $ Index fs 0
 
--- | Find EventIndex, based on the given utc time.
+-- | Find next Index, based on the given index.
 -- Assume a newline '\n' as record delimiter.
-getNextIndex ::
+getNextIndexFromIndex :: FilePath -> Index -> IO (Either String Index)
+getNextIndexFromIndex base index = do
+    (x:xs) <- dropWhile (< (ixSuffix index)) <$> getRecordingFileSuffixes base
+    IO.withFile (fileSuffixToFileName base x) IO.ReadMode $ \h -> do
+        IO.hSeek h IO.AbsoluteSeek $ ixOffset index
+        void $ BS8.hGetLine h
+        IO.hIsEOF h >>= \case
+            False -> Right . Index x <$> IO.hTell h
+            True -> case xs of
+                [] -> return $ Left "recordings exhausted"
+                (y:_) -> return $ Right $ Index y 0
+
+-- | Find next Index, based on the given utc time.
+-- Assume a newline '\n' as record delimiter.
+getNextIndexFromUtc ::
     FilePath
     -> (BS.ByteString -> Either String UtcTime)
     -> UtcTime
-    -> IO (Either String EventIndex)
-getNextIndex base checkLine utc = do
+    -> IO (Either String Index)
+getNextIndexFromUtc base checkLine utc = do
     lst <- getRecordingFileSuffixes base
     let candidates = catMaybes $ getCandidates lst
     checkCandidates candidates
@@ -246,7 +276,7 @@ getNextIndex base checkLine utc = do
             Nothing -> checkCandidates xs
             Just ix -> case ix >= b of
                 True -> checkCandidates xs
-                False -> return $ Right $ EventIndex x ix
+                False -> return $ Right $ Index x ix
 
     -- skip all lines where a timestamp is less then required
     -- return first of the remaining lines
@@ -275,11 +305,11 @@ getNextIndex base checkLine utc = do
                                     LT -> bool (return $ Just i) (loop j b) (j > a)
                                     GT -> bool (return $ Just i) (loop a j) (j < b)
       where
-        probe ix = do
-            IO.hSeek h IO.AbsoluteSeek ix
+        probe offset = do
+            IO.hSeek h IO.AbsoluteSeek offset
             line <- BS8.hGetLine h
-            ix' <- IO.hTell h
-            return (checkLine line, ix')
+            offset' <- IO.hTell h
+            return (checkLine line, offset')
 
         linearSearch a b
             | a >= b = return $ Nothing
@@ -289,39 +319,29 @@ getNextIndex base checkLine utc = do
                     True -> return $ Just a
                     False -> linearSearch i b
 
--- | Stream events from given index.
+-- | File reader.
+-- Assume '\n' separator.
 -- When end of file is reached, switch to the next recording file.
--- Stop streaming when (optional) limit of the number of events is reached.
-streamFrom :: FilePath -> (BS.ByteString -> Maybe EventIndex -> IO ()) -> EventIndex -> Maybe Integer -> IO ()
-streamFrom base processLine = fix $ \loop1 index mLimit1 -> do
-    let filename = fileSuffixToFileName base (eixSuffix index)
-    proceed <- IO.withFile filename IO.ReadMode $ \h -> do
-        IO.hSeek h IO.AbsoluteSeek (eixOffset index)
-        mLimit1 & (fix $ \loop2 mLimit2 -> do
-            let limitReached = maybe False (<= 0) mLimit2
-            case limitReached of
-                True -> return Nothing
-                False -> do
-                    line <- BS8.hGetLine h
-                    (mNextIndex, switchFile) <- IO.hIsEOF h >>= \case
-                        False -> do
-                            offset <- IO.hTell h
-                            return (Just $ index { eixOffset = offset }, False)
-                        True -> do
-                            recordings <- drop 1 . dropWhile (/= (eixSuffix index)) <$> getRecordingFileSuffixes base
-                            case recordings of
-                                [] -> return (Nothing, True)
-                                (nextSuffix:_) -> do
-                                    return (Just $ EventIndex nextSuffix 0, True)
-                    processLine line mNextIndex
-                    let mLimit2' = fmap pred mLimit2
-                    case mNextIndex of
-                        Nothing -> return Nothing
-                        Just nextIndex -> case switchFile of
-                            False -> loop2 mLimit2'
-                            True -> return $ Just (nextIndex, mLimit2')
-            )
-    case proceed of
-        Nothing -> return ()
-        Just (nextIndex, mLimit') -> loop1 nextIndex mLimit'
+-- Stop streaming when no more data.
+lineReader :: FilePath -> Index -> Producer (Index, BS.ByteString) (SafeT IO) ()
+lineReader base = fix $ \loop startIndex -> do
+    let filename = fileSuffixToFileName base (ixSuffix startIndex)
+    proceed <- bracket (IO.openFile filename IO.ReadMode) IO.hClose $ \h -> do
+        liftIO $ IO.hSeek h IO.AbsoluteSeek (ixOffset startIndex)
+        streamFrom (ixSuffix startIndex) h
+    maybe (return ()) loop proceed
+  where
+    streamFrom suffix h = fix $ \loop -> do
+        index <- Index <$> pure suffix <*> liftIO (IO.hTell h)
+        liftIO (IO.hIsEOF h) >>= \case
+            True -> do
+                recordings <- dropWhile (<= (ixSuffix index)) <$> liftIO (getRecordingFileSuffixes base)
+                case recordings of
+                    [] -> return Nothing
+                    (nextSuffix:_) -> do
+                        return $ Just $ Index nextSuffix 0
+            False -> do
+                line <- liftIO $ BS8.hGetLine h
+                yield (index, line)
+                loop
 

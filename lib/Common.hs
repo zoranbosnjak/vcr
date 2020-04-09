@@ -24,6 +24,7 @@ module Common
     , UpdatingVar(..), newUpdatingVarIO, updateVar, restartOnUpdate
     , setupLogging
     , encodeCompact
+    , newline
     )
   where
 
@@ -39,6 +40,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Base16 as B16
+import           Data.Word (Word8)
 
 import qualified System.Log.Logger as Log
 import           System.Log.Logger (Priority(..))
@@ -202,4 +204,8 @@ setupLogging pName cmdName optVerbose optSyslog optAux = do
 -- | Encode to JSON.
 encodeCompact :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
 encodeCompact = Data.Aeson.encode
+
+-- | Newline character, represented as Word8 (ByteString)
+newline :: Word8
+newline = BS.head $ BS8.singleton '\n'
 

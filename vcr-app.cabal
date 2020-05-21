@@ -3,7 +3,7 @@ cabal-version:       >=1.10
 -- further documentation, see http://haskell.org/cabal/users-guide/
 
 name:                vcr-app
-version:             0.6.0
+version:             0.7.0
 synopsis:            event recorder
 -- description:
 -- bug-reports:
@@ -42,6 +42,7 @@ executable vcr
     , temporary
     , optparse-applicative
     , filepath
+    , directory
     , unix
     , transformers
     , stm

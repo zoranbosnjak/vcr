@@ -4,8 +4,12 @@ Description : Replay configuration example.
 This module is an example replay configuration.
 
 Usage:
-vcr custom --program "</abs/path/to/this/script> --asterix <abs/path/to/asterix/files>" to run a program.
-vcr custom --program </abs/path/to/this/script> --compile-only to check.
+
+# to run a program.
+vcr custom --program "</abs/path/to/this/script> --asterix <abs/path/to/asterix/files>" --run
+
+# to check
+vcr custom --program "</abs/path/to/this/script>" --validate
 -}
 
 {-# LANGUAGE OverloadedStrings #-}

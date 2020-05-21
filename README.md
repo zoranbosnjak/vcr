@@ -145,7 +145,14 @@ Running a custom program:
 
 ```bash
 vcr custom --program "/path/to/program.hs --args..." \
-    --ghcOpts "-i/path/to/other/includes"
+    --ghcOpts "-i/path/to/other/includes" --run
+```
+
+Compiling custom program to a binary:
+
+```bash
+vcr custom --program "/path/to/program.hs --args..." \
+    --ghcOpts "-i/path/to/other/includes" --build targetBinaryFile
 ```
 
 ## Supporting library

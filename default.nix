@@ -65,6 +65,7 @@ let
       ++ [
         pkgs.haskellPackages.cabal-install
         pkgs.ghcid
+        pkgs.cabal2nix
       ];
     shellHook = ''
       export SW_VERSION="devel"

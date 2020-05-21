@@ -65,11 +65,11 @@ runhaskell -ilib vcr-app/Main.hs {args}
 ### Running custom script (inside nix-shell)
 ```bash
 nix-shell
-runhaskell -Wall -ilib -ivcr-app ./vcr-app/Main.hs custom --program "/path/to/custom.hs --custom args" --ghcOpts "-i/path/to -more-opts"
+runhaskell -Wall -ilib -ivcr-app ./vcr-app/Main.hs custom --program "/path/to/custom.hs --custom args" --ghcOpts "-i/path/to -more-opts" --run
 
 # or
 nix-build
-./dist.../vcr custom --program /path/to/custom.hs --ghcOpts "-i/path/to/lib -more-opts"
+./dist.../vcr custom --program /path/to/custom.hs --ghcOpts "-i/path/to/lib -more-opts" --run
 ```
 
 ## Changes in cabal file

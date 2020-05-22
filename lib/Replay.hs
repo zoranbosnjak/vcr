@@ -9,6 +9,7 @@ import           GHC.Natural
 import           Data.Maybe
 import           Data.Bool
 import           Data.Void
+import           Data.Either (rights)
 import           Control.Monad
 import           Control.Exception (SomeException)
 import           Control.Monad.Fix
@@ -116,7 +117,7 @@ fetchNextIndex recorder ix = case recorder of
     RecorderHttps a b -> fetchFromRecorder (https a) "nextIndexFromIndex" (port b <> "ix" =: objToText ix)
 
 -- | Fetch events from http(s) to memory buffer.
-fetcher :: UtcTime -> (UdpEvent -> STM ()) -> Recorder -> Maybe (NEL.NonEmpty Channel) -> IO ()
+fetcher :: UtcTime -> (Either (Vcr.Event ()) UdpEvent -> STM ()) -> Recorder -> Maybe (NEL.NonEmpty Channel) -> IO ()
 fetcher startTime putToBuffer recorder mChannelList = do
     fetchStartIndex recorder startTime >>= fetchFrom
   where
@@ -149,12 +150,12 @@ fetcher startTime putToBuffer recorder mChannelList = do
                             yield a
                             process $ BS.drop 1 b -- drop newline
 
-                decode :: Pipe BS.ByteString (Index, UdpEvent) IO c
+                decode :: Pipe BS.ByteString (Index, Either (Vcr.Event ()) UdpEvent) IO c
                 decode = forever $ do
                     s <- await
                     maybe (return ()) yield (AES.decodeStrict' s)
 
-                save :: Consumer (Index, UdpEvent) IO c
+                save :: Consumer (Index, Either (Vcr.Event ()) UdpEvent) IO c
                 save = forever $ do
                     (ix, event) <- await
                     liftIO $ atomically $ do
@@ -172,10 +173,10 @@ fetcher startTime putToBuffer recorder mChannelList = do
 
 -- | Sender process.
 -- Use "UTC" time for initial sync, then use monotonic time for actual replay.
-sender :: UtcTime -> STM UdpEvent -> STM (Maybe UtcTime) -> STM AtLimit -> STM Bool
-    -> STM Speed -> (String -> STM ()) -> (UtcTime -> STM ()) -> [ChannelSelection] -> IO ()
+sender :: UtcTime -> STM (Either (Vcr.Event ()) UdpEvent) -> STM (Maybe UtcTime)
+    -> STM AtLimit -> STM Bool -> STM Speed -> (String -> STM ()) -> (UtcTime
+    -> STM ()) -> [ChannelSelection] -> IO ()
 sender startUtcTime getFromBuffer getT2 getAtLimit getRunning getSpeed dumpConsole updateT channelList = do
-
     -- input queue and process is required for each channel
     realSenders <- forM channelList $ \(ChannelSelection name mDump mOut) -> do
         q <- newTBQueueIO $ intToNatural prefetch
@@ -214,8 +215,8 @@ sender startUtcTime getFromBuffer getT2 getAtLimit getRunning getSpeed dumpConso
     -- depending on current time, speed and pending event.
     startup senderMap tUtc speed evt = do
         tStartupMono <- getMonoTimeNs
-        let pendingUtc = eTimeUtc evt
-            pendingMono = eTimeMono evt
+        let pendingUtc = either eTimeUtc eTimeUtc evt
+            pendingMono = either eTimeMono eTimeMono evt
             deltaTNominal = pendingUtc `Clk.diffUTCTime` tUtc
             deltaTNs = round $ (1000*1000*1000)*toRational deltaTNominal
             t0Mono = pendingMono - deltaTNs
@@ -223,24 +224,24 @@ sender startUtcTime getFromBuffer getT2 getAtLimit getRunning getSpeed dumpConso
                 dtReal <- (\t -> t - tStartupMono) <$> getMonoTimeNs
                 let dt = round (fromIntegral dtReal * speed)
                 return (t0Mono + dt)
-        running senderMap (eSessionId evt) speed getVirtualMonotonicTime tUtc evt
+        running senderMap (either eSessionId eSessionId evt) speed getVirtualMonotonicTime tUtc evt
 
     -- Timing is only valid within the same session.
     running senderMap session speed getVirtualMonotonicTime = fix $ \loop tUtc evt -> do
-        case eSessionId evt == session of
+        case (either eSessionId eSessionId evt) == session of
             -- new session detected, restart
             False -> startup senderMap tUtc speed evt
             True -> do
                 tMono <- getVirtualMonotonicTime
-                (tUtc', getNextEvent) <- case tMono >= eTimeMono evt of
+                (tUtc', getNextEvent) <- case tMono >= (either eTimeMono eTimeMono) evt of
                     False -> do
                         threadDelaySec 0.001
                         let deltaT = fromRational (round (speed*1000) % (1000*1000))
                             tUtc' = Clk.addUTCTime deltaT tUtc
                         return (tUtc', pure evt)
                     True -> do
-                        fire senderMap evt
-                        let tUtc' = eTimeUtc evt
+                        either (\_ -> return ()) (fire senderMap) evt
+                        let tUtc' = either eTimeUtc eTimeUtc evt
                         return (tUtc', getFromBuffer)
                 atomically $ updateT tUtc'
                 evt' <- atomically getNextEvent
@@ -754,14 +755,14 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                             ]
                         set lab [ text := "-" ]
 
-                        let -- save to a file until t2 reached
+                        let -- save to a file until t2 is reached
                             saveToFile = fix $ \loop -> do
                                 (events1, events2) <- atomically $ do
                                     events <- flushTBQueue buffer
                                     case events of
                                         [] -> retry
-                                        lst -> return $ span (\evt -> eTimeUtc evt < utc2) lst
-                                case events1 of
+                                        lst -> return $ span (\evt -> (either eTimeUtc eTimeUtc evt) < utc2) lst
+                                case rights events1 of
                                     [] -> return ()
                                     lst -> do
                                         let s = mconcat $ fmap (\evt -> encodeCompact evt <> "\n") lst

@@ -87,3 +87,21 @@ nix-shell
 runhaskell -Wall -ilib -ivcr-app ./replay/example.hs --asterix path/to/xml
 ```
 
+# Troubleshooting
+
+```bash
+# get event index from command line
+curl localhost:12345/nextIndexFromUtc?t="2020-04-17T10:00:00Z"
+# example output: [[2020,4,17,9,55,3],8640065]
+
+# get events
+curl localhost:12345/events
+curl localhost:12345/events?includeIndex
+curl "localhost:12345/events?includeIndex&ch=ch1"
+curl "localhost:12345/events?includeIndex&ch=ch1|ch2"
+curl "localhost:12345/events?includeIndex&ch=ch1|ch2&ix=\[\[2020,4,17,9,55,3\],8640065\]"
+
+# skip event (get next index from a given index)
+curl "localhost:12345/nextIndexFromIndex?ix=\[\[2020,4,17,9,55,3\],8640065\]"
+```
+

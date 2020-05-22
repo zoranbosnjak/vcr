@@ -8,7 +8,6 @@
 module CmdServer where
 
 -- standard imports
-import           Control.Monad
 import           Control.Monad.Trans.Except
 import           Control.Exception (try, IOException)
 import           GHC.Generics (Generic)
@@ -139,7 +138,7 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
         respondJson :: ToJSON a => Either (Status, String) a -> IO ResponseReceived
         respondJson = \case
             Left (status, err) -> do
-                logM NOTICE err
+                logM DEBUG err
                 respond $ responseLBS status
                     [("Content-Type", "text/plain")] (BSL8.pack $ err ++ "\n")
             Right result -> respond $ responseLBS status200
@@ -193,6 +192,8 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
                     except $ onError status503 ix
 
         -- stream events from the recording files as raw bytestrings
+        -- This is a faster version to retrive events,
+        -- since the event decoding is not required during the process.
         --  - optionally starting from some index
         --  - optionally limit number of events
         go ["eventsRaw"] GET = case store of
@@ -212,7 +213,7 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
                                     write $ BSBB.byteString $ s <> "\n"
                                     flush
                             try (PS.runSafeT $ runEffect effect) >>= \case
-                                Left (e :: IOException) -> logM NOTICE $ show e
+                                Left (e :: IOException) -> logM DEBUG $ show e
                                 Right _ -> return ()
 
         -- stream events from the recording files
@@ -220,15 +221,18 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
         --  - optionally limit number of events
         --  - optionally generate (index, event) pairs, so that a client can resume request
         --  - optionally filter events, based on channel name
+        --      (filtered events don't include eValue, to reduce bandwidth)
         go ["events"] GET = case store of
             StoreDir base -> do
                 eArgs <- runExceptT $ do
                     rawProducer <- lineReader base <$> getIx base
                     predicate <- getChPredicate
-                    let producer :: Producer (Index, UdpEvent) (PS.SafeT IO) ()
+                    let producer :: Producer (Index, Either (Event ()) UdpEvent) (PS.SafeT IO) ()
                         producer = for rawProducer $ \(ix, s) -> do
                             event <- either fail pure (decodeEvent s)
-                            when (predicate event) $ yield (ix, event)
+                            yield (ix, case predicate event of
+                                False -> Left (fmap (const ()) event)
+                                True -> Right event)
                     limit <- getLimit
                     includeIndex <- getIncludeIndex
                     return (producer >-> limit, includeIndex)
@@ -241,12 +245,12 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
                         \write flush -> do
                             let effect = for producer $ \(ix, event) -> liftIO $ do
                                     let line = case includeIndex of
-                                            False -> encodeCompact event <> "\n"
-                                            True  -> encodeCompact (ix, event) <> "\n"
-                                    write $ BSBB.byteString $ BSL.toStrict line
+                                            False -> encodeCompact event
+                                            True  -> encodeCompact (ix, event)
+                                    write $ BSBB.byteString $ BSL.toStrict $ line <> "\n"
                                     flush
                             try (PS.runSafeT $ runEffect effect) >>= \case
-                                Left (e :: IOException) -> logM NOTICE $ show e
+                                Left (e :: IOException) -> logM DEBUG $ show e
                                 Right _ -> return ()
           where
 

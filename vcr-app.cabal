@@ -62,6 +62,7 @@ executable vcr
     , pipes-concurrency
     , pipes-safe
     , regex-tdfa
+    , regex-tdfa-text
     , time
     , ekg
 

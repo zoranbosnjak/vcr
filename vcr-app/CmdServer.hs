@@ -13,7 +13,7 @@ import           Control.Exception (try, IOException)
 import           GHC.Generics (Generic)
 import           Options.Applicative
 import           Data.String (fromString)
-import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import qualified Data.ByteString.Lazy as BSL
@@ -27,7 +27,7 @@ import           Pipes
 import qualified Pipes.Safe as PS
 import qualified Pipes.Prelude as PP
 import           Text.Regex.TDFA
-import qualified Text.Regex.TDFA.String as TRS
+import qualified Text.Regex.TDFA.Text as TRT
 
 -- local imports
 import           Common
@@ -264,15 +264,17 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
             getChPredicate = withArgValue "ch"
                 (return $ const True)
                 (throwE "ch argument not present")
-                (\s -> case TRS.compile defaultCompOpt (ExecOption False) (BS8.unpack s) of
-                    Left e -> throwE e
-                    Right re -> return $ \event ->
-                        let ch = T.unpack $ eChannel event
-                            result = TRS.execute re ch
-                        in case result of
-                            Left e -> error e
-                            Right Nothing -> False
-                            Right _ -> True
+                (\s -> case TE.decodeUtf8' s of
+                    Left e -> throwE $ show e
+                    Right t -> case TRT.compile defaultCompOpt (ExecOption False) t of
+                        Left e -> throwE e
+                        Right re -> return $ \event ->
+                            let ch = eChannel event
+                                result = TRT.execute re ch
+                            in case result of
+                                Left e -> error e
+                                Right Nothing -> False
+                                Right _ -> True
                 )
 
         -- Remark:

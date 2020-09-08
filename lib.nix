@@ -3,10 +3,10 @@
 , directory, ekg, filepath, hslogger, hsyslog, http-client
 , http-client-tls, http-types, megaparsec, modern-uri, network
 , network-multicast, optparse-applicative, pipes, pipes-concurrency
-, pipes-safe, process, QuickCheck, regex-tdfa, retry, stdenv, stm
-, template-haskell, temporary, text, text-format, time
-, transformers, unix, unordered-containers, uuid, vector, wai, warp
-, wx, wxcore
+, pipes-safe, process, QuickCheck, regex-tdfa, regex-tdfa-text
+, retry, stdenv, stm, template-haskell, temporary, text
+, text-format, time, transformers, unix, unordered-containers, uuid
+, vector, wai, warp, wx, wxcore
 }:
 mkDerivation {
   pname = "vcr";
@@ -17,9 +17,10 @@ mkDerivation {
     bytestring clock containers deepseq deseo directory ekg filepath
     hslogger hsyslog http-client http-client-tls http-types megaparsec
     modern-uri network network-multicast optparse-applicative pipes
-    pipes-concurrency pipes-safe process QuickCheck regex-tdfa retry
-    stm template-haskell temporary text text-format time transformers
-    unix unordered-containers uuid vector wai warp wx wxcore
+    pipes-concurrency pipes-safe process QuickCheck regex-tdfa
+    regex-tdfa-text retry stm template-haskell temporary text
+    text-format time transformers unix unordered-containers uuid vector
+    wai warp wx wxcore
   ];
   description = "event recorder";
   license = stdenv.lib.licenses.gpl3;

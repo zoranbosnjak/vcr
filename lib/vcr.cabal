@@ -72,6 +72,7 @@ library
     , pipes-concurrency
     , pipes-safe
     , regex-tdfa
+    , regex-tdfa-text
     , wx
     , wxcore
     , modern-uri

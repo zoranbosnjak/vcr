@@ -67,7 +67,6 @@ library
     , warp
     , megaparsec
     , http-types
-    , req
     , retry
     , pipes
     , pipes-concurrency
@@ -77,6 +76,7 @@ library
     , wxcore
     , modern-uri
     , http-client
+    , http-client-tls
     , vector
     , ekg
 

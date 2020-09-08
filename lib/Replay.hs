@@ -2,6 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module Replay where
 
@@ -20,7 +21,6 @@ import           Data.Ratio ((%))
 import qualified Data.Text as T
 import qualified Data.List.NonEmpty as NEL
 import qualified Data.Map as Map
-import           Data.Text.Encoding (decodeUtf8)
 import           Data.Char (toLower)
 import           Text.Printf
 import qualified Text.Megaparsec as MP
@@ -39,10 +39,14 @@ import           Control.Concurrent.Async
 import           Control.Exception (try)
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as BSL
-import           Network.HTTP.Req
 import qualified Network.HTTP.Client as HTC
+import qualified Network.HTTP.Client.TLS as HTCS
+import qualified Network.HTTP.Types as HT
 import qualified Data.Aeson as AES
+
+import           Data.String
 
 -- local imports
 import           Common
@@ -55,10 +59,8 @@ type Name = String
 type Running = Bool
 type Speed = Double
 
-data Recorder
-    = RecorderHttp T.Text Int
-    | RecorderHttps T.Text Int
-    deriving (Eq, Show)
+newtype Recorder = Recorder { unRecorder :: String }
+    deriving (Eq, Show, IsString)
 
 data ChannelSelection = ChannelSelection
     { chName    :: Channel                  -- recorder channel name
@@ -76,23 +78,26 @@ speedChoices = [10 ** (x/10) | x <- [-10..10]]
 prefetch :: Int
 prefetch = 1000
 
--- | Convert JSON object to Text.
-objToText :: AES.ToJSON a => a -> T.Text
-objToText = decodeUtf8 . BSL.toStrict . encodeCompact
+-- | Url encode JSON object
+objToUrl :: AES.ToJSON a => a -> String
+objToUrl = BS8.unpack . HT.urlEncode False . BSL.toStrict . encodeCompact
 
 -- | Make http(s) GET request and perform some action on response.
-runGetRequest :: Url scheme -> T.Text -> Option scheme
+runGetRequest :: String
     -> (HTC.Response HTC.BodyReader -> IO a)
-    -> IO (Either HttpException a)
-runGetRequest url path opts act = do
-    let timeout = responseTimeout $ round $ (1.0::Double) * 1000 * 1000
-        request = reqBr GET (url /: path) NoReqBody (opts <> timeout) act
-    try $ runReq defaultHttpConfig request
+    -> IO (Either HTC.HttpException a)
+runGetRequest uri act = case HTC.parseRequest uri of
+    Nothing -> return (Left $ HTC.InvalidUrlException uri "?")
+    Just request -> do
+        manager <- HTC.newManager $ case HTC.secure request of
+            False -> HTC.defaultManagerSettings
+            True -> HTCS.tlsManagerSettings
+        try $ HTC.withResponse request manager act
 
--- | Fetch text via GET.
-fetchFromRecorder :: AES.FromJSON a => Url scheme -> T.Text -> Option scheme -> IO a
-fetchFromRecorder url path opts = fix $ \loop -> do
-    result <- runGetRequest url path opts consumer >>= \case
+-- | Fetch object via GET.
+fetchFromRecorder :: AES.FromJSON a => String -> IO a
+fetchFromRecorder uri = fix $ \loop -> do
+    result <- runGetRequest uri consumer >>= \case
         Left _ -> return Nothing
         Right val -> return $ AES.decodeStrict' val
     maybe (threadDelaySec 1.0 >> loop) return result
@@ -104,17 +109,13 @@ fetchFromRecorder url path opts = fix $ \loop -> do
 
 -- | Get starting index, based on utc time.
 fetchStartIndex :: Recorder -> UtcTime -> IO Index
-fetchStartIndex recorder startTime = case recorder of
-    RecorderHttp  a b -> fetchFromRecorder (http  a) "nextIndexFromUtc" (port b <> "t" =: t)
-    RecorderHttps a b -> fetchFromRecorder (https a) "nextIndexFromUtc" (port b <> "t" =: t)
-  where
-    t = fmtTime startTime
+fetchStartIndex (Recorder rec) t = do
+    fetchFromRecorder (rec ++ "/nextIndexFromUtc?t=" ++ fmtTime t)
 
 -- | Get next index.
 fetchNextIndex :: Recorder -> Index -> IO Index
-fetchNextIndex recorder ix = case recorder of
-    RecorderHttp  a b -> fetchFromRecorder (http  a) "nextIndexFromIndex" (port b <> "ix" =: objToText ix)
-    RecorderHttps a b -> fetchFromRecorder (https a) "nextIndexFromIndex" (port b <> "ix" =: objToText ix)
+fetchNextIndex (Recorder rec) ix = do
+    fetchFromRecorder (rec ++ "/nextIndexFromIndex?ix=" ++ objToUrl ix)
 
 -- | Fetch events from http(s) to memory buffer.
 fetcher :: UtcTime -> (Either (Vcr.Event ()) UdpEvent -> STM ()) -> Recorder -> Maybe (NEL.NonEmpty Channel) -> IO ()
@@ -161,10 +162,12 @@ fetcher startTime putToBuffer recorder mChannelList = do
                     liftIO $ atomically $ do
                         putToBuffer event
                         writeTVar lastIx $ Just ix
-
-        void $ case recorder of
-            RecorderHttp  a b -> runGetRequest (http  a) "events" (port b <> queryFlag "includeIndex" <> maybe mempty (\lst -> "ch" =: lst) chSelection <> "ix" =: objToText startIndex) action
-            RecorderHttps a b -> runGetRequest (https a) "events" (port b <> queryFlag "includeIndex" <> maybe mempty (\lst -> "ch" =: lst) chSelection <> "ix" =: objToText startIndex) action
+        let uri =
+                unRecorder recorder
+                ++ "/events?includeIndex"
+                ++ maybe mempty (\x -> "&ch=" ++ T.unpack x) chSelection
+                ++ "&ix=" ++ objToUrl startIndex
+        void $ runGetRequest uri action
         threadDelaySec 1.0
         ix <- atomically (readTVar lastIx) >>= \case
             Nothing -> return startIndex

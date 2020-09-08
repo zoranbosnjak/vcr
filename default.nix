@@ -22,7 +22,6 @@ let
       wxcore = haskellPackagesNew.callPackage ./nix/wxcore.nix { };
       wxdirect = haskellPackagesNew.callPackage ./nix/wxdirect.nix { };
       wxc = haskellPackagesNew.callPackage ./nix/wxc.nix { };
-      req = haskellPackagesNew.callPackage ./nix/req.nix { };
       modern-uri = haskellPackagesNew.callPackage ./nix/modern-uri.nix { };
       deseo = haskellPackagesNew.callPackage ./nix/deseo.nix { };
       vcr = vcrLib;

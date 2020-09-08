@@ -34,11 +34,12 @@ library
     -Wpartial-fields
   build-depends:
     base < 5
+    , optparse-applicative
+    , ekg
     , template-haskell
     , deseo
     , temporary
     , process
-    , optparse-applicative
     , directory
     , filepath
     , unix
@@ -66,8 +67,6 @@ library
     , wai
     , warp
     , megaparsec
-    , http-types
-    , retry
     , pipes
     , pipes-concurrency
     , pipes-safe
@@ -75,9 +74,8 @@ library
     , regex-tdfa-text
     , wx
     , wxcore
-    , modern-uri
+    , http-types
     , http-client
     , http-client-tls
     , vector
-    , ekg
 

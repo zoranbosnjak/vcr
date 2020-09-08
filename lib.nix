@@ -1,12 +1,12 @@
 { mkDerivation, aeson, aeson-pretty, async, base, base16-bytestring
 , base64-bytestring, bytestring, clock, containers, deepseq, deseo
 , directory, ekg, filepath, hslogger, hsyslog, http-client
-, http-client-tls, http-types, megaparsec, modern-uri, network
+, http-client-tls, http-types, megaparsec, network
 , network-multicast, optparse-applicative, pipes, pipes-concurrency
 , pipes-safe, process, QuickCheck, regex-tdfa, regex-tdfa-text
-, retry, stdenv, stm, template-haskell, temporary, text
-, text-format, time, transformers, unix, unordered-containers, uuid
-, vector, wai, warp, wx, wxcore
+, stdenv, stm, template-haskell, temporary, text, text-format, time
+, transformers, unix, unordered-containers, uuid, vector, wai, warp
+, wx, wxcore
 }:
 mkDerivation {
   pname = "vcr";
@@ -16,11 +16,11 @@ mkDerivation {
     aeson aeson-pretty async base base16-bytestring base64-bytestring
     bytestring clock containers deepseq deseo directory ekg filepath
     hslogger hsyslog http-client http-client-tls http-types megaparsec
-    modern-uri network network-multicast optparse-applicative pipes
+    network network-multicast optparse-applicative pipes
     pipes-concurrency pipes-safe process QuickCheck regex-tdfa
-    regex-tdfa-text retry stm template-haskell temporary text
-    text-format time transformers unix unordered-containers uuid vector
-    wai warp wx wxcore
+    regex-tdfa-text stm template-haskell temporary text text-format
+    time transformers unix unordered-containers uuid vector wai warp wx
+    wxcore
   ];
   description = "event recorder";
   license = stdenv.lib.licenses.gpl3;

@@ -3,7 +3,7 @@ cabal-version:       >=1.10
 -- further documentation, see http://haskell.org/cabal/users-guide/
 
 name:                vcr-app
-version:             0.7.0
+version:             0.8.0
 synopsis:            event recorder
 -- description:
 -- bug-reports:
@@ -57,7 +57,6 @@ executable vcr
     , http-types
     , aeson
     , aeson-pretty
-    , retry
     , pipes
     , pipes-concurrency
     , pipes-safe

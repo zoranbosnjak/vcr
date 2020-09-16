@@ -3,6 +3,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Replay where
 
@@ -12,8 +13,8 @@ import           Data.Bool
 import           Data.Void
 import           Data.Either (rights)
 import           Control.Monad
-import           Control.Exception (SomeException)
 import           Control.Monad.Fix
+import           Control.Exception (IOException)
 import           Control.Monad.Trans.Except
 import           Pipes
 import qualified Pipes.Safe as PS
@@ -28,6 +29,7 @@ import qualified Text.Megaparsec.Char as MC
 import qualified Text.Megaparsec.Char.Lexer as ML
 import qualified Data.Time.Clock as Clk
 import qualified Data.Time.Calendar as Cal
+
 import           System.IO
 import           System.Directory (doesPathExist)
 
@@ -59,6 +61,9 @@ type Name = String
 type Running = Bool
 type Speed = Double
 
+data Source = SrcRecorder | SrcFile
+    deriving (Eq, Enum, Bounded, Show)
+
 newtype Recorder = Recorder { unRecorder :: String }
     deriving (Eq, Show, IsString)
 
@@ -70,6 +75,19 @@ data ChannelSelection = ChannelSelection
 
 data AtLimit = Continue | Wrap | Stop
     deriving (Eq, Enum, Bounded, Show)
+
+data ReplayConfig = ReplayConfig
+    { cSource       :: Source
+    , cRecorder     :: (Name, Recorder)
+    , cFileInput    :: Maybe FilePath
+    , cT1           :: Maybe UtcTime
+    , cT2           :: Maybe UtcTime
+    , cAtLimit      :: AtLimit
+    , cSpeed        :: Speed
+    , cRunning      :: Running
+    , cSessionIndex :: Int
+    , cChannelSelection :: [ChannelSelection]
+    }
 
 speedChoices :: [Speed]
 speedChoices = [10 ** (x/10) | x <- [-10..10]]
@@ -108,19 +126,19 @@ fetchFromRecorder uri = fix $ \loop -> do
             False -> accumulate (x <> s)
 
 -- | Get starting index, based on utc time.
-fetchStartIndex :: Recorder -> UtcTime -> IO Index
-fetchStartIndex (Recorder rec) t = do
+fetchRecorderStartIndex :: Recorder -> UtcTime -> IO Index
+fetchRecorderStartIndex (Recorder rec) t = do
     fetchFromRecorder (rec ++ "/nextIndexFromUtc?t=" ++ fmtTime t)
 
 -- | Get next index.
-fetchNextIndex :: Recorder -> Index -> IO Index
-fetchNextIndex (Recorder rec) ix = do
+fetchRecorderNextIndex :: Recorder -> Index -> IO Index
+fetchRecorderNextIndex (Recorder rec) ix = do
     fetchFromRecorder (rec ++ "/nextIndexFromIndex?ix=" ++ objToUrl ix)
 
 -- | Fetch events from http(s) to memory buffer.
-fetcher :: UtcTime -> (Either (Vcr.Event ()) UdpEvent -> STM ()) -> Recorder -> Maybe (NEL.NonEmpty Channel) -> IO ()
-fetcher startTime putToBuffer recorder mChannelList = do
-    fetchStartIndex recorder startTime >>= fetchFrom
+fetcherRecorder :: Recorder -> UtcTime -> (Either (Vcr.Event ()) UdpEvent -> STM ()) -> Maybe (NEL.NonEmpty Channel) -> IO ()
+fetcherRecorder recorder startTime putToBuffer mChannelList = do
+    fetchRecorderStartIndex recorder startTime >>= fetchFrom
   where
     -- Stream events to the buffer.
     -- This process will block automatically when buffer gets full.
@@ -171,15 +189,82 @@ fetcher startTime putToBuffer recorder mChannelList = do
         threadDelaySec 1.0
         ix <- atomically (readTVar lastIx) >>= \case
             Nothing -> return startIndex
-            Just ix -> fetchNextIndex recorder ix
+            Just ix -> fetchRecorderNextIndex recorder ix
         loop ix
+
+-- | Fetch events from file to memory buffer.
+fetcherFile :: FilePath -> UtcTime
+    -> (Either (Vcr.Event ()) UdpEvent -> STM ())
+    -> Maybe (NEL.NonEmpty Channel)
+    -> IO ()
+fetcherFile f startTime putToBuffer mChannelList = do
+    fetchStartIndex >>= fetchFrom
+  where
+    fetchStartIndex = fix $ \loop -> do
+        result <- try $ withFile f ReadMode $ \h -> do
+            let a = 0
+            hSeek h SeekFromEnd 0
+            b <- hTell h
+            findIndex checkLine startTime h a b
+        case (result :: Either IOException (Maybe Integer)) of
+            Right (Just ix) -> return ix
+            _ -> threadDelaySec 1.0 >> loop
+
+    fetchFrom = fix $ \loop ix -> do
+        result <- try $ withFile f ReadMode $ \h -> do
+            hSeek h AbsoluteSeek ix
+            streamEvents h ix
+        threadDelaySec 1.0
+        loop $ case result of
+            Left (_e :: IOException) -> ix
+            Right ix' -> ix'
+      where
+        streamEvents h = fix $ \loop ix -> hIsEOF h >>= \case
+            True -> return ix
+            False -> do
+                s <- BS8.hGetLine h
+                ix' <- hTell h
+                case decodeEvent s of
+                    -- In case of decode error,
+                    -- return index to retry from.
+                    -- The problem might be temporary.
+                    Left _ -> return ix
+                    Right event -> do
+                        atomically $ putToBuffer $ case required event of
+                            False -> Left (fmap (const ()) event)
+                            True -> Right event
+                        loop ix'
+
+    required event = case mChannelList of
+        Nothing -> True
+        Just lst -> eChannel event `elem` lst
+
+    decodeEvent :: BS8.ByteString -> Either String UdpEvent
+    decodeEvent = AES.eitherDecodeStrict'
+
+    checkLine s = eTimeUtc <$> decodeEvent s
+
+-- | Select fetcher, depending on configuration
+fetcher :: ReplayConfig
+    -> UtcTime
+    -> (Either (Vcr.Event ()) UdpEvent -> STM ())
+    -> Maybe (NEL.NonEmpty Channel)
+    -> IO ()
+fetcher cfg = case cSource cfg of
+    SrcRecorder -> fetcherRecorder (snd $ cRecorder cfg)
+    SrcFile -> case cFileInput cfg of
+        Nothing -> \_ _ _ -> doNothing
+        Just f -> fetcherFile f
 
 -- | Sender process.
 -- Use "UTC" time for initial sync, then use monotonic time for actual replay.
-sender :: UtcTime -> STM (Either (Vcr.Event ()) UdpEvent) -> STM (Maybe UtcTime)
-    -> STM AtLimit -> STM Bool -> STM Speed -> (String -> STM ()) -> (UtcTime
-    -> STM ()) -> [ChannelSelection] -> IO ()
-sender startUtcTime getFromBuffer getT2 getAtLimit getRunning getSpeed dumpConsole updateT channelList = do
+sender :: UtcTime
+    -> STM (Either (Vcr.Event ()) UdpEvent)
+    -> STM ReplayConfig
+    -> (String -> STM ())
+    -> (UtcTime -> STM ())
+    -> [ChannelSelection] -> IO ()
+sender startUtcTime getFromBuffer getConfig dumpConsole updateT channelList = do
     -- input queue and process is required for each channel
     realSenders <- forM channelList $ \(ChannelSelection name mDump mOut) -> do
         q <- newTBQueueIO $ intToNatural prefetch
@@ -207,7 +292,9 @@ sender startUtcTime getFromBuffer getT2 getAtLimit getRunning getSpeed dumpConso
   where
 
     getRunningSpeed :: STM (Maybe Speed)
-    getRunningSpeed = getRunning >>= bool (pure Nothing) (fmap Just getSpeed)
+    getRunningSpeed = do
+        cfg <- getConfig
+        return $ bool Nothing (Just $ cSpeed cfg) (cRunning cfg)
 
     -- We don't want to drop events when switching between notRunning and running modes.
     notRunning senderMap tUtc evt = do
@@ -276,24 +363,20 @@ sender startUtcTime getFromBuffer getT2 getAtLimit getRunning getSpeed dumpConso
         Nothing -> return ()
         Just q -> atomically $ writeTBQueue q evt
 
+    getAtLimit = fmap cAtLimit getConfig
+
+    getT2 = fmap cT2 getConfig
+
 replayEngine ::
-    STM Recorder                    -- selected recorder
-    -> STM Int                      -- session index
-    -> STM [ChannelSelection]       -- replay channels
-    -> STM (Maybe UtcTime)          -- t1
+    STM ReplayConfig                -- replay configuration
     -> UpdatingVar (Maybe UtcTime)  -- starting Utc time updates
-    -> STM (Maybe UtcTime)          -- t2
-    -> STM AtLimit                  -- what to do, when t reaches t2
-    -> STM Speed                    -- selected replay speed
-    -> STM Running                  -- running switch
     -> (UtcTime -> STM ())          -- current Utc time updates for GUI
     -> (Maybe String -> STM ())     -- console dump line action
     -> (Int -> STM ())              -- set buffer level indicator, [0..100]
     -> IO String                    -- reason for termination
-replayEngine getRecorder getSessionIx getChannelSelections getT1 updatesT0 getT2
-  getAtLimit getSpeed getRunning setTCurrent dumpConsole setBufferLevel = do
+replayEngine getReplayConfig updatesT0 setTCurrent dumpConsole setBufferLevel = do
     restartOnUpdate updatesT0 $ \tVar -> do
-      restartOnChange getReplayConfig compareValue $ \(rec, _sesIx, channelList) -> do
+      restartOnChange getReplayConfig compareValue $ \cfg -> do
         atomically $ do
             setBufferLevel 0
             dumpConsole Nothing
@@ -325,40 +408,38 @@ replayEngine getRecorder getSessionIx getChannelSelections getT1 updatesT0 getT2
                     setTCurrent t
 
             mt <- atomically (readTVar tVar)
-            let params = do
+            let ch_selection = cChannelSelection cfg
+                channelList = do
+                    c@(ChannelSelection _channel console out) <- ch_selection
+                    guard (isJust console || isJust out)
+                    return c
+                params = do
                     t <- mt
                     guard $ not $ null channelList
-                    return (t, NEL.nonEmpty $ fmap chName channelList)
+                    return (t, NEL.nonEmpty $ fmap chName ch_selection)
             case params of
                 Nothing -> doNothing
                 Just (t, channels) -> do
                     result <- race
-                        (fetcher t putToBuffer rec channels)
-                        (sender t getFromBuffer getT2 getAtLimit getRunning getSpeed (dumpConsole . Just) updateT channelList)
+                        (fetcher cfg t putToBuffer channels)
+                        (sender t getFromBuffer getReplayConfig (dumpConsole . Just) updateT channelList)
                     case result of
                         Left _ -> return "fetcher error"
                         Right _ -> do           -- restart from T1
-                            atomically (getT1 >>= writeTVar tVar)
+                            atomically $ do
+                                t1 <- fmap cT1 getReplayConfig
+                                writeTVar tVar t1
                             loop
-
   where
-    compareValue (rec, sessionIx, channelList) = (rec, sessionIx, channels)
+    compareValue cfg = (src, sessionIx, channels)
       where
+        src = case cSource cfg of
+            SrcRecorder -> Left $ cRecorder cfg
+            SrcFile -> Right $ cFileInput cfg
+        sessionIx = cSessionIndex cfg
         channels = do
-            ChannelSelection channel console out <- channelList
-            return (channel, isJust console, isJust out)
-
-    getReplayConfig :: STM (Recorder, Int, [ChannelSelection])
-    getReplayConfig = (,,)
-        <$> getRecorder
-        <*> getSessionIx
-        <*> do
-            cs <- getChannelSelections
-            let channelList = do
-                    c@(ChannelSelection _channel console out) <- cs
-                    guard (isJust console || isJust out)
-                    return c
-            return channelList
+            ChannelSelection channel console out <- cChannelSelection cfg
+            [(channel, isJust console, isJust out)]
 
 -- Date/Time parser YYYY-MM-DD HH:MM:SS[.MM]
 pTimeEntry :: MP.Parsec Void String UtcTime
@@ -381,6 +462,22 @@ pTimeEntry = do
         return $ Clk.picosecondsToDiffTime pico
     return $ Clk.UTCTime datePart timePart
 
+-- display time in different formats
+showTimeEntry :: Clk.UTCTime -> (String, (String, String))
+showTimeEntry t =
+    let (year, month, day) = Cal.toGregorian $ Clk.utctDay t
+        ps = Clk.diffTimeToPicoseconds $ Clk.utctDayTime t
+        ms = ps `div` (1000 * 1000 * 1000)
+        sec = ms `div` 1000
+        hours = sec `div` 3600
+        minutes = (sec - hours*3600) `div` 60
+        seconds = (sec - hours*3600) `mod` 60
+    in
+        ( printf "%d-%02d-%02d %02d:%02d:%02d.%03d" year month day hours minutes seconds (ms - (1000 * sec)) :: String
+        , ( printf "%d-%02d-%02d\n%02d:%02d:%02d.%03d" year month day hours minutes seconds (ms - (1000 * sec)) :: String
+          , printf "%d-%02d-%02d-%02d:%02d:%02d" year month day hours minutes seconds :: String
+          )
+        )
 
 -- | Replay GUI.
 replayGUI ::
@@ -391,7 +488,30 @@ replayGUI ::
     -> IO ()
 replayGUI maxDump recorders channelMaps outputs = start gui
   where
+
+    -- highlight wrong time entry
+    checkTime w = do
+        result <- MP.parseMaybe pTimeEntry <$> get w text
+        set w [ bgcolor := maybe red (const white) result ]
+
     gui = do
+        now <- getUtcTime
+
+        replayConfig <- newTVarIO ReplayConfig
+            { cSource       = SrcRecorder
+            , cRecorder     = recorders !! 0
+            , cFileInput    = Nothing
+            , cT1           = Just now
+            , cT2           = Just now
+            , cAtLimit      = minBound
+            , cSpeed        = speedChoices !! div (length speedChoices) 2
+            , cRunning      = False
+            , cSessionIndex = 0
+            , cChannelSelection = []
+            }
+
+        let updateConfig f = atomically $ modifyTVar replayConfig f
+
         -- main frame and panel
         f <- frame [ text := "VCR replay" ]
         p <- panel f []
@@ -402,16 +522,59 @@ replayGUI maxDump recorders channelMaps outputs = start gui
         channelChange <- variable [ value := False ]
 
         -- recorder selector
-        (recorderVar, recorderSelector) <- do
-            var <- newTVarIO $ (recorders !! 0)
-            ctr <- choice p
-                [ items := (fmap fst recorders), selection := 0
-                , on select ::= \w -> do
-                    x <- get w selection
-                    let rec = recorders !! x
-                    atomically $ writeTVar var rec
-                ]
-            return (var, ctr)
+        recorderSelector <- choice p
+            [ items := (fmap fst recorders), selection := 0
+            , on select ::= \w -> do
+                x <- get w selection
+                updateConfig $ \cfg -> cfg { cRecorder = (recorders !! x) }
+            ]
+
+        -- input file selector
+        let defaultFileLabel = "YYYY-MM-DD hh:mm:ss"
+        fileLabel <- staticText p [ text := defaultFileLabel ]
+        fileSelector <- button p
+            [ text := "Select File"
+            , on command := do
+                current <- fmap (maybe "" id) (atomically $
+                    fmap cFileInput (readTVar replayConfig))
+                result <- fileOpenDialog f True True "Select recording file"
+                    [ ("Recordings",["*.vcr"])
+                    , ("Any file", ["*.*"])
+                    ] "" current
+                case result of
+                    Nothing -> return ()
+                    Just filename -> do
+                        es <- try $ withFile filename ReadMode $ BS8.hGetLine
+                        case es of
+                            Left (_e :: IOException) -> return ()
+                            Right s -> do
+                                let t = case AES.decodeStrict' s of
+                                        Nothing -> defaultFileLabel
+                                        Just (event :: UdpEvent) ->
+                                            snd $ snd $ showTimeEntry $ eTimeUtc event
+                                set fileLabel [ text := t ]
+                        updateConfig $ \cfg ->
+                            cfg { cFileInput = Just filename }
+            ]
+        set fileSelector [ enabled := False ]
+
+        -- input source
+        srcSelector <- radioBox p Vertical
+            [ "recorder", "file" ]
+            [ text := "source"
+            , on select ::= \w -> do
+                x <- get w selection
+                case x of
+                    0 -> do
+                        updateConfig $ \c -> c { cSource = SrcRecorder }
+                        set recorderSelector [ enabled := True ]
+                        set fileSelector     [ enabled := False ]
+                    1 -> do
+                        updateConfig $ \c -> c { cSource = SrcFile }
+                        set recorderSelector [ enabled := False ]
+                        set fileSelector     [ enabled := True ]
+                    _ -> fail "unexpected selector value"
+            ]
 
         -- channel map selector
         channelMapSelector <- choice p
@@ -431,8 +594,6 @@ replayGUI maxDump recorders channelMaps outputs = start gui
         sp <- splitterWindow p []
         p1 <- panel sp []
         p2 <- panel sp []
-
-        now <- getUtcTime
 
         -- show clock in big fonts
         bigClock <- do
@@ -456,38 +617,35 @@ replayGUI maxDump recorders channelMaps outputs = start gui
 
         let timeToolTip = "YYYY-MM-DD HH:MM:SS[.MMM]"
 
-        -- time pointers
-        ((t1Var,t1), (tCurrentVar,tCurrent), (t2Var,t2)) <- (,,)
-            <$> do
-                var <- newTVarIO (Just now)
-                ctr <- textEntry p
-                    [ tooltip := timeToolTip
-                    , text := fst $ showTimeEntry now
-                    , on update ::= \w -> do
-                        result <- MP.parseMaybe pTimeEntry <$> get w text
-                        atomically $ writeTVar var result
-                    ]
-                return (var, ctr)
-            <*> do
-                var <- newUpdatingVarIO (Just now)
-                ctr <- textEntry p
-                    [ tooltip := timeToolTip
-                    , text := fst $ showTimeEntry now
-                    , on update ::= \w -> do
-                        result <- MP.parseMaybe pTimeEntry <$> get w text
-                        atomically $ updateVar var result
-                    ]
-                return (var, ctr)
-            <*> do
-                var <- newTVarIO (Just now)
-                ctr <- textEntry p
-                    [ tooltip := timeToolTip
-                    , text := fst $ showTimeEntry now
-                    , on update ::= \w -> do
-                        result <- MP.parseMaybe pTimeEntry <$> get w text
-                        atomically $ writeTVar var result
-                    ]
-                return (var, ctr)
+        -- time control t1
+        t1 <- textEntry p
+            [ tooltip := timeToolTip
+            , text := fst $ showTimeEntry now
+            , on update ::= \w -> do
+                result <- MP.parseMaybe pTimeEntry <$> get w text
+                updateConfig $ \c -> c { cT1 = result }
+            ]
+
+        -- current time
+        (tCurrentVar,tCurrent) <- do
+            var <- newUpdatingVarIO (Just now)
+            ctr <- textEntry p
+                [ tooltip := timeToolTip
+                , text := fst $ showTimeEntry now
+                , on update ::= \w -> do
+                    result <- MP.parseMaybe pTimeEntry <$> get w text
+                    atomically $ updateVar var result
+                ]
+            return (var, ctr)
+
+        -- time control t2
+        t2 <- textEntry p
+            [ tooltip := timeToolTip
+            , text := fst $ showTimeEntry now
+            , on update ::= \w -> do
+                result <- MP.parseMaybe pTimeEntry <$> get w text
+                updateConfig $ \c -> c { cT2 = result }
+            ]
 
         -- 'begin' time button
         t1Button <- button p
@@ -495,7 +653,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
             , on command := do
                 s <- get tCurrent text
                 set t1 [ text := s ]
-                atomically $ writeTVar t1Var $ MP.parseMaybe pTimeEntry s
+                updateConfig $ \c -> c { cT1 = MP.parseMaybe pTimeEntry s }
             ]
 
         -- 'reset' time button
@@ -513,7 +671,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
             , on command := do
                 s <- get tCurrent text
                 set t2 [ text := s ]
-                atomically $ writeTVar t2Var $ MP.parseMaybe pTimeEntry s
+                updateConfig $ \c -> c { cT2 = MP.parseMaybe pTimeEntry s }
             ]
 
         -- time slider
@@ -531,56 +689,44 @@ replayGUI maxDump recorders channelMaps outputs = start gui
             ]
 
         -- limit action selector
-        (atLimitVar, atLimit) <- do
-            var <- newTVarIO minBound
-            ctr <- radioBox p Vertical
-                (fmap (fmap toLower . show) [(minBound::AtLimit)..maxBound])
-                [ text := "at limit"
-                , on select ::= \w -> do
-                    x <- get w selection
-                    atomically $ writeTVar var $ toEnum x
-                ]
-            return (var, ctr)
+        atLimit <- radioBox p Vertical
+            (fmap (fmap toLower . show) [(minBound::AtLimit)..maxBound])
+            [ text := "at limit"
+            , on select ::= \w -> do
+                x <- get w selection
+                updateConfig $ \c -> c { cAtLimit = toEnum x }
+            ]
 
         -- speed selector
-        (speedVar, speedSelector) <- do
+        speedSelector <- do
             let initial = div (length speedChoices) 2
-            var <- newTVarIO (speedChoices !! initial)
-            ctr <-
-                let labels = fmap (printf "x %.02f") speedChoices
-                in choice p
-                    [ items := labels
-                    , selection := initial
-                    , on select ::= \w -> do
-                        ix <- get w selection
-                        atomically $ writeTVar var (speedChoices !! ix)
-                    ]
-            return (var, ctr)
+                labels = fmap (printf "x %.02f") speedChoices
+            choice p
+                [ items := labels
+                , selection := initial
+                , on select ::= \w -> do
+                    ix <- get w selection
+                    updateConfig $ \c -> c { cSpeed = speedChoices !! ix }
+                ]
 
         -- run button
-        (runVar, runButton) <- do
-            var <- newTVarIO False
-            ctr <- toggleButton p
-                [ text := "Run", bgcolor := lightgrey
-                , on command ::= \w -> do
-                    x <- get w checked
-                    atomically $ writeTVar var x
-                    set w [ bgcolor := bool lightgrey green x ]
-                    set tSlider [ enabled := not x ]
-                    set tCurrent [ enabled := not x ]
-                ]
-            return (var, ctr)
+        runButton <- toggleButton p
+            [ text := "Run", bgcolor := lightgrey
+            , on command ::= \w -> do
+                x <- get w checked
+                updateConfig $ \c -> c { cRunning = x }
+                set w [ bgcolor := bool lightgrey green x ]
+                set tSlider [ enabled := not x ]
+                set tCurrent [ enabled := not x ]
+            ]
 
         -- Unfortunately, the "on click" triggers before the change,
         -- so the actual "notebookGetSelection" must be called later.
-        (nbVar, nb) <- do
-            var <- newTVarIO 0
-            ctr <- notebook p1
-                [ on click := \_clickPoint -> do
-                    set channelChange [ value := True ]
-                    propagateEvent
-                ]
-            return (var, ctr)
+        nb <- notebook p1
+            [ on click := \_clickPoint -> do
+                set channelChange [ value := True ]
+                propagateEvent
+            ]
 
         -- console and output selections
         outputPanels <- forM outputs $ \(name, lst) -> do
@@ -628,8 +774,6 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 , [(ch,enConsole,enOutput) | (ch,enConsole,enOutput,_) <- controls]
                 )
 
-        channelsVar <- newTVarIO []
-
         consoleMessagesQueue <- newTQueueIO
 
         -- when the engine is running, it will periodically update time
@@ -637,15 +781,8 @@ replayGUI maxDump recorders channelMaps outputs = start gui
 
         -- replay engine task
         engine <- async $ replayEngine
-            (snd <$> readTVar recorderVar)
-            (readTVar nbVar)
-            (readTVar channelsVar)
-            (readTVar t1Var)
+            (readTVar replayConfig)
             tCurrentVar
-            (readTVar t2Var)
-            (readTVar atLimitVar)
-            (readTVar speedVar)
-            (readTVar runVar)
             (writeTVar tUpdates . Just)
             (writeTQueue consoleMessagesQueue)
             (writeTVar bufferLevelVar)
@@ -668,8 +805,12 @@ replayGUI maxDump recorders channelMaps outputs = start gui
         -- however, there are too many arguments to be passed around,
         -- so it's inlined instead.
         evtHandlerOnMenuCommand f wxID_SAVEAS $ do
-            (recName, rec) <- atomically $ readTVar recorderVar
-            (mT1, mT2) <- atomically ( (,) <$> readTVar t1Var <*> readTVar t2Var)
+            cfg <- atomically $ readTVar replayConfig
+            let suffix = case cSource cfg of
+                    SrcRecorder -> fst (cRecorder cfg)
+                    SrcFile -> "file"
+                mT1 = cT1 cfg
+                mT2 = cT2 cfg
             result <- runExceptT $ do
                 -- get time interval
                 let timeInterval = do
@@ -688,7 +829,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                     result <- liftIO $ fileSaveDialog f True False "Save selection"
                         [ ("Recordings",["*.vcr"])
                         , ("Any file", ["*.*"])
-                        ] "" (snd ( snd $ showTimeEntry a) ++ "-" ++ recName ++ ".vcr")
+                        ] "" (snd ( snd $ showTimeEntry a) ++ "-" ++ suffix ++ ".vcr")
                     targetFile <- maybe (throwE ()) pure result
                     exists <- liftIO $ doesPathExist targetFile
                     Control.Monad.when exists $ do
@@ -721,8 +862,8 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                         Nothing -> throwE ()
                         -- selected channels only
                         Just 0 -> do
-                            cs <- liftIO $ atomically $ readTVar channelsVar
-                            let channelList = do
+                            let cs = cChannelSelection cfg
+                                channelList = do
                                     (ChannelSelection channel console out) <- cs
                                     guard (isJust console || isJust out)
                                     return channel
@@ -734,12 +875,12 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                         Just 1 -> return Nothing
                         _ -> error $ "internal error, unexpected value: " ++ show result
 
-                return (a, b, rec, targetFile, channelSelection)
+                return (a, b, targetFile, channelSelection)
 
             -- perform file save if all selections are correct
             case result of
                 Left _ -> return ()
-                Right (utc1, utc2, recorder, targetFile, channelSelection) -> do
+                Right (utc1, utc2, targetFile, channelSelection) -> do
                     -- with open target file
                     ioResult <- try $ withFile targetFile WriteMode $ \h -> do
                         buffer <- newTBQueueIO $ intToNatural prefetch
@@ -778,7 +919,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                             -- run 'fetcher' and 'saveToFile' actions in parallel
                             -- terminate, when 'saveToFile' is done
                             saveAction = race
-                                (fetcher utc1 (writeTBQueue buffer) recorder channelSelection)
+                                (fetcher cfg utc1 (writeTBQueue buffer) channelSelection)
                                 (saveToFile) >>= \case
                                     Left _ -> fail "event fetcher failed"
                                     Right _ -> return ()
@@ -805,7 +946,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
 
                     -- save to file finished
                     case ioResult of
-                        Left e -> errorDialog f "error" $ "fatal error: " ++ show (e :: SomeException)
+                        Left e -> errorDialog f "error" $ "fatal error: " ++ show (e :: IOException)
                         Right transferResult -> Control.Monad.when (isJust transferResult) $
                             infoDialog f "done" "Transfer finished!"
 
@@ -824,9 +965,12 @@ replayGUI maxDump recorders channelMaps outputs = start gui
         set p [ layout := column 5
             [ hfill $ hrule 1
             , hfill $ row 20
-                        [ boxed "source" $ margin 5 $ widget recorderSelector
-                            -- - recorder (recorder selector)
-                            -- - file (file select popup)
+                        [ widget srcSelector
+                        , boxed "recorder" $ margin 5 $ widget recorderSelector
+                        , boxed "input file" $ margin 5 $ row 5
+                            [ widget fileSelector
+                            , widget fileLabel
+                            ]
                         , boxed "channel map" $ margin 5 $ widget channelMapSelector
                         , boxed "buffer level" $ margin 5 $ widget bufferLevel
                         ]
@@ -861,6 +1005,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
 
         -- run periodic action (checks, updates...)
         void $ timer f [ interval := 100, on command := do
+
             -- check engine
             poll engine >>= \case
                 Nothing -> return ()
@@ -907,9 +1052,10 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                         b <- toOutput
                         return $ ChannelSelection (mapper ch) a b
 
-                    atomically $ do
-                        writeTVar nbVar ix
-                        writeTVar channelsVar lst
+                    updateConfig $ \c -> c
+                        { cSessionIndex = ix
+                        , cChannelSelection = lst
+                        }
 
             -- refresh buffer level
             atomically (readTVar bufferLevelVar) >>= \case
@@ -940,24 +1086,4 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 set bigClock [ text := s ]
             ]
 
-    -- highlight wrong time entry
-    checkTime w = do
-        result <- MP.parseMaybe pTimeEntry <$> get w text
-        set w [ bgcolor := maybe red (const white) result ]
-
-    -- display time in different formats
-    showTimeEntry t =
-        let (year, month, day) = Cal.toGregorian $ Clk.utctDay t
-            ps = Clk.diffTimeToPicoseconds $ Clk.utctDayTime t
-            ms = ps `div` (1000 * 1000 * 1000)
-            sec = ms `div` 1000
-            hours = sec `div` 3600
-            minutes = (sec - hours*3600) `div` 60
-            seconds = (sec - hours*3600) `mod` 60
-        in
-            ( printf "%d-%02d-%02d %02d:%02d:%02d.%03d" year month day hours minutes seconds (ms - (1000 * sec)) :: String
-            , ( printf "%d-%02d-%02d\n%02d:%02d:%02d.%03d" year month day hours minutes seconds (ms - (1000 * sec)) :: String
-              , printf "%d-%02d-%02d-%02d:%02d:%02d" year month day hours minutes seconds :: String
-              )
-            )
 

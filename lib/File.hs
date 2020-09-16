@@ -270,7 +270,7 @@ getNextIndexFromUtc base checkLine utc = do
         (b, result) <- IO.withFile (fileSuffixToFileName base x) IO.ReadMode $ \h -> do
             IO.hSeek h IO.SeekFromEnd 0
             b <- IO.hTell h
-            ix <- findIndex h 0 b
+            ix <- findIndex checkLine utc h 0 b
             return (b, ix)
         case result of
             Nothing -> checkCandidates xs
@@ -278,46 +278,49 @@ getNextIndexFromUtc base checkLine utc = do
                 True -> checkCandidates xs
                 False -> return $ Right $ Index x ix
 
-    -- skip all lines where a timestamp is less then required
-    -- return first of the remaining lines
-    findIndex h = fix $ \loop a b -> case a >= b of
-        True -> return Nothing
-        False -> probe a >>= \case
-            (Left e0, _) -> fail e0     -- first read should be OK
-            (Right t0, _) -> case t0 >= utc of
-                True -> return $ Just a     -- got it
-                False -> case a >= b of
-                    True -> return Nothing  -- not found
-                    False -> do
-                        -- Jump to the middle of the interval.
-                        -- This will most likely position the file handle
-                        -- in the middle of the line. Two readlines might be necessary.
-                        let half = (a + b) `div` 2
-                        mMiddle <- probe half >>= \case
-                            (Right _, _) -> return $ Just half
-                            (Left _, i) -> return $ bool (Just i) Nothing (i >= b)
-                        case mMiddle of
-                            Nothing -> linearSearch a b
-                            Just i -> probe i >>= \case
-                                (Left e, _) -> fail e
-                                (Right t, j) -> case compare t utc of
-                                    EQ -> return $ Just i
-                                    LT -> bool (return $ Just i) (loop j b) (j > a)
-                                    GT -> bool (return $ Just i) (loop a j) (j < b)
-      where
-        probe offset = do
-            IO.hSeek h IO.AbsoluteSeek offset
-            line <- BS8.hGetLine h
-            offset' <- IO.hTell h
-            return (checkLine line, offset')
+-- skip all lines where a timestamp is less then required
+-- return first of the remaining lines
+findIndex :: Ord a =>
+    (BS8.ByteString -> Either String a)
+    -> a -> IO.Handle -> Integer -> Integer -> IO (Maybe Integer)
+findIndex checkLine utc h = fix $ \loop a b -> case a >= b of
+    True -> return Nothing
+    False -> probe a >>= \case
+        (Left e0, _) -> fail e0     -- first read should be OK
+        (Right t0, _) -> case t0 >= utc of
+            True -> return $ Just a     -- got it
+            False -> case a >= b of
+                True -> return Nothing  -- not found
+                False -> do
+                    -- Jump to the middle of the interval.
+                    -- This will most likely position the file handle
+                    -- in the middle of the line. Two readlines might be necessary.
+                    let half = (a + b) `div` 2
+                    mMiddle <- probe half >>= \case
+                        (Right _, _) -> return $ Just half
+                        (Left _, i) -> return $ bool (Just i) Nothing (i >= b)
+                    case mMiddle of
+                        Nothing -> linearSearch a b
+                        Just i -> probe i >>= \case
+                            (Left e, _) -> fail e
+                            (Right t, j) -> case compare t utc of
+                                EQ -> return $ Just i
+                                LT -> bool (return $ Just i) (loop j b) (j > a)
+                                GT -> bool (return $ Just i) (loop a j) (j < b)
+  where
+    probe offset = do
+        IO.hSeek h IO.AbsoluteSeek offset
+        line <- BS8.hGetLine h
+        offset' <- IO.hTell h
+        return (checkLine line, offset')
 
-        linearSearch a b
-            | a >= b = return $ Nothing
-            | otherwise = probe a >>= \case
-                (Left e, _) -> fail e
-                (Right t, i) -> case t >= utc of
-                    True -> return $ Just a
-                    False -> linearSearch i b
+    linearSearch a b
+        | a >= b = return $ Nothing
+        | otherwise = probe a >>= \case
+            (Left e, _) -> fail e
+            (Right t, i) -> case t >= utc of
+                True -> return $ Just a
+                False -> linearSearch i b
 
 -- | File reader.
 -- Assume '\n' separator.

@@ -716,7 +716,6 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 x <- get w checked
                 updateConfig $ \c -> c { cRunning = x }
                 set w [ bgcolor := bool lightgrey green x ]
-                set tSlider [ enabled := not x ]
                 set tCurrent [ enabled := not x ]
             ]
 

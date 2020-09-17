@@ -539,7 +539,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                     fmap cFileInput (readTVar replayConfig))
                 result <- fileOpenDialog f True True "Select recording file"
                     [ ("Recordings",["*.vcr"])
-                    , ("Any file", ["*.*"])
+                    , ("Any file", ["*"])
                     ] "" current
                 case result of
                     Nothing -> return ()

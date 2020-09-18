@@ -9,8 +9,8 @@ mkDerivation {
   version = "1.6.0";
   src = fetchgit {
     url = "https://github.com/zoranbosnjak/deseo";
-    sha256 = "0f0gswvmi70yyb66br544l3m08wxdq3bvf5hc110341cxk3hwq6a";
-    rev = "b124b9e6a01d59990fee6c24fbc7d44579ad71a9";
+    sha256 = "1yhqq6lv3z20bpxh77l7lgblycv8bn6bp8c9d6pdgf0qr868n4v6";
+    rev = "ff9025864bd83d13e83453946053874a0ab6f41a";
     fetchSubmodules = true;
   };
   libraryHaskellDepends = [

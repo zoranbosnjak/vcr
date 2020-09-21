@@ -51,6 +51,7 @@ let
       ghc -Wall -O2 test-tools/receiver.hs
       cp test-tools/generator $out/bin/vcr-generator
       cp test-tools/receiver $out/bin/vcr-receiver
+      cp scripts/vcr-custom.sh $out/bin
       mkdir $out/replay
       cp replay/* $out/replay
     '';

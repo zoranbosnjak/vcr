@@ -93,39 +93,53 @@ prepend b = PP.map (\bs -> BS.singleton b <> bs)
 -- | Replay filter example.
 -- It manipulates timestamp in some asterix records,
 -- such that it looks like the record was just generated.
-restamp :: MonadIO m => Ast.Profiles -> Pipe BS.ByteString BS.ByteString m ()
-restamp uaps = forever $ do
-    s <- await
+-- Take into consideration original delay when restamping.
+dgRestamp :: MonadIO m => Ast.Profiles -> Pipe (Event Udp.UdpContent) BS.ByteString m ()
+dgRestamp uaps = forever $ do
+    event <- await
     now <- tod <$> liftIO getUtcTime
-    yield $ processDatagram now s
+    yield $ processDatagram
+        now
+        (tod $ eTimeUtc event)
+        (Udp.udpDatagram $ eValue event)
   where
 
     tod :: UtcTime -> Ast.EValue
     tod t = Ast.EDouble $ fromRational $ toRational $ utctDayTime t
 
-    processDatagram :: Ast.EValue -> BS.ByteString -> BS.ByteString
-    processDatagram now s = case Ast.toDataBlocks $ Bits.fromByteString s of
+    processDatagram :: Ast.EValue -> Ast.EValue -> BS.ByteString -> BS.ByteString
+    processDatagram now oldUtc s = case Ast.toDataBlocks $ Bits.fromByteString s of
         Nothing -> s    -- not an asterix
         Just dbs ->     -- process each datablock, encode, check alignment
-            let result = mconcat $ fmap (Ast.fromDataBlock . processDataBlock now) dbs
+            let result = mconcat $ fmap (Ast.fromDataBlock . processDataBlock) dbs
             in bool s (Bits.toByteString result) (Bits.isAligned result)
-
-    processDataBlock :: Ast.EValue -> Ast.DataBlock -> Ast.DataBlock
-    processDataBlock now db = case mProcessRecord of
-        Nothing -> db
-        Just processRecord -> case Ast.toRecords uaps db of
-            Nothing -> db
-            Just recs -> Ast.mkDataBlock (Ast.dbCat db) (fmap processRecord recs)
       where
-        mProcessRecord :: Maybe (Ast.Item -> Ast.Item)
-        mProcessRecord = fmap modifyItem itemToModify
+        processDataBlock :: Ast.DataBlock -> Ast.DataBlock
+        processDataBlock db = case mProcessRecord of
+            Nothing -> db
+            Just processRecord -> case Ast.toRecords uaps db of
+                Nothing -> db
+                Just recs -> Ast.mkDataBlock (Ast.dbCat db) (fmap processRecord recs)
           where
-            itemToModify = case Ast.dbCat db of
-                34 -> Just "030"
-                48 -> Just "140"
-                _ -> Nothing
-            modifyItem i rec = maybe rec id $ Ast.update rec $ do
-                Ast.modifyItem i $ \_ -> Ast.fromNatural now
+            mProcessRecord :: Maybe (Ast.Item -> Ast.Item)
+            mProcessRecord = fmap modifyItem itemToModify
+              where
+                itemToModify = case Ast.dbCat db of
+                    1  -> Just "141"
+                    2  -> Just "030"
+                    19 -> Just "140"
+                    20 -> Just "140"
+                    34 -> Just "030"
+                    48 -> Just "140"
+                    _ -> Nothing
+                modifyItem i rec = maybe rec id $ Ast.update rec $ do
+                    Ast.modifyItem i $ \j dsc -> do
+                        t1 <- Ast.toRaw j
+                        t2 <- Ast.fromNatural oldUtc dsc >>= Ast.toRaw
+                        t3 <- Ast.fromNatural now dsc >>= Ast.toRaw
+                        let originalDelay = t2 - t1
+                            t4 = t3 - originalDelay
+                        Ast.fromRaw (t4 :: Int) dsc
 
 -- | Extract datagram from event.
 dg :: Monad m => Pipe (Event Udp.UdpContent) BS.ByteString m ()
@@ -166,10 +180,10 @@ outputs uaps =
         , ("ch4", dump, dg >-> prepend 4 >-> txUnicast "127.0.0.1" "59004", "local 59004")
         ])
     , ("restamp",   -- restamp asterix
-        [ ("ch1", dump, dg >-> restamp uaps >-> txUnicast "127.0.0.1" "59001", "local 59001")
-        , ("ch2", dump, dg >-> restamp uaps >-> txUnicast "127.0.0.1" "59002", "local 59002")
-        , ("ch3", dump, dg >-> restamp uaps >-> txUnicast "127.0.0.1" "59003", "local 59003")
-        , ("ch4", dump, dg >-> restamp uaps >-> txUnicast "127.0.0.1" "59004", "local 59004")
+        [ ("ch1", dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59001", "local 59001")
+        , ("ch2", dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59002", "local 59002")
+        , ("ch3", dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59003", "local 59003")
+        , ("ch4", dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59004", "local 59004")
         ])
     , ("multicast",   -- send to multicast
         [ ("ch1", dump, dg >-> txMulticast "239.0.0.1" "59001" "127.0.0.1" 32, "mc 59001")

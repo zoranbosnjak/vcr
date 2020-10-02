@@ -67,9 +67,23 @@ data Source = SrcRecorder | SrcFile
 newtype Recorder = Recorder { unRecorder :: String }
     deriving (Eq, Show, IsString)
 
+type Output =
+    ( Channel                   -- output channel name
+    , UdpEvent -> Maybe Double  -- blinker timeout
+    , UdpEvent -> String        -- console printer
+    , Consumer UdpEvent (PS.SafeT IO) ()    -- tx consumer
+    , String                -- output tooltip
+    )
+
+-- | Mapping function between channel names
+type ChannelMap
+    = Channel -- output channel name
+    -> Channel -- recorder channel name
+
 data ChannelSelection = ChannelSelection
-    { chName    :: Channel                  -- recorder channel name
-    , chDump    :: Maybe (UdpEvent -> String) -- dump to console
+    { chName    :: Channel                      -- recorder channel name
+    , chBlinker :: (UdpEvent -> IO ())          -- activity trigger
+    , chDump    :: Maybe (UdpEvent -> String)   -- dump to console
     , chOutput  :: Maybe (Consumer UdpEvent (PS.SafeT IO) ()) -- send output
     }
 
@@ -91,6 +105,15 @@ data ReplayConfig = ReplayConfig
 
 speedChoices :: [Speed]
 speedChoices = [10 ** (x/10) | x <- [-10..10]]
+
+colorNormal :: Color
+colorNormal = lightgrey
+
+colorStandBy :: Color
+colorStandBy = yellow
+
+colorActive :: Color
+colorActive = green
 
 -- | Pre-fetch buffer size.
 prefetch :: Int
@@ -266,12 +289,13 @@ sender :: UtcTime
     -> [ChannelSelection] -> IO ()
 sender startUtcTime getFromBuffer getConfig dumpConsole updateT channelList = do
     -- input queue and process is required for each channel
-    realSenders <- forM channelList $ \(ChannelSelection name mDump mOut) -> do
+    realSenders <- forM channelList $ \(ChannelSelection name blink mDump mOut) -> do
         q <- newTBQueueIO $ intToNatural prefetch
         let consumer = maybe (forever $ await) id mOut
             producer = forever $ do
                 event <- liftIO $ atomically $ readTBQueue q
                 yield event     -- send via provided consumer
+                liftIO (blink event) -- trigger blinker
                 case mDump of   -- dump to console
                     Nothing -> return ()
                     Just f -> liftIO $ atomically $ dumpConsole $ f event
@@ -410,7 +434,7 @@ replayEngine getReplayConfig updatesT0 setTCurrent dumpConsole setBufferLevel = 
             mt <- atomically (readTVar tVar)
             let ch_selection = cChannelSelection cfg
                 channelList = do
-                    c@(ChannelSelection _channel console out) <- ch_selection
+                    c@(ChannelSelection _channel _blinker console out) <- ch_selection
                     guard (isJust console || isJust out)
                     return c
                 params = do
@@ -438,7 +462,7 @@ replayEngine getReplayConfig updatesT0 setTCurrent dumpConsole setBufferLevel = 
             SrcFile -> Right $ cFileInput cfg
         sessionIx = cSessionIndex cfg
         channels = do
-            ChannelSelection channel console out <- cChannelSelection cfg
+            ChannelSelection channel _blinker console out <- cChannelSelection cfg
             [(channel, isJust console, isJust out)]
 
 -- Date/Time parser YYYY-MM-DD HH:MM:SS[.MM]
@@ -481,10 +505,10 @@ showTimeEntry t =
 
 -- | Replay GUI.
 replayGUI ::
-    Int
-    -> [(Name, Recorder)]
-    -> [(Name, Channel {-outputChannelName-} -> Channel {-recorderChannelName-})]
-    -> [(Name, [(Channel {-outputChannelName-}, UdpEvent -> String, Consumer UdpEvent (PS.SafeT IO) (), String)])]
+    Int                     -- console buffer size
+    -> [(Name, Recorder)]   -- recorders
+    -> [(Name, ChannelMap)] -- channel maps
+    -> [(Name, [Output])]   -- outputs
     -> IO ()
 replayGUI maxDump recorders channelMaps outputs = start gui
   where
@@ -731,28 +755,40 @@ replayGUI maxDump recorders channelMaps outputs = start gui
         outputPanels <- forM outputs $ \(name, lst) -> do
             cp <- scrolledWindow nb [ scrollRate := sz 20 20 ]
 
-            controls <- forM lst $ \(channel, dump, consumer, outTip) -> do
+            controls <- forM lst $ \(channel, blink, consoleDump, consumer, outTip) -> do
+                -- A TVar is nested inside another TVar.
+                -- In this case, the outer TVar remains the same (a reference)
+                -- and the inner TVar can be replaced on each update.
+                -- (registerDelay function generates new TVar each time)
+                activeFlag <- newTVarIO True >>= newTVarIO
+
                 enableConsole <- toggleButton cp
                     [ text := "console"
-                    , bgcolor := lightgrey
+                    , bgcolor := colorNormal
                     , on command ::= \w -> do
                         x <- get w checked
-                        set w [ bgcolor := bool lightgrey yellow x ]
+                        set w [ bgcolor := bool colorNormal colorStandBy x ]
                         set channelChange [ value := True ]
                     ]
                 enableOutput <- toggleButton cp
                     [ text := "output"
                     , tooltip := outTip
-                    , bgcolor := lightgrey
+                    , bgcolor := colorNormal
                     , on command ::= \w -> do
                         x <- get w checked
-                        set w [ bgcolor := bool lightgrey green x ]
+                        set w [ bgcolor := bool colorNormal colorStandBy x ]
                         set channelChange [ value := True ]
                     ]
 
-                let getDumpFunction = get enableConsole checked >>= \case
+                let updateBlinker event = case blink event of
+                        Nothing -> return ()
+                        Just t -> do
+                            v <- registerDelay (round $ t * 1000 * 1000)
+                            atomically $ writeTVar activeFlag v
+
+                    getDumpFunction = get enableConsole checked >>= \case
                         False -> return Nothing
-                        True -> return $ Just dump
+                        True -> return $ Just consoleDump
 
                     getOutputConsumer = get enableOutput checked >>= \case
                         False -> return Nothing
@@ -764,13 +800,13 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                         , label $ T.unpack channel
                         ]
 
-                return (channel, getDumpFunction, getOutputConsumer, chLayout)
+                return (channel, activeFlag, updateBlinker, enableConsole, enableOutput, getDumpFunction, getOutputConsumer, chLayout)
 
             return
                 ( name
                 , cp
-                , column 5 [chLayout | (_,_,_,chLayout) <- controls]
-                , [(ch,enConsole,enOutput) | (ch,enConsole,enOutput,_) <- controls]
+                , column 5 [chLayout | (_,_,_,_,_,_,_,chLayout) <- controls]
+                , [(ch,act,blink,enConsole,enOutput,a,b) | (ch,act,blink,enConsole,enOutput,a,b,_) <- controls]
                 )
 
         consoleMessagesQueue <- newTQueueIO
@@ -863,7 +899,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                         Just 0 -> do
                             let cs = cChannelSelection cfg
                                 channelList = do
-                                    (ChannelSelection channel console out) <- cs
+                                    (ChannelSelection channel _blinker console out) <- cs
                                     guard (isJust console || isJust out)
                                     return channel
                             Control.Monad.when (null channelList) $ do
@@ -949,11 +985,9 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                         Right transferResult -> Control.Monad.when (isJust transferResult) $
                             infoDialog f "done" "Transfer finished!"
 
-        -- setup status bar
-        status <- statusField [text := "Ready..."]
+        -- setup frame
         set f
-            [ statusBar := [ status ]
-            , layout := fill $ widget p
+            [ layout := fill $ widget p
             , clientSize := sz 1024 768
             , on closing := do
                 cancel engine
@@ -1000,7 +1034,7 @@ replayGUI maxDump recorders channelMaps outputs = start gui
         forM_ outputPanels $ \(_name, pnl, outLayout, _) -> set pnl [ layout := outLayout ]
 
         -- set p2 layout
-        set p2 [ layout := boxed "console output" $ fill $ widget dumpWindow]
+        set p2 [ layout := boxed "console" $ fill $ widget dumpWindow]
 
         -- run periodic action (checks, updates...)
         void $ timer f [ interval := 100, on command := do
@@ -1034,6 +1068,23 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                         set tCurrent [ text := fst $ showTimeEntry y ]
                         atomically $ updateVar tCurrentVar (Just y)
 
+            -- selected notebook index
+            nbIx <- notebookGetSelection nb
+            let (_,_,_,channels) = outputPanels !! nbIx
+
+            -- update button colors
+            forM_ channels $ \(_ch,act,_blinker,enConsole,enOutput,_toConsole,_toOutput) -> do
+                col <- atomically $ do
+                    var <- readTVar act         -- get inner variable first
+                    readTVar var >>= \case      -- then it's value
+                        True -> return colorStandBy
+                        False -> return colorActive
+                let updateButton w = get w checked >>= \case
+                        False -> return ()
+                        True -> set w [ bgcolor := col ]
+                updateButton enConsole
+                updateButton enOutput
+
             -- update channel selection
             get channelChange value >>= \case
                 False -> return ()
@@ -1044,15 +1095,13 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                         ix <- get channelMapSelector selection
                         return $ snd (channelMaps !! ix)
 
-                    ix <- notebookGetSelection nb
-                    let (_,_,_,channels) = outputPanels !! ix
-                    lst <- forM channels $ \(ch,toConsole,toOutput) -> do
+                    lst <- forM channels $ \(ch,_act,blinker,_enConsole,_enOutput,toConsole,toOutput) -> do
                         a <- toConsole
                         b <- toOutput
-                        return $ ChannelSelection (mapper ch) a b
+                        return $ ChannelSelection (mapper ch) blinker a b
 
                     updateConfig $ \c -> c
-                        { cSessionIndex = ix
+                        { cSessionIndex = nbIx
                         , cChannelSelection = lst
                         }
 
@@ -1084,5 +1133,4 @@ replayGUI maxDump recorders channelMaps outputs = start gui
                 let s = maybe "" (fst . snd . showTimeEntry) mt
                 set bigClock [ text := s ]
             ]
-
 

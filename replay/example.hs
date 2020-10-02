@@ -155,41 +155,48 @@ txMulticast :: Udp.Ip -> Udp.Port -> Udp.Ip -> Udp.TTL
 txMulticast ip port localIp ttl =
     Udp.udpWriter (Udp.UdpOutMulticast ip port (Just localIp) (Just ttl))
 
+blink :: Double -> Udp.UdpEvent -> Maybe Double
+blink t _event = Just t
+
+noBlink :: Udp.UdpEvent -> Maybe Double
+noBlink _event = Nothing
+
 -- | Replay sessions.
 outputs ::
     Ast.Profiles        -- asterix profiles
     -> [ (Name      -- session name
-       , [ ( Channel                                   -- channel name
-           , Udp.UdpEvent -> String                    -- console dump function
-           , Consumer Udp.UdpEvent (PS.SafeT IO) ()    -- event consumer
-           , String                                    -- tooltip string
+       , [ ( Channel                                -- channel name
+           , Udp.UdpEvent -> Maybe Double           -- seconds to switch on active indicator
+           , Udp.UdpEvent -> String                 -- console dump function
+           , Consumer Udp.UdpEvent (PS.SafeT IO) () -- event consumer
+           , String                                 -- tooltip string
            )
          ])
        ]
 outputs uaps =
     [ ("normal",   -- normal replay
-        [ ("ch1", dump, dg >-> txUnicast "127.0.0.1" "59001", "local 59001")
-        , ("ch2", dump, dg >-> txUnicast "127.0.0.1" "59002", "local 59002")
-        , ("ch3", dump, dg >-> txUnicast "127.0.0.1" "59003", "local 59003")
-        , ("ch4", dump, dg >-> txUnicast "127.0.0.1" "59004", "local 59004")
+        [ ("ch1", blink 1.0, dump, dg >-> txUnicast "127.0.0.1" "59001", "local 59001")
+        , ("ch2", blink 0.1, dump, dg >-> txUnicast "127.0.0.1" "59002", "local 59002")
+        , ("ch3", blink 0.2, dump, dg >-> txUnicast "127.0.0.1" "59003", "local 59003")
+        , ("ch4", noBlink,   dump, dg >-> txUnicast "127.0.0.1" "59004", "local 59004")
         ])
     , ("prepend",   -- prepend byte
-        [ ("ch1", dump, dg >-> prepend 1 >-> txUnicast "127.0.0.1" "59001", "local 59001")
-        , ("ch2", dump, dg >-> prepend 2 >-> txUnicast "127.0.0.1" "59002", "local 59002")
-        , ("ch3", dump, dg >-> prepend 3 >-> txUnicast "127.0.0.1" "59003", "local 59003")
-        , ("ch4", dump, dg >-> prepend 4 >-> txUnicast "127.0.0.1" "59004", "local 59004")
+        [ ("ch1", blink 1.0, dump, dg >-> prepend 1 >-> txUnicast "127.0.0.1" "59001", "local 59001")
+        , ("ch2", blink 1.0, dump, dg >-> prepend 2 >-> txUnicast "127.0.0.1" "59002", "local 59002")
+        , ("ch3", blink 1.0, dump, dg >-> prepend 3 >-> txUnicast "127.0.0.1" "59003", "local 59003")
+        , ("ch4", blink 1.0, dump, dg >-> prepend 4 >-> txUnicast "127.0.0.1" "59004", "local 59004")
         ])
     , ("restamp",   -- restamp asterix
-        [ ("ch1", dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59001", "local 59001")
-        , ("ch2", dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59002", "local 59002")
-        , ("ch3", dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59003", "local 59003")
-        , ("ch4", dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59004", "local 59004")
+        [ ("ch1", blink 1.0, dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59001", "local 59001")
+        , ("ch2", blink 1.0, dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59002", "local 59002")
+        , ("ch3", blink 1.0, dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59003", "local 59003")
+        , ("ch4", blink 1.0, dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59004", "local 59004")
         ])
     , ("multicast",   -- send to multicast
-        [ ("ch1", dump, dg >-> txMulticast "239.0.0.1" "59001" "127.0.0.1" 32, "mc 59001")
-        , ("ch2", dump, dg >-> txMulticast "239.0.0.1" "59002" "127.0.0.1" 32, "mc 59002")
-        , ("ch3", dump, dg >-> txMulticast "239.0.0.1" "59003" "127.0.0.1" 32, "mc 59003")
-        , ("ch4", dump, dg >-> txMulticast "239.0.0.1" "59004" "127.0.0.1" 32, "mc 59004")
+        [ ("ch1", blink 1.0, dump, dg >-> txMulticast "239.0.0.1" "59001" "127.0.0.1" 32, "mc 59001")
+        , ("ch2", blink 1.0, dump, dg >-> txMulticast "239.0.0.1" "59002" "127.0.0.1" 32, "mc 59002")
+        , ("ch3", blink 1.0, dump, dg >-> txMulticast "239.0.0.1" "59003" "127.0.0.1" 32, "mc 59003")
+        , ("ch4", blink 1.0, dump, dg >-> txMulticast "239.0.0.1" "59004" "127.0.0.1" 32, "mc 59004")
         ])
     ]
 

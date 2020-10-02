@@ -6,11 +6,11 @@
 }:
 mkDerivation {
   pname = "deseo";
-  version = "1.6.0";
+  version = "1.6.1";
   src = fetchgit {
     url = "https://github.com/zoranbosnjak/deseo";
     sha256 = "1yhqq6lv3z20bpxh77l7lgblycv8bn6bp8c9d6pdgf0qr868n4v6";
-    rev = "ff9025864bd83d13e83453946053874a0ab6f41a";
+    rev = "840eb6477102a56eeaa005408b137e4445f967a8";
     fetchSubmodules = true;
   };
   libraryHaskellDepends = [

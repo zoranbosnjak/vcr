@@ -4,7 +4,8 @@
 , http-client-tls, http-types, megaparsec, network
 , network-multicast, optparse-applicative, pipes, pipes-concurrency
 , pipes-safe, process, QuickCheck, regex-tdfa, regex-tdfa-text
-, stdenv, stm, template-haskell, temporary, text, text-format, time
+, stdenv, stm, tasty, tasty-hunit, tasty-quickcheck
+, template-haskell, temporary, text, text-format, time
 , transformers, unix, unordered-containers, uuid, vector, wai, warp
 , wx, wxcore
 }:
@@ -22,6 +23,7 @@ mkDerivation {
     time transformers unix unordered-containers uuid vector wai warp wx
     wxcore
   ];
+  testHaskellDepends = [ base tasty tasty-hunit tasty-quickcheck ];
   description = "event recorder";
   license = stdenv.lib.licenses.gpl3;
 }

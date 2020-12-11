@@ -55,6 +55,13 @@ nix-shell
 ghcid "--command=ghci -Wall -ilib -ivcr-app vcr-app/Main.hs"
 ```
 
+### Running unit/property tests
+
+```bash
+nix-shell
+runhaskell -Wall -ilib lib/test/VcrTest.hs
+```
+
 ### Running (inside nix-shell)
 ```bash
 nix-shell

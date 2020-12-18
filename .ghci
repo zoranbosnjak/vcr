@@ -1,2 +1,5 @@
 :set -ilib -ivcr-app
+:set -XOverloadedStrings
+:set -XFlexibleContexts
+:set -XAllowAmbiguousTypes
 

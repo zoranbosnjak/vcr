@@ -7,6 +7,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Streaming.Disk where
 
@@ -42,6 +43,7 @@ import qualified Pipes.Prelude as PP
 -- local imports
 import           Time
 import           Vcr
+import           Common
 
 chunkSize :: Integral n => n
 chunkSize = max (fromIntegral defaultChunkSize) 10000
@@ -72,12 +74,13 @@ splitBytes :: FileEncoding -> BS.ByteString -> [BS.ByteString]
 splitBytes enc s = case enc of
     TextEncoding -> BS8.lines s
 
-delimiter :: FileEncoding -> BS.ByteString
+delimiter :: FileEncoding -> Char
 delimiter = \case
-    TextEncoding -> "\n"
+    TextEncoding -> '\n'
 
 delimiterSize :: Integral n => FileEncoding -> n
-delimiterSize = fromIntegral . BS.length . delimiter
+delimiterSize = \case
+    TextEncoding -> 1
 
 -- | File Streaming
 
@@ -92,11 +95,12 @@ instance IsRecorder (FileArchive BS.ByteString) (SafeT IO) where
                 s <- await
                 liftIO $ writeBytes enc h s
 
-instance {-# OVERLAPPABLE #-} (ToJSON a) => IsRecorder (FileArchive a) (SafeT IO) where
-    type RecItem (FileArchive a) = a
+instance ToJSON a => IsRecorder (FileArchive (Event a)) (SafeT IO) where
+    type RecItem (FileArchive (Event a)) = Event a
 
     mkRecorder (FileArchive enc path) logM =
-        PP.map (BSL.toStrict . Data.Aeson.encode) >-> mkRecorder (FileArchive enc path) logM
+        PP.map (BSL.toStrict . encodeCompact)
+        >-> mkRecorder (FileArchive @BS.ByteString enc path) logM
 
 getFileLimits :: FilePath -> IO (Maybe (FileOffset, FileOffset))
 getFileLimits path = IO.withFile path IO.ReadMode $ \h -> do
@@ -128,25 +132,23 @@ readBytesAt enc path ix = IO.withFile path IO.ReadMode $ \h -> do
     IO.hSeek h IO.AbsoluteSeek ix
     readBytes enc h
 
--- | Decode JSON object, fail on error.
-decodeJSON :: FromJSON a => BS.ByteString -> a
-decodeJSON s = case decodeStrict s of
-    Nothing -> error $ "Can not decode line: " ++ show s
-    Just val -> val
-
-instance MonadIO m => IsPlayer (FileArchive BS.ByteString) m FileOffset where
-    type Item (FileArchive BS.ByteString) = BS.ByteString
+instance MonadIO m => Indexed (FileArchive a) m where
+    type Index (FileArchive a) = FileOffset
 
     limits (FileArchive _enc path) = liftIO $ getFileLimits path
     middle (FileArchive enc path) a b = liftIO $ getFileMiddle enc path a b
-    peekItem (FileArchive enc path) ix = liftIO $ readBytesAt enc path ix
 
-instance {-# OVERLAPPABLE #-} (MonadIO m, FromJSON a) => IsPlayer (FileArchive a) m FileOffset where
-    type Item (FileArchive a) = a
+instance MonadIO m => IsPlayer (FileArchive BS.ByteString) m where
+    type RepItem (FileArchive BS.ByteString) = BS.ByteString
 
-    limits (FileArchive _enc path) = liftIO $ getFileLimits path
-    middle (FileArchive enc path) a b = liftIO $ getFileMiddle enc path a b
-    peekItem (FileArchive enc path) ix = liftIO (decodeJSON <$> readBytesAt enc path ix)
+    peekItem (FileArchive enc path) ix = liftIO $ do
+        readBytesAt enc path ix
+
+instance (FromJSON a, MonadIO m) => IsPlayer (FileArchive (Event a)) m where
+    type RepItem (FileArchive (Event a)) = Event a
+
+    peekItem (FileArchive enc path) ix = liftIO $ do
+        decodeJSON <$> readBytesAt enc path ix
 
 -- | Stream data from the file.
 playFile :: FileEncoding -> FilePath -> Direction -> FileOffset
@@ -156,7 +158,7 @@ playFile enc path direction ix0 = do
         size <- liftIO $ IO.hFileSize h
         liftIO $ IO.hSeek h IO.AbsoluteSeek ix0
         case direction of
-            -- stepping backward over the file
+            -- traverse the file backward
             -- Filesystem can only read forward efectively.
             -- Use accumulator, to reduce disk access.
             Backward -> do
@@ -190,7 +192,7 @@ playFile enc path direction ix0 = do
 
                 loop ix0 []
 
-            -- stepping forward over the file
+            -- traverse the file forward
             Forward -> fix $ \loop -> do
                 ix <- liftIO $ IO.hTell h
                 case compare ix size of
@@ -200,17 +202,18 @@ playFile enc path direction ix0 = do
                         loop
                     _ -> return ix
 
-instance IsRawPlayer (FileArchive BS.ByteString) (SafeT IO) FileOffset where
+instance IsRawPlayer (FileArchive BS.ByteString) (SafeT IO) where
     mkRawPlayer (FileArchive enc path) direction ix = playFile enc path direction ix
 
-instance {-# OVERLAPPABLE #-} FromJSON a => IsRawPlayer (FileArchive a) (SafeT IO) FileOffset where
+instance FromJSON a => IsRawPlayer (FileArchive (Event a)) (SafeT IO) where
     mkRawPlayer (FileArchive enc path) direction ix =
-        mkRawPlayer (FileArchive enc path) direction ix >-> PP.map (\(i, val) -> (i, decodeJSON val))
+        playFile enc path direction ix
+        >-> PP.map (\(i, s) -> (i, decodeJSON s))
 
 -- | Directory Streaming.
 
 data Rotate = Rotate
-    { rotateKeep            :: Int          -- keep number of old files
+    { rotateKeep            :: Maybe Int    -- remove old files, keep some files
     , rotateSizeMegaBytes   :: Maybe Double -- max size of a single file
     , rotateTimeHours       :: Maybe Double -- max age of a single file
     } deriving (Generic, Eq, Show)
@@ -219,6 +222,7 @@ instance ToJSON Rotate
 instance FromJSON Rotate
 
 data DirectoryArchive a = DirectoryArchive FileEncoding FilePath
+    deriving (Show)
 
 data FileSuffix = FileSuffix
     { ixYear    :: Integer
@@ -256,65 +260,6 @@ data DirectoryIndex = DirectoryIndex
 instance Ord DirectoryIndex where
     compare (DirectoryIndex fs1 offset1) (DirectoryIndex fs2 offset2) =
         compare fs1 fs2 <> compare offset1 offset2
-
-instance IsRecorder (DirectoryArchive BS.ByteString, Maybe Rotate) (SafeT IO) where
-    type RecItem (DirectoryArchive BS.ByteString, Maybe Rotate) = BS.ByteString
-
-    mkRecorder (DirectoryArchive enc base, mRotate) logM = forever $ do
-        -- cleanup directory
-        case fmap rotateKeep mRotate of
-            Nothing -> return ()
-            Just keep -> do
-                let dirName = takeDirectory base
-                olds <- drop keep . reverse <$> (liftIO $ getRecordingFiles base)
-                mapM_ (liftIO . removeFile) (fmap (dirName </>) olds)
-                forM_ olds $ \i -> do
-                    lift $ logM $ "old file removed: " <> T.pack (show i)
-
-        -- create new recording file
-        nowUtc <- liftIO getUtcTime
-        nowPosix <- liftIO getPOSIXTime
-        let recFile = fileSuffixToFileName base (utcToFileSuffix nowUtc)
-            acquireResource = IO.openFile recFile IO.AppendMode
-            releaseResource h = do
-                n <- IO.hFileSize h
-                IO.hClose h
-                when (n == 0) $ do
-                    runSafeT $ logM $ "removing empty file " <> (T.pack $ show recFile)
-                    removeFile recFile
-
-            -- recorder loop
-            recorder !n t0 h = do
-                s <- await
-                t <- liftIO getPOSIXTime
-                let n' = n + (fromIntegral $ BS.length s)
-                    fileAge = t - t0
-                    sizeLimit = case join (fmap rotateSizeMegaBytes mRotate) of
-                        Nothing -> False
-                        Just mb -> n' >= round (mb*1024*1024)
-
-                    timeLimit = case join (fmap rotateTimeHours mRotate) of
-                        Nothing -> False
-                        Just hours -> (round fileAge) >= ((round $ hours * 3600)::Integer)
-                liftIO $ writeBytes enc h s
-                case (sizeLimit || timeLimit) of
-                    True -> return ()
-                    False -> recorder n' t0 h
-
-        lift $ logM $ "recording to: "
-            <> T.pack (show recFile)
-            <> ", " <> T.pack (show mRotate)
-
-        bracket
-            acquireResource
-            releaseResource
-            (recorder (0::Integer) nowPosix)
-
-instance {-# OVERLAPPABLE #-} (ToJSON a) => IsRecorder (DirectoryArchive a, Maybe Rotate) (SafeT IO) where
-    type RecItem (DirectoryArchive a, Maybe Rotate) = a
-
-    mkRecorder (DirectoryArchive enc base, mRotate) logM =
-        PP.map (BSL.toStrict . Data.Aeson.encode) >-> mkRecorder (DirectoryArchive enc base, mRotate) logM
 
 utcToFileSuffix :: UtcTime -> FileSuffix
 utcToFileSuffix utc = FileSuffix
@@ -366,7 +311,9 @@ getRecordingFileSuffixes base = do
 
 getDirLimits :: FilePath -> IO (Maybe (DirectoryIndex, DirectoryIndex))
 getDirLimits base = runMaybeT $ do
-    lst <- lift $ getRecordingFiles base
+    files <- lift $ getRecordingFiles base
+    let dirName = takeDirectory base
+        lst = fmap (dirName </>) files
     guard (lst /= [])
     let a = head lst
         b = last lst
@@ -390,53 +337,154 @@ getDirMiddle enc base di1@(DirectoryIndex fsA i1) di2@(DirectoryIndex fsB i2)
         case lst of
             [] -> fail "empty recording"            -- unexpected at this point
             (_:[]) -> fail "single recording file"  -- unexpected at this point
-            (_a:_b:[]) -> do
-                -- TODO: implement for 2 files
-                undefined
-            _ -> do
+            (fs1:fs2:[]) -> do    -- 2 files
+                when (fs1 >= fs2) $ fail "internal index error"
+                Just (a1, b1) <- getFileLimits $ fileSuffixToFileName base fs1
+                Just (a2, b2) <- getFileLimits $ fileSuffixToFileName base fs2
+                when (i1 < a1) $ fail "internal index error"
+                when (i1 >= b1) $ fail "internal index error"
+                when (i2 < a2) $ fail "internal index error"
+                when (i2 > b2) $ fail "internal index error"
+                case i2 > a2 of
+                    True -> return $ DirectoryIndex fs2 a2  -- start of fs2
+                    False -> do
+                        let f = fileSuffixToFileName base fs1
+                        i <- getFileMiddle enc f i1 b1
+                        return $ DirectoryIndex fs1 i
+            _ -> do             -- more files
                 let ix = length lst `div` 2
                     fs = lst !! ix
                     f = fileSuffixToFileName base fs
-                Just (a,b) <- getFileLimits f
+                Just (a, b) <- getFileLimits f
                 i <- getFileMiddle enc f a b
-                let result = DirectoryIndex fsA i
+                let result = DirectoryIndex fs i
                 when (result <= di1) $ fail "internal index error"
                 when (result >= di2) $ fail "internal index error"
                 return result
 
-instance MonadIO m => IsPlayer (DirectoryArchive BS.ByteString) m DirectoryIndex where
-    type Item (DirectoryArchive BS.ByteString) = BS.ByteString
+instance IsRecorder (DirectoryArchive BS.ByteString, Rotate) (SafeT IO) where
+    type RecItem (DirectoryArchive BS.ByteString, Rotate) = BS.ByteString
+
+    mkRecorder (DirectoryArchive enc base, rotate) logM = forever $ do
+        -- cleanup directory
+        case rotateKeep rotate of
+            Nothing -> return ()
+            Just keep -> do
+                let dirName = takeDirectory base
+                olds <- drop keep . reverse <$> (liftIO $ getRecordingFiles base)
+                mapM_ (liftIO . removeFile) (fmap (dirName </>) olds)
+                forM_ olds $ \i -> do
+                    lift $ logM $ "old file removed: " <> T.pack (show i)
+
+        -- create new recording file
+        nowUtc <- liftIO getUtcTime
+        nowPosix <- liftIO getPOSIXTime
+        let recFile = fileSuffixToFileName base (utcToFileSuffix nowUtc)
+            acquireResource = IO.openFile recFile IO.AppendMode
+            releaseResource h = do
+                n <- IO.hFileSize h
+                IO.hClose h
+                when (n == 0) $ do
+                    runSafeT $ logM $ "removing empty file " <> (T.pack $ show recFile)
+                    removeFile recFile
+
+            -- recorder loop
+            recorder !n t0 h = do
+                s <- await
+                t <- liftIO getPOSIXTime
+                let n' = n + (fromIntegral $ BS.length s)
+                    fileAge = t - t0
+                    sizeLimit = case rotateSizeMegaBytes rotate of
+                        Nothing -> False
+                        Just mb -> n' >= round (mb*1024*1024)
+
+                    timeLimit = case rotateTimeHours rotate of
+                        Nothing -> False
+                        Just hours -> (round fileAge) >= ((round $ hours * 3600)::Integer)
+                liftIO $ writeBytes enc h s
+                case (sizeLimit || timeLimit) of
+                    True -> return ()
+                    False -> recorder n' t0 h
+
+        lift $ logM $ "recording to: "
+            <> T.pack (show recFile)
+            <> ", " <> T.pack (show rotate)
+
+        bracket
+            acquireResource
+            releaseResource
+            (recorder (0::Integer) nowPosix)
+
+instance ToJSON a => IsRecorder (DirectoryArchive (Event a), Rotate) (SafeT IO) where
+    type RecItem (DirectoryArchive (Event a), Rotate) = Event a
+
+    mkRecorder (DirectoryArchive enc base, rotate) logM =
+        PP.map (BSL.toStrict . encodeCompact)
+        >-> mkRecorder (DirectoryArchive @BS.ByteString enc base, rotate) logM
+
+instance MonadIO m => Indexed (DirectoryArchive a) m where
+    type Index (DirectoryArchive a) = DirectoryIndex
 
     limits (DirectoryArchive _enc base) = liftIO $ getDirLimits base
     middle (DirectoryArchive enc base) a b = liftIO $ getDirMiddle enc base a b
+
+instance Indexed s m => Indexed (s, Rotate) m where
+    type Index (s, Rotate) = Index s
+
+    limits (s, _rot) = limits s
+    middle (s, _rot) = middle s
+
+instance MonadIO m => IsPlayer (DirectoryArchive BS.ByteString) m where
+    type RepItem (DirectoryArchive BS.ByteString) = BS.ByteString
+
     peekItem (DirectoryArchive enc base) (DirectoryIndex fs foffset) =
-        peekItem (FileArchive enc $ fileSuffixToFileName base fs) foffset
+        peekItem (FileArchive @BS.ByteString enc $ fileSuffixToFileName base fs) foffset
 
-instance {-# OVERLAPPABLE #-} (MonadIO m, FromJSON a) => IsPlayer (DirectoryArchive a) m DirectoryIndex where
-    type Item (DirectoryArchive a) = a
+instance (FromJSON a, MonadIO m) => IsPlayer (DirectoryArchive (Event a)) m where
+    type RepItem (DirectoryArchive (Event a)) = Event a
 
-    limits (DirectoryArchive _enc base) = liftIO $ getDirLimits base
-    middle (DirectoryArchive enc base) a b = liftIO $ getDirMiddle enc base a b
-    peekItem (DirectoryArchive enc base) (DirectoryIndex fs foffset) =
-        peekItem (FileArchive enc $ fileSuffixToFileName base fs) foffset
+    peekItem (DirectoryArchive enc base :: DirectoryArchive (Event a)) (DirectoryIndex fs foffset) =
+        peekItem (FileArchive @(Event a) enc $ fileSuffixToFileName base fs) foffset
 
-instance IsRawPlayer (DirectoryArchive BS.ByteString) (SafeT IO) DirectoryIndex where
+instance IsPlayer s m => IsPlayer (s, Rotate) m where
+    type RepItem (s, Rotate) = RepItem s
+
+    peekItem (s, _rot) = peekItem s
+
+instance IsRawPlayer (DirectoryArchive BS.ByteString) (SafeT IO) where
     mkRawPlayer (DirectoryArchive enc base) direction (DirectoryIndex fs i) = do
         let f = fileSuffixToFileName base fs
-            go p = lift (next p) >>= \case
-                Right ((i', a), p') -> do
-                    yield (DirectoryIndex fs i', a)
-                    go p'
-                Left _ -> do
-                    lst <- liftIO $ getRecordingFileSuffixes base
-                    nextFile direction lst >>= \case
-                        Left val -> return val
-                        Right (f', i') -> go $ playFile enc f' direction i'
         go $ playFile enc f direction i
       where
-        nextFile _direction _lst = undefined
+        go p = lift (next p) >>= \case
+            Right ((i', a), p') -> do
+                yield (DirectoryIndex fs i', a)
+                go p'
+            Left ixOverflow -> do
+                nextFile fs ixOverflow >>= \case
+                    Left (fs', i') -> return (DirectoryIndex fs' i')
+                    Right (fs', i') -> do
+                        mkRawPlayer (DirectoryArchive @BS.ByteString enc base) direction (DirectoryIndex fs' i')
+        nextFile fsCurrent ixOverflow = do
+            lst <- liftIO $ getRecordingFileSuffixes base
+            let result = case direction of
+                    Backward -> dropWhile (>= fsCurrent) (reverse lst)
+                    Forward -> dropWhile (<= fsCurrent) lst
+            case result of
+                    [] -> return $ Left (fsCurrent, ixOverflow)
+                    (fs':_) -> do
+                        let f' = fileSuffixToFileName base fs'
+                        Just (a, b) <- liftIO $ getFileLimits f'
+                        let ix = case direction of
+                                Backward -> b
+                                Forward -> a
+                        return $ Right (fs', ix)
 
-instance {-# OVERLAPPABLE #-} FromJSON a => IsRawPlayer (DirectoryArchive a) (SafeT IO) DirectoryIndex where
+instance FromJSON a => IsRawPlayer (DirectoryArchive (Event a)) (SafeT IO) where
     mkRawPlayer (DirectoryArchive enc base) direction ix =
-        mkRawPlayer (DirectoryArchive enc base) direction ix >-> PP.map (\(i, val) -> (i, decodeJSON val))
+        mkRawPlayer (DirectoryArchive @BS.ByteString enc base) direction ix
+        >-> PP.map (\(i, s) -> (i, decodeJSON s))
+
+instance IsRawPlayer s m => IsRawPlayer (s, Rotate) m where
+    mkRawPlayer (s, _rot) = mkRawPlayer s
 

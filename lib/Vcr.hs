@@ -5,6 +5,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
@@ -74,12 +75,19 @@ instance (Arbitrary a) => Arbitrary (Event a) where
         <*> arbitrary
         <*> arbitrary
 
+-- | Event generator (for testing purposes).
+eventGen :: Monad m => (a -> m a) -> a -> Producer a m b
+eventGen f a = do
+    yield a
+    a' <- lift $ f a
+    eventGen f a'
+
 -- | Add delta-t (nanoseconds) to each event, for testing purposes.
-eventList :: MonoTimeNs -> Event a -> [Event a]
-eventList dt e0 = e0:eventList dt e where
-    e = e0
-        { eTimeMono = eTimeMono e0 + dt
-        , eTimeUtc = addUtcTime dt (eTimeUtc e0)
+eventGenAddTime :: Monad m => MonoTimeNs -> Event a -> Producer (Event a) m b
+eventGenAddTime dt = eventGen f where
+    f e = return $ e
+        { eTimeMono = eTimeMono e + dt
+        , eTimeUtc = addMonoTimeNS dt (eTimeUtc e)
         }
 
 -- | Streaming components
@@ -95,41 +103,51 @@ class Monad m => IsRecorder s m where
 
 -- | Players (Item producers)
 
-class (Monad m, Ord ix) => IsPlayer s m ix where
-    type Item s :: Type
+class (Monad m, Ord (Index s)) => Indexed s m where
+    type Index s :: Type
 
     -- | Return (first, overflow) index, Nothing if empty.
-    limits :: s -> m (Maybe (ix, ix))
+    limits :: s -> m (Maybe (Index s, Index s))
 
     -- | Calculate valid index near the middle of the interval.
-    middle :: s -> ix -> ix -> m ix
+    middle :: s -> Index s -> Index s -> m (Index s)
+
+class Indexed s m => IsPlayer s m where
+    type RepItem s :: Type
 
     -- Peek item from given index.
-    peekItem :: s -> ix -> m (Item s)
+    peekItem :: s -> Index s -> m (RepItem s)
 
 -- | List is a player.
-instance Monad m => IsPlayer [a] m Int where
-    type Item [a] = a
+instance Monad m => Indexed [a] m where
+    type Index [a] = Int
 
     limits [] = return Nothing
     limits lst = return $ Just (0, Prelude.length lst)
     middle _lst a b = return ((a + b) `div` 2)
+
+instance Monad m => IsPlayer [a] m where
+    type RepItem [a] = a
+
     peekItem lst ix = return (lst !! ix)
 
 -- | Player direction.
 data Direction = Backward | Forward
     deriving (Generic, Eq, Show)
 
+instance Arbitrary Direction where
+    arbitrary = elements [Backward, Forward]
+
 -- | Faster player version (without channel filter).
-class IsPlayer s m ix => IsRawPlayer s m ix where
+class IsPlayer s m => IsRawPlayer s m where
     mkRawPlayer ::
         s
         -> Direction
-        -> ix
-        -> Producer (ix, (Item s)) m ix
+        -> Index s
+        -> Producer (Index s, RepItem s) m (Index s)
 
 -- | List is a RawPlayer.
-instance Monad m => IsRawPlayer [a] m Int where
+instance Monad m => IsRawPlayer [a] m where
     mkRawPlayer lst direction ix = case direction of
         Backward -> do
             each (Prelude.reverse $ Prelude.take ix lst')
@@ -141,16 +159,17 @@ instance Monad m => IsRawPlayer [a] m Int where
         lst' = Prelude.zip [0..] lst
 
 -- | Source of events (with channel filter support).
-class IsPlayer s m ix => IsEventPlayer s m ix where
+class IsPlayer s m => IsEventPlayer s m where
     mkEventPlayer ::
         s
         -> Direction
-        -> ix
+        -> Index s
         -> Maybe [Channel]
-        -> Producer (ix, Either (Event ()) (Item s)) m ix
+        -> Producer (Index s, Either (Event ()) (RepItem s)) m (Index s)
 
--- | If the 'Item s' is 'Event', we can make it an IsEventPlayer instance.
-instance (IsPlayer s m ix, IsRawPlayer s m ix, Item s ~ Event a) => IsEventPlayer s m ix where
+-- | If the 'Item s' is 'Event a', we can make it an IsEventPlayer instance.
+-- It's OVERLAPPABLE, unly use it if no other (more specific instance) instance is provided.
+instance {-# OVERLAPPABLE #-} (IsPlayer s m, IsRawPlayer s m, RepItem s ~ Event a) => IsEventPlayer s m where
     mkEventPlayer s direction ix mFilter =
         mkRawPlayer s direction ix >-> PP.map (\(i, a) -> (i, f a))
       where
@@ -161,7 +180,7 @@ instance (IsPlayer s m ix, IsRawPlayer s m ix, Item s ~ Event a) => IsEventPlaye
                 True -> Right evt
 
 -- | Find index where item condition changes from '<', to '>='.
-bisect :: IsPlayer s m ix => s -> (Item s -> Ordering) -> m (Maybe ix)
+bisect :: IsPlayer s m => s -> (RepItem s -> Ordering) -> m (Maybe (Index s))
 bisect s checkItem = limits s >>= \case
     Nothing -> return Nothing
     Just (i1, i2) -> runMaybeT $ go i2 i1 i2
@@ -190,7 +209,7 @@ bisect s checkItem = limits s >>= \case
                         return i2
 
 -- | Find UTC time.
-findEventByUtc :: (IsPlayer s m ix, Item s ~ Event a) =>
-    s -> UtcTime -> m (Maybe ix)
-findEventByUtc s t = bisect s $ \evt -> compare (eTimeUtc evt) t
+findEventByTimeUtc :: (IsPlayer s m, RepItem s ~ Event a)
+    => s -> UtcTime -> m (Maybe (Index s))
+findEventByTimeUtc s t = bisect s $ \evt -> compare (eTimeUtc evt) t
 

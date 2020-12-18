@@ -23,7 +23,7 @@ module Common
     , Alarm(..), newAlarmIO, runAlarm, refreshAlarm, getAlarm
     , UpdatingVar(..), newUpdatingVarIO, updateVar, restartOnUpdate
     , setupLogging
-    , encodeCompact
+    , encodeCompact, encodeJSON, decodeJSON
     , newline
     )
   where
@@ -202,8 +202,18 @@ setupLogging pName cmdName optVerbose optSyslog optAux = do
     return logM
 
 -- | Encode to JSON.
-encodeCompact :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
+encodeCompact :: ToJSON a => a -> BSL.ByteString
 encodeCompact = Data.Aeson.encode
+
+-- | Encode JSON object.
+encodeJSON :: ToJSON a => a -> BS.ByteString
+encodeJSON = BSL.toStrict . encodeCompact
+
+-- | Decode JSON object, fail on error.
+decodeJSON :: FromJSON a => BS.ByteString -> a
+decodeJSON s = case decodeStrict s of
+    Nothing -> error $ "Can not decode line: " ++ show s
+    Just val -> val
 
 -- | Newline character, represented as Word8 (ByteString)
 newline :: Word8

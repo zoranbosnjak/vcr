@@ -2,12 +2,13 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Main (main) where
+module VcrTest where
 
 import           Control.Monad
 import           Data.Functor.Identity
 import           Data.Maybe
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 
 import           Pipes
 import qualified Pipes.Prelude as PP
@@ -17,6 +18,7 @@ import           Test.Tasty.QuickCheck as QC
 import           Test.Tasty.HUnit
 
 import           Vcr
+import           Common
 
 import           TestCommon
 
@@ -47,21 +49,40 @@ bisectTest2 = QC.testProperty "bisect - find in interval" $ forAll (choose (1,15
 findEventByUtcTest :: TestTree
 findEventByUtcTest = QC.testProperty "findEventByUtcTest" $ \e0 n ->
     let events :: [Event ()]
-        events = take n $ eventList (1000*1000*100) e0
+        events = take n $ PP.toList $ eventGenAddTime (1000*1000*100) e0
         isCorrect = do
             (i::Int, evt) <- zip [0..] events
-            let result = runIdentity $ findEventByUtc events $ eTimeUtc evt
+            let result = runIdentity $ findEventByTimeUtc events $ eTimeUtc evt
             return $ result == Just i
     in and isCorrect
 
+rawPlayerListComplete :: TestTree
+rawPlayerListComplete = QC.testProperty "list player" $ \samples direction ->
+    let player :: Direction -> Int -> Producer (Int, ()) Identity Int
+        player = mkRawPlayer samples
+        (result, ix) = runIdentity $ PP.toListM' $ player direction $ case direction of
+            Backward -> length samples
+            Forward -> 0
+        indexed = zip [0..] samples
+        expected = case direction of
+            Backward -> (reverse indexed, 0)
+            Forward -> (indexed, length samples)
+    in
+        (result, ix) == expected
+
+validJSON :: TestTree
+validJSON = QC.testProperty "valid json" $ \event ->
+    let encoded = encodeJSON (event :: Event ())
+    in conjoin
+        [ BS8.notElem '\n' encoded
+        , decodeJSON encoded == event
+        ]
+
 rawPlayerSteps :: TestTree
 rawPlayerSteps = testCaseSteps "rawPlayer" $ \step -> do
-    samples' <- generate (arbitrary `suchThat` (\val -> length val > 0))
+    samples :: [BS.ByteString] <- generate $ listOf1 $ genLine $ const True
 
-    let samples :: [BS.ByteString]
-        samples = fmap getTextLine samples'
-
-        player :: Direction -> Int -> Producer (Int, BS.ByteString) Identity Int
+    let player :: Direction -> Int -> Producer (Int, BS.ByteString) Identity Int
         player = mkRawPlayer samples
 
     step "replay forward/backward"
@@ -86,6 +107,8 @@ propTests = testGroup "Property tests"
     [ bisectTest1
     , bisectTest2
     , findEventByUtcTest
+    , rawPlayerListComplete
+    , validJSON
     ]
 
 unitTests :: TestTree
@@ -94,7 +117,7 @@ unitTests = testGroup "Unit tests"
     ]
 
 tests :: TestTree
-tests = testGroup "Tests" [propTests, unitTests]
+tests = testGroup "VcrTest" [propTests, unitTests]
 
 main :: IO ()
 main = defaultMain tests

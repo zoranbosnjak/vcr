@@ -1,13 +1,27 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module TestCommon where
 
+import           Data.Word8
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Internal as BS
-import qualified Data.ByteString.Char8 as BS8
+import           Data.Time
 
 import           Test.Tasty.QuickCheck as QC
 
-newtype TextLine = TextLine { getTextLine :: BS.ByteString }
+import           Time
 
-instance Arbitrary TextLine where
-    arbitrary = fmap (TextLine . BS.filter (/= BS.c2w '\n') . BS8.pack) arbitrary
+instance Arbitrary UTCTime where
+    arbitrary = arbitraryUtc
+
+-- | Line generator.
+genLine :: (Word8 -> Bool) -> Gen BS.ByteString
+genLine predicate = do
+    s <- infiniteList
+    n <- getSize
+    m <- choose (0, n)
+    return $ BS.pack $ take m $ filter predicate s
+
+-- | Non-empty line generator.
+genLine1 :: (Word8 -> Bool) -> Gen BS.ByteString
+genLine1 predicate = genLine predicate `suchThat` (\x -> BS.length x > 0)
 

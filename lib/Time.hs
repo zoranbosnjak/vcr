@@ -49,10 +49,10 @@ fmtTime = formatTime defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%QZ"))
 -- | Helper function to generate arbitrary Utc time.
 arbitraryUtc :: Gen UtcTime
 arbitraryUtc = UTCTime
-    <$> (fromGregorian <$> arbitrary <*> choose (1,12) <*> choose (1,31))
-    <*> (picosecondsToDiffTime <$> arbitrary)
+    <$> (fromGregorian <$> fmap getPositive arbitrary <*> choose (1,12) <*> choose (1,31))
+    <*> (picosecondsToDiffTime <$> choose (0, 24*3600*1000*1000*1000*1000-1))
 
 -- | Helper function to increment Utc time:
-addUtcTime :: MonoTimeNs -> UtcTime -> UtcTime
-addUtcTime deltaNs t = addUTCTime (fromRational (toRational deltaNs / (1000*1000*1000))) t
+addMonoTimeNS :: MonoTimeNs -> UtcTime -> UtcTime
+addMonoTimeNS deltaNs t = addUTCTime (fromRational (toRational deltaNs / (1000*1000*1000))) t
 

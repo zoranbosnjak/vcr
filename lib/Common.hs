@@ -23,7 +23,6 @@ module Common
     , Alarm(..), newAlarmIO, runAlarm, refreshAlarm, getAlarm
     , UpdatingVar(..), newUpdatingVarIO, updateVar, restartOnUpdate
     , setupLogging
-    , encodeCompact, encodeJSON, decodeJSON
     , newline
     )
   where
@@ -34,10 +33,8 @@ import           Control.Concurrent (threadDelay)
 import           Control.Concurrent.Async (race)
 import           Data.Bool
 import           Data.Maybe
-import           Data.Aeson
 
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Base16 as B16
 import           Data.Word (Word8)
@@ -200,20 +197,6 @@ setupLogging pName cmdName optVerbose optSyslog optAux = do
                 False -> s
 
     return logM
-
--- | Encode to JSON.
-encodeCompact :: ToJSON a => a -> BSL.ByteString
-encodeCompact = Data.Aeson.encode
-
--- | Encode JSON object.
-encodeJSON :: ToJSON a => a -> BS.ByteString
-encodeJSON = BSL.toStrict . encodeCompact
-
--- | Decode JSON object, fail on error.
-decodeJSON :: FromJSON a => BS.ByteString -> a
-decodeJSON s = case decodeStrict s of
-    Nothing -> error $ "Can not decode line: " ++ show s
-    Just val -> val
 
 -- | Newline character, represented as Word8 (ByteString)
 newline :: Word8

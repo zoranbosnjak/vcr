@@ -59,14 +59,14 @@ ghcid "--command=ghci -Wall -ilib -ivcr-app vcr-app/Main.hs"
 
 ```bash
 nix-shell
-runhaskell -Wall -ilib lib/test/VcrTest.hs
+runhaskell -Wall -ilib -ilib/test lib/test/Main.hs
 ```
 
 ### Running (inside nix-shell)
 ```bash
 nix-shell
 cabal build -j && ./dist... +RTS -M300m -RTS {args}
-runhaskell -ilib vcr-app/Main.hs {args}
+runhaskell -ilib -ivcr-app vcr-app/Main.hs {args}
 ```
 
 ### Running custom script (inside nix-shell)

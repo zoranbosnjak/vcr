@@ -23,7 +23,6 @@ library
     , Common
     , Sequential
     , Time
-    , File
     , Udp
     , Replay
   -- other-modules:

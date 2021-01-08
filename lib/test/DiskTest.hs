@@ -5,6 +5,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -13,7 +14,6 @@ module DiskTest where
 import           Control.Monad
 import qualified Data.ByteString.Internal as BS
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
 import           System.IO.Temp
 import           System.FilePath
 import           System.Random
@@ -30,7 +30,6 @@ import           Pipes.Safe
 import qualified Pipes.Prelude as PP
 
 import           Vcr
-import           Common
 import           Time
 import           Streaming.Disk
 
@@ -50,10 +49,9 @@ lineSize = 2 * Streaming.Disk.chunkSize
 lineGenerator :: FileEncoding -> Gen BS.ByteString
 lineGenerator enc = resize lineSize $ genLine $ (/=) (BS.c2w $ delimiter enc)
 
-rawVcr :: (IsRecorder s (SafeT IO), IsRawPlayer s (SafeT IO),
-                 Show (Index s), IsPlayer s IO, RepItem s ~ BS.ByteString,
-                 RecItem s ~ BS.ByteString) =>
-                TestName -> (FilePath -> FileEncoding -> s) -> TestTree
+rawVcr :: (Recorder s (SafeT IO) BS.ByteString,
+    Player s (SafeT IO) BS.ByteString, Indexed s IO) =>
+    TestName -> (FilePath -> FileEncoding -> s) -> TestTree
 rawVcr title mkArchive = testCaseSteps title $ \step -> do
     forM_ [minBound..maxBound] $ \(enc :: FileEncoding) -> do
         samples :: [BS.ByteString] <- generate (listOf1 $ lineGenerator enc)
@@ -65,36 +63,28 @@ rawVcr title mkArchive = testCaseSteps title $ \step -> do
             let archive  = mkArchive base enc
                 logger _ = return ()
                 recorder = mkRecorder archive logger
-                player   = mkRawPlayer archive
+                player   = mkPlayer archive
 
             step "create recording"
             do
                 runSafeT $ runEffect (each samples >-> recorder)
 
-            step "check size"
-            do
-                limits archive >>= \case
-                    Nothing -> assertFailure "empty recording"
-                    Just _val -> return ()
-
             step "replay forward/backward"
-            (ixMin, ixMax, readback) <- do
-                Just (a, b) <- limits archive
+            readback <- do
+                (a, b) <- liftIO $ limits archive
 
-                (result1, ix1) <- runSafeT $ PP.toListM' $ player Forward a
+                result1 <- runSafeT $ PP.toListM $ player Forward a
                 assertEqual "complete" (length samples) (length result1)
-                assertEqual "final index1" b ix1
 
-                (result2, ix2) <- runSafeT $ PP.toListM' $ player Backward b
+                result2 <- runSafeT $ PP.toListM $ player Backward b
                 assertBool "reversed" (result1 == reverse result2)
-                assertEqual "final index2" a ix2
 
                 forM_ (zip samples result1) $ \(x, (i, y)) -> do
                     assertBool "index" (i >= a)
                     assertBool "index" (i <= b)
                     assertEqual "readback" x y
 
-                return (a,b,result1)
+                return result1
 
             step "replay from any valid index"
             do
@@ -103,24 +93,22 @@ rawVcr title mkArchive = testCaseSteps title $ \step -> do
                 step "forward"
                 forM_ (zip [0..] validIndices) $ \(n,ix) -> do
                     let expected = drop n readback
-                    (result, ixFinal) <- runSafeT $ PP.toListM' $ player Forward ix
+                    result <- runSafeT $ PP.toListM $ player Forward ix
                     assertBool "same result" (expected == result)
-                    assertEqual "final index1" ixMax ixFinal
 
                 step "backward"
                 forM_ (zip [0..] validIndices) $ \(n,ix) -> do
                     let expected = reverse $ take n readback
-                    (result, ixFinal) <- runSafeT $ PP.toListM' $ player Backward ix
+                    result <- runSafeT $ PP.toListM $ player Backward ix
                     assertBool "same result" (expected == result)
-                    assertEqual "final index1" ixMin ixFinal
 
 dirRotate :: Int -> TestTree
 dirRotate numFiles = testCaseSteps title $ \step -> do
     forM_ [minBound..maxBound] $ \(enc :: FileEncoding) -> do
         withSystemTempDirectory "vcr-test" $ \base' -> do
             let base = base' </> "rec"
-                archive = DirectoryArchive @BS.ByteString enc base
-                player = mkRawPlayer archive
+                archive = DirectoryArchive enc base
+                player = mkPlayer archive
 
             step "create random recording files"
             t0 <- generate arbitrary
@@ -134,10 +122,9 @@ dirRotate numFiles = testCaseSteps title $ \step -> do
                 return samples
 
             step "readback"
-            (ixMin, ixMax, readback) <- do
-                Just (a, b) <- limits archive
-                (result, _ix) <- runSafeT $ PP.toListM' $ player Forward a
-                return (a, b, result)
+            readback <- do
+                (a, _b) <- limits archive
+                runSafeT $ PP.toListM $ player Forward a
             assertEqual "readback" (join samples) (fmap snd readback)
 
             step "replay from any valid index"
@@ -147,16 +134,14 @@ dirRotate numFiles = testCaseSteps title $ \step -> do
                 step "forward"
                 forM_ (zip [0..] validIndices) $ \(n,ix) -> do
                     let expected = drop n readback
-                    (result, ixFinal) <- runSafeT $ PP.toListM' $ player Forward ix
+                    result <- runSafeT $ PP.toListM $ player Forward ix
                     assertBool "same result" (expected == result)
-                    assertEqual "final index1" ixMax ixFinal
 
                 step "backward"
                 forM_ (zip [0..] validIndices) $ \(n,ix) -> do
                     let expected = reverse $ take n readback
-                    (result, ixFinal) <- runSafeT $ PP.toListM' $ player Backward ix
+                    result <- runSafeT $ PP.toListM $ player Backward ix
                     assertBool "same result" (expected == result)
-                    assertEqual "final index1" ixMin ixFinal
   where
     title = "read from " <> show numFiles <> " rotated file(s)"
 
@@ -175,7 +160,7 @@ saveFile nMax enc (gen0, acc0) f = do
         go 0 (gen, acc) _h = return (gen, acc)
         go n (gen, acc) h = do
             Right (event, gen') <- P.next gen
-            writeBytes enc h $ BSL.toStrict $ encodeCompact event
+            writeBytes enc h $ encodeJSON event
             go (pred n) (gen', event:acc) h
 
 mkEventGenerator :: UtcTime -> IO (Producer (Event ()) IO b)
@@ -194,29 +179,30 @@ mkEventGenerator t = do
 
 -- | Helper function to find events in any archive.
 locateEvents ::
-    ( IsRawPlayer s (SafeT IO), IsPlayer s IO, Eq a1, Show a1, Show (Index s)
-    , RepItem s ~ Event a1)
-    => (String -> IO ()) -> UtcTime -> s -> [Event a1] -> IO ()
+    (Player s (SafeT IO) (Event ()), HasItem s IO (Event ()), Show (Index s)) =>
+    (String -> IO ()) -> UtcTime -> s -> [Event ()] -> IO ()
 locateEvents step t1 archive samples = do
     step "readback"
     readback <- do
-        Just (a, _b) <- limits archive
-        (result, _ix) <- runSafeT $ PP.toListM' $ mkEventPlayer archive Forward a Nothing
+        (a, _b) <- limits archive
+        let player = mkPlayer archive Forward a
+        result <- runSafeT $ PP.toListM player
         return result
-    assertEqual "readback" (fmap Right samples) (fmap snd readback)
+    assertEqual "readback" samples (fmap snd readback)
 
     step "lookup UTC before"
     do
-        result <- findEventByTimeUtc archive t1
+        result <- findEventByTimeUtc @() archive t1
         assertEqual "check" Nothing result
 
     step "lookup UTC exact"
     forM_ samples $ \event -> do
         let t = eTimeUtc event
 
-        Just ix <- findEventByTimeUtc archive t
-        y <- peekItem archive ix
-        assertEqual "readback event" event y
+        Just (ix, y) <- findEventByTimeUtc @() archive t
+        y2 <- peekItem archive ix
+        assertEqual "readback event1" event y
+        assertEqual "readback event2" event y2
 
     step "lookup UTC between"
     forM_ (zip samples $ drop 1 samples) $ \(e1, e2) -> do
@@ -226,15 +212,14 @@ locateEvents step t1 archive samples = do
             t = addUTCTime (dt/2) a
         when (t >= b) $ fail "Internal error, wrong sample"
 
-        Just ix <- findEventByTimeUtc archive t
-        y <- peekItem archive ix
+        Just (_ix, y) <- findEventByTimeUtc @() archive t
         assertEqual "readback event" e2 y
 
     step "lookup UTC after"
     do
         let event = last samples
             t = addUTCTime 1 $ eTimeUtc event
-        result <- findEventByTimeUtc archive t
+        result <- findEventByTimeUtc @() archive t
         assertEqual "check" Nothing result
 
 locateEventsInFile :: TestTree
@@ -253,7 +238,7 @@ locateEventsInFile = testCaseSteps "locate event in file" $ \step -> do
                 gen <- mkEventGenerator t2
                 reverse . snd <$> saveFile 3000 enc (gen,[]) base
 
-            let archive :: FileArchive (Event ())
+            let archive :: FileArchive
                 archive = FileArchive enc base
 
             locateEvents step t1 archive samples
@@ -278,7 +263,7 @@ locateEventsInDirectory = testCaseSteps "locate event in directory" $ \step -> d
                     files = fileSuffixToFileName base . utcToFileSuffix <$> tRotate
                 reverse . snd <$> foldM (saveFile 100 enc) (gen,[]) files
 
-            let archive :: DirectoryArchive (Event ())
+            let archive :: DirectoryArchive
                 archive = DirectoryArchive enc base
 
             locateEvents step t1 archive samples
@@ -290,9 +275,9 @@ propTests = testGroup "Property tests"
 
 unitTests :: TestTree
 unitTests = testGroup "Unit tests" $
-    [ rawVcr "file" $ \base enc -> FileArchive @BS.ByteString enc (base </> "recording")
+    [ rawVcr "file" $ \base enc -> FileArchive enc (base </> "recording")
     , rawVcr "directory no-rotate" $ \base enc ->
-        (DirectoryArchive @BS.ByteString enc (base </> "rec"), Rotate Nothing Nothing Nothing)
+        (DirectoryArchive enc (base </> "rec"), Rotate Nothing Nothing Nothing)
     , locateEventsInFile
     , locateEventsInDirectory
     ]

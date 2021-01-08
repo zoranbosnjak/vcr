@@ -1,11 +1,7 @@
-
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 module CmdCapture where
 
@@ -40,11 +36,11 @@ import           Vcr
 import           Time
 import           Sequential
 import           Udp
-import           File
+import           Streaming.Disk
 
 data Config = Config
     { confInputs :: Map.Map Channel UdpIn
-    , confOutputFile :: Maybe (FilePath, Maybe Rotate)
+    , confOutputFile :: Maybe (FilePath, Rotate)
     } deriving (Generic, Eq, Show, ToJSON, FromJSON)
 
 emptyConfig :: Config
@@ -116,8 +112,8 @@ options = CmdOptions
                     (long "channel" <> metavar "CH" <> help "channel identifier")
                 fileOutOptions = (,)
                     <$> strOption (long "fileOutput" <> metavar "FILE" <> help "base filename")
-                    <*> optional ( Rotate
-                        <$> option auto (long "rotateKeep" <> help "Keep number of rotated files")
+                    <*> ( Rotate
+                        <$> optional (option auto (long "rotateKeep" <> help "Keep number of rotated files"))
                         <*> optional (option auto (long "mega" <> help "max file size"))
                         <*> optional (option auto (long "hours" <> help "max file age"))
                         )
@@ -328,6 +324,43 @@ processInputs sesId logM consume getInputs = do
 
         loop active newCfg
 
+runRecorder ::
+    (Priority -> String -> IO ())       -- log message
+    -> STM (Maybe (FilePath, Rotate))   -- get configuration
+    -> STM UdpEvent                     -- get value to write
+    -> IO ()
+runRecorder logM' getConfig fetchEvent = do
+    logM' INFO "startup"
+    cfg <- atomically getConfig
+    go cfg
+  where
+    logM = liftIO . logM' INFO . T.unpack
+
+    -- process input queue while monitoring config change
+    src cfg = fix $ \loop -> do
+        event <- liftIO $ atomically
+            (fmap Left cfgChange `orElse` fmap Right fetchEvent)
+        case event of
+            Left cfg' -> return cfg'
+            Right val -> do
+                yield val
+                loop
+      where
+        cfgChange = do
+            newConfig <- getConfig
+            when (newConfig == cfg) retry
+            return newConfig
+
+    -- run until config change, then restart with new config
+    go cfg = do
+        let dst = case cfg of
+                Nothing -> forever (void await)
+                Just (base, rotate) ->
+                    let dirArchive :: DirectoryArchive
+                        dirArchive = DirectoryArchive TextEncoding base
+                    in mkRecorder (dirArchive, rotate) logM
+        PS.runSafeT (runEffect (src cfg >-> dst)) >>= go
+
 runCmd :: CmdOptions -> Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()
 runCmd opt pName pArgs version _ghc _wxcLib = do
     startTimeMono <- getMonoTimeNs
@@ -394,11 +427,11 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
             , httpServer (logM "main") startTimeMono startTimeUtc sesId config logAlarms (optConfig opt)
                 `whenSpecified` (optHttp opt)
 
-            -- send to recorder
+            -- recorder
             , do
                 ch <- atomically $ dupTChan q
                 let getConfig = confOutputFile <$> readTVar config
-                rotatingFileLineWriter (logM "fileWriter") getConfig (readTChan ch)
+                runRecorder (logM "recorder") getConfig (readTChan ch)
 
             -- input processing
             , processInputs sesId (logM "processInputs")

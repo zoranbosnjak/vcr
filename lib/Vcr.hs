@@ -7,7 +7,9 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Vcr where
 
@@ -15,10 +17,16 @@ import           GHC.Generics (Generic)
 import           Data.Kind (Type)
 import           Data.Text as Text
 import           Data.Aeson
+import           Data.Maybe
 import           Control.Monad
+import           Control.Monad.Catch
 import           Control.Monad.Trans.Maybe
 import           Pipes
 import qualified Pipes.Prelude as PP
+import qualified Text.Regex.TDFA as Reg
+import qualified Text.Regex.TDFA.Text as Reg
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
 
 import           Test.QuickCheck
 
@@ -31,6 +39,25 @@ type SessionId = Text
 type TrackId = Text
 type SequenceNumber = Periodic 0x100000000
 
+data VcrException
+    = RegexCompileError String
+    | PlayError String
+    | IndexError String
+    | JSONDecodeError String
+    deriving Show
+
+instance Exception VcrException
+
+-- | Encode to JSON.
+encodeJSON :: ToJSON a => a -> BS.ByteString
+encodeJSON = BSL.toStrict . Data.Aeson.encode
+
+-- | Decode JSON object.
+decodeJSON :: (MonadThrow m, FromJSON a) => BS.ByteString -> m a
+decodeJSON s = case eitherDecodeStrict s of
+    Left e -> throwM $ JSONDecodeError $ show s ++ ", error: " ++ e
+    Right val -> return val
+
 data Event a = Event
     { eChannel      :: Channel          -- channel name
     , eTimeMono     :: MonoTimeNs       -- monotonically incrementing time
@@ -39,10 +66,7 @@ data Event a = Event
     , eTrackId      :: TrackId          -- unique track identifier
     , eSequence     :: SequenceNumber   -- sequence number
     , eValue        :: a                -- value
-    } deriving (Generic, Eq, Show)
-
-instance Functor Event where
-    fmap f event = event { eValue = f (eValue event) }
+    } deriving (Generic, Eq, Show, Functor)
 
 instance (ToJSON a) => ToJSON (Event a) where
     toJSON (Event ch tMono tUtc sid tid tSeq val) = object
@@ -94,122 +118,177 @@ eventGenAddTime dt = eventGen f where
 
 -- | Recorders (Item consumers)
 
-class Monad m => IsRecorder s m where
-    type RecItem s :: Type
-
+class Monad m => Recorder s m a where
     mkRecorder :: s
-        -> (Text -> m ()) -- log message
-        -> Consumer (RecItem s) m r
+        -> (Text -> m ())   -- log message function
+        -> Consumer a m r
 
--- | Players (Item producers)
-
-class (Monad m, Ord (Index s)) => Indexed s m where
-    type Index s :: Type
-
-    -- | Return (first, overflow) index, Nothing if empty.
-    limits :: s -> m (Maybe (Index s, Index s))
-
-    -- | Calculate valid index near the middle of the interval.
-    middle :: s -> Index s -> Index s -> m (Index s)
-
-class Indexed s m => IsPlayer s m where
-    type RepItem s :: Type
-
-    -- Peek item from given index.
-    peekItem :: s -> Index s -> m (RepItem s)
-
--- | List is a player.
-instance Monad m => Indexed [a] m where
-    type Index [a] = Int
-
-    limits [] = return Nothing
-    limits lst = return $ Just (0, Prelude.length lst)
-    middle _lst a b = return ((a + b) `div` 2)
-
-instance Monad m => IsPlayer [a] m where
-    type RepItem [a] = a
-
-    peekItem lst ix = return (lst !! ix)
+-- | Create 'Event' recorder from 'ByteString' recorder.
+instance {-# OVERLAPPABLE #-} (ToJSON a, Recorder s m BS.ByteString) => Recorder s m (Event a) where
+    mkRecorder s logM =
+        PP.map encodeJSON
+        >-> mkRecorder s logM
 
 -- | Player direction.
-data Direction = Backward | Forward
+data Direction = Forward | Backward
     deriving (Generic, Eq, Show)
 
 instance Arbitrary Direction where
-    arbitrary = elements [Backward, Forward]
+    arbitrary = elements [Forward, Backward]
 
--- | Faster player version (without channel filter).
-class IsPlayer s m => IsRawPlayer s m where
-    mkRawPlayer ::
+-- | Data structures with 'Index'.
+class (Monad m, Ord (Index s)) => Indexed s m where
+    type Index s :: Type    -- index type
+
+    -- | Return (first, overflow) index of the structure.
+    limits :: s -> m (Index s, Index s)
+
+    -- | Calculate valid index near the middle of the interval,
+    middle :: s -> Index s -> Index s -> m (Index s)
+
+-- | Can peek item at given index.
+class Indexed s m => HasItem s m a where
+    peekItem :: s -> Index s -> m a
+
+-- | Players (Item producers)
+
+-- | Fast player (no filter support)
+class Indexed s m => Player s m a where
+    -- | Create producer.
+    mkPlayer ::
         s
         -> Direction
         -> Index s
-        -> Producer (Index s, RepItem s) m (Index s)
+        -> Producer (Index s, a) m ()
 
--- | List is a RawPlayer.
-instance Monad m => IsRawPlayer [a] m where
-    mkRawPlayer lst direction ix = case direction of
-        Backward -> do
-            each (Prelude.reverse $ Prelude.take ix lst')
-            return 0
+-- | Player wtih channel filter support.
+class Indexed s m => PlayerF s m a where
+    mkPlayerF ::
+        s
+        -> Direction
+        -> Index s
+
+        -- Optional timeout interval makes a producer to
+        -- yield some (otherwise filtered out) event,
+        -- so that consumer can progress.
+        -> Maybe MonoTimeNs
+
+        -- Regex, representing channel filter
+        -- This needs to be simple type, to be able
+        -- to encode this argument over http(s).
+        -> Maybe Text
+
+        -> Producer (Index s, Event a) m ()
+
+instance Monad m => Indexed [a] m where
+    type Index [a] = Int
+
+    limits lst = return $ (0, Prelude.length lst)
+    middle _lst a b = return ((a + b) `div` 2)
+
+instance Monad m => HasItem [a] m a where
+    peekItem lst ix = return (lst !! ix)
+
+instance Monad m => Player [a] m a where
+    mkPlayer lst direction ix = case direction of
         Forward -> do
             each (Prelude.drop ix lst')
-            return (Prelude.length lst)
+        Backward -> do
+            each (Prelude.reverse $ Prelude.take ix lst')
       where
         lst' = Prelude.zip [0..] lst
 
--- | Source of events (with channel filter support).
-class IsPlayer s m => IsEventPlayer s m where
-    mkEventPlayer ::
-        s
-        -> Direction
-        -> Index s
-        -> Maybe [Channel]
-        -> Producer (Index s, Either (Event ()) (RepItem s)) m (Index s)
+-- | Compile regular expression
+regexCompile :: Text -> Either String Reg.Regex
+regexCompile = Reg.compile Reg.defaultCompOpt (Reg.ExecOption False)
 
--- | If the 'Item s' is 'Event a', we can make it an IsEventPlayer instance.
--- It's OVERLAPPABLE, unly use it if no other (more specific instance) instance is provided.
-instance {-# OVERLAPPABLE #-} (IsPlayer s m, IsRawPlayer s m, RepItem s ~ Event a) => IsEventPlayer s m where
-    mkEventPlayer s direction ix mFilter =
-        mkRawPlayer s direction ix >-> PP.map (\(i, a) -> (i, f a))
-      where
-        f evt = case mFilter of
-            Nothing -> Right evt
-            Just channels -> case eChannel evt `elem` channels of
-                False -> Left (fmap (const ()) evt)
-                True -> Right evt
+-- | Create Channel predicate out of compiled regex.
+mkPredicate :: Reg.RegexLike regex source => regex -> source -> Bool
+mkPredicate re ch = isJust $ Reg.matchOnce re ch
 
--- | Find index where item condition changes from '<', to '>='.
-bisect :: IsPlayer s m => s -> (RepItem s -> Ordering) -> m (Maybe (Index s))
-bisect s checkItem = limits s >>= \case
-    Nothing -> return Nothing
-    Just (i1, i2) -> runMaybeT $ go i2 i1 i2
+-- | Turn regex filter to a predicate function.
+chPredicate :: Text -> Either String (Channel -> Bool)
+chPredicate t = mkPredicate <$> regexCompile t
+
+-- | Filter events.
+-- When timeout expires, allow first event to pass through,
+-- regardless of the filter.
+dashEvents :: Functor m => Direction -> Maybe MonoTimeNs -> (Channel -> Bool)
+    -> Pipe (ix, Event a) (ix, Event a) m r
+dashEvents _direction Nothing flt = forever $ do
+    (ix, event) <- await
+    when (flt $ eChannel event) $ do
+        yield (ix, event)
+dashEvents direction (Just timeout) flt = do
+    (ix, event) <- await
+    yield (ix, event)
+    loop event
   where
-    probe i = checkItem <$> peekItem s i
+    compareOperator = case direction of
+        Forward -> (>=)
+        Backward -> (<=)
+    loop event = do
+        (ix, event') <- await
+        case flt (eChannel event') of
+            False -> do
+                let dt = eTimeMono event' - eTimeMono event
+                case dt `compareOperator` timeout of
+                    False -> loop event
+                    True -> do
+                        yield (ix, event')
+                        loop event'
+            True -> do
+                yield (ix, event')
+                loop event'
+
+-- | Create channel filter pipe.
+dashEvents' :: MonadThrow m
+    => Direction
+    -> Maybe MonoTimeNs     -- timeout
+    -> Maybe Text           -- ch filter regex
+    -> Pipe (ix, Event a) (ix, Event a) m r
+dashEvents' _direction _timeout Nothing = cat
+dashEvents' direction timeout (Just flt) = either
+    (throwM . RegexCompileError) (dashEvents direction timeout) (chPredicate flt)
+
+-- | Create 'PlayerF a' from 'Player (Event a)'.
+instance {-# OVERLAPPABLE #-} (MonadThrow m, Indexed s m, Player s m (Event a)) => PlayerF s m a where
+    mkPlayerF s direction ix timeout flt =
+        mkPlayer s direction ix
+        >-> dashEvents' direction timeout flt
+
+-- | Find (ix, item) where item condition changes from '<', to '>='.
+bisect :: HasItem s m a => s -> (a -> Ordering) -> m (Maybe (Index s, a))
+bisect s checkItem = do
+    (i1, i2) <- limits s
+    runMaybeT $ go i2 i1 i2
+  where
+    probe i = do
+        a <- peekItem s i
+        return (a, checkItem a)
     go iOut i1 i2 = do
         guard (i2 > i1)
-        x1 <- lift $ probe i1
+        (a1, x1) <- lift $ probe i1
         guard (x1 /= GT)
         case x1 == EQ of
-            True -> return i1   -- exact match
+            True -> return (i1, a1)   -- exact match
             False -> do
                 guard (x1 == LT)
                 i <- lift $ middle s i1 i2
                 case i == i1 of
                     False -> do     -- big interval
-                        x <- lift $ probe i
+                        (a, x) <- lift $ probe i
                         case x of
                             LT -> go iOut i i2
-                            EQ -> return i
+                            EQ -> return (i, a)
                             GT -> go iOut i1 i
                     True -> do      -- no more items between i1 and i2
                         guard (i2 /= iOut)
-                        x2 <- lift $ probe i2
+                        (a, x2) <- lift $ probe i2
                         guard (x2 /= LT)
-                        return i2
+                        return (i2, a)
 
 -- | Find UTC time.
-findEventByTimeUtc :: (IsPlayer s m, RepItem s ~ Event a)
-    => s -> UtcTime -> m (Maybe (Index s))
+findEventByTimeUtc :: forall a s m. HasItem s m (Event a) => s -> UtcTime -> m (Maybe (Index s, Event a))
 findEventByTimeUtc s t = bisect s $ \evt -> compare (eTimeUtc evt) t
 

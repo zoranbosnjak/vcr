@@ -94,21 +94,37 @@ nix-shell
 runhaskell -Wall -ilib -ivcr-app ./replay/example.hs --asterix path/to/xml
 ```
 
-# Troubleshooting
+# Http server API
+
+- ping
+- startTime
+- uptime
+- limits
+- middle
+- peek
+- events
+- next
+
+`curl` examples
 
 ```bash
-# get event index from command line
-curl localhost:12345/nextIndexFromUtc?t="2020-04-17T10:00:00Z"
-# example output: [[2020,4,17,9,55,3],8640065]
+curl localhost:12345/ping
+
+curl localhost:12345/limits
+# example output: [[2021,1,6,9,19,28,0],[2021,1,6,9,21,28,21725]]
+
+curl "localhost:12345/middle?ix1=\[2021,1,6,9,19,28,0\]&ix2=\[2021,1,6,9,21,28,21725\]"
+# example output: [2021,1,6,9,20,28,52771]
+
+curl "localhost:12345/peek?ix=\[2021,1,6,9,20,28,52771\]"
+
+curl "localhost:12345/next?t=\"2021-01-06T09:20:29.2250Z\""
+# example output: [2021,1,6,9,20,28,7653]
 
 # get events
-curl localhost:12345/events
+curl "localhost:12345/events"
 curl localhost:12345/events?includeIndex
-curl "localhost:12345/events?includeIndex&ch=ch1"
-curl "localhost:12345/events?includeIndex&ch=ch1|ch2"
-curl "localhost:12345/events?includeIndex&ch=ch1|ch2&ix=\[\[2020,4,17,9,55,3\],8640065\]"
-
-# skip event (get next index from a given index)
-curl "localhost:12345/nextIndexFromIndex?ix=\[\[2020,4,17,9,55,3\],8640065\]"
+curl "localhost:12345/events?includeIndex&ch=\"ch1\""
+curl "localhost:12345/events?includeIndex&ch=\"ch1|ch2\""
 ```
 

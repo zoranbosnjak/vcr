@@ -358,7 +358,7 @@ runRecorder logM' getConfig fetchEvent = do
                 Just (base, rotate) ->
                     let dirArchive :: DirectoryArchive
                         dirArchive = DirectoryArchive TextEncoding base
-                    in mkRecorder (dirArchive, rotate) logM
+                    in jsonRecorder (mkDirectoryRecorder (dirArchive, rotate)) logM
         PS.runSafeT (runEffect (src cfg >-> dst)) >>= go
 
 runCmd :: CmdOptions -> Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()

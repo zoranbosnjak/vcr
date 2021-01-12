@@ -32,9 +32,12 @@ import           Vcr
 import           Time
 import           Udp
 import           Streaming.Disk
+import           Streaming.Http
 
 data Store
-    = StoreDir FilePath
+    = StoreFile FilePath
+    | StoreDir FilePath
+    | StoreHttp String
     deriving (Generic, Eq, Show)
 
 -- | Speciffic command options.
@@ -53,15 +56,20 @@ options = CmdOptions
     <*> optional (option auto
         ( long "syslog" <> metavar "LEVEL"
        <> help ("Set syslog verbosity level, one of: " ++ show levels)))
-    <*> ((flag' () (long "dir" <> help "serve from directory")) *> baseFile)
+    <*> (storeFile <|> storeDir <|> storeHttp)
     <*> httpOptions
   where
     levels = [minBound..maxBound] :: [Priority]
     httpOptions = (,)
         <$> strOption (long "http" <> metavar "IP")
         <*> option auto (long "httpPort" <> metavar "PORT")
-    baseFile = StoreDir
-        <$> strOption (long "base" <> metavar "FILE" <> help "base file")
+
+    storeFile = StoreFile
+        <$> strOption (long "file" <> metavar "FILE" <> help "file backend")
+    storeDir = StoreDir
+        <$> strOption (long "dir" <> metavar "FILE" <> help "directory backend (base filename)")
+    storeHttp = StoreHttp
+        <$> strOption (long "url" <> metavar "URL" <> help "url backend")
 
 -- | Encode (pretty) to JSON.
 encodePretty :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
@@ -134,16 +142,6 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
             (throwE "limit argument not present")
             ((either throwE (return . PP.take)) <$> eitherDecodeStrict')
 
-        -- respondBinary :: Either (Status, String) a -> IO ResponseReceived
-        respondBinary = \case
-            Left (status, err) -> do
-                logM DEBUG err
-                respond $ responseLBS status
-                    [("Content-Type", "text/plain")] (BSL8.pack $ err ++ "\n")
-            Right result -> respond $ responseLBS status200
-                [("Content-Type", "application/octet-stream")]
-                (result)
-
         respondJson :: ToJSON a => Either (Status, String) a -> IO ResponseReceived
         respondJson = \case
             Left (status, err) -> do
@@ -157,9 +155,14 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
         onError :: Status -> Either e a -> Either (Status,e) a
         onError status = either (\e -> Left (status,e)) Right
 
-        player :: DirectoryArchive
+        player :: Player (PS.SafeT IO) Index UdpEvent
         player = case store of
-            StoreDir base -> DirectoryArchive TextEncoding base
+            StoreFile path -> reindex $
+                mkFilePlayer $ FileArchive TextEncoding path
+            StoreDir base -> reindex $
+                mkDirectoryPlayer $ DirectoryArchive TextEncoding base
+            StoreHttp url ->
+                mkHttpPlayer $ HttpArchive url
 
         go ["ping"] GET = respond $ responseLBS
             status200
@@ -177,22 +180,16 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
                 (BSL8.pack $ uptime ++ "\n")
 
         go ["limits"] GET = do
-            result <- limits player
+            result <- PS.runSafeT $ limits player
             respond $ responseLBS status200
                 [("Content-Type", "application/json")]
-                (jsonEncFormat result)
+                (encode result)
 
         go ["middle"] GET = runExceptT act >>= respondJson where
             act = do
                 ix1 <- getIndex "ix1"
                 ix2 <- getIndex "ix2"
-                middle player ix1 ix2
-
-        go ["peekRaw"] GET = runExceptT act >>= respondBinary where
-            act = do
-                ix <- getIndex "ix"
-                s <- lift $ PS.runSafeT $ peekItem player ix
-                return $ BSL.fromStrict s
+                lift $ PS.runSafeT $ middle player ix1 ix2
 
         go ["peek"] GET = runExceptT act >>= respondJson where
             act = do
@@ -200,43 +197,17 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
                 event <- lift $ PS.runSafeT $ peekItem player ix
                 return (event :: UdpEvent)
 
-        -- stream events from the recording files as raw bytestrings
-        -- This is a faster version to retrive events, since the event decoding
-        -- is not required during the process.
-        --  - optionally starting from some index
-        --  - optionally limit number of events
-        --  - optionally run backwards
-        go ["eventsRaw"] GET = do
-            eProducer <- runExceptT $ do
-                direction <- withArgValue "backward"
-                    (pure Forward)
-                    (pure Backward)
-                    (\_ -> throwE "unexpected argument value: ")
-                ix <- withArgValue "ix"
-                        (do
-                            (ix1, ix2) <- limits player
-                            return $ case direction of
-                                Forward -> ix1
-                                Backward -> ix2
-                        )
-                        (throwE "'ix' argument not present")
-                        (either throwE pure . eitherDecodeStrict')
-                limit <- getLimit
-                let producer = mkPlayer player direction ix
-                return (producer >-> limit >-> PP.map snd)
-            case eProducer of
-                Left err -> do
-                    logM NOTICE err
-                    respond $ responseLBS status400
-                        [("Content-Type", "text/plain")] (BSL8.pack $ err ++ "\n")
-                Right producer -> respond $ responseStream status200 [] $
-                    \write flush -> do
-                        let effect = for producer $ \s -> liftIO $ do
-                                write $ BSBB.byteString $ s <> "\n"
-                                flush
-                        try (PS.runSafeT $ runEffect effect) >>= \case
-                            Left (e :: IOException) -> logM DEBUG $ show e
-                            Right _ -> return ()
+        go ["next"] GET = runExceptT act >>= respondJson where
+            act = do
+                t <- withArgValue "t"
+                    (throwE (status400, "'t' query string not present"))
+                    (throwE (status400, "'t' argument not present"))
+                    (except . onError status400 . eitherDecodeStrict')
+
+                result <- lift $ PS.runSafeT $ findEventByTimeUtc player t
+                case result of
+                    Nothing -> return Nothing
+                    Just (ix, _ :: UdpEvent) -> return (Just ix)
 
         -- stream events from the recording files
         --  - optionally starting from some index
@@ -254,7 +225,7 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
                     (\_ -> throwE "unexpected argument value: ")
                 ix <- withArgValue "ix"
                         (do
-                            (ix1, ix2) <- limits player
+                            (ix1, ix2) <- lift $ PS.runSafeT $ limits player
                             return $ case direction of
                                 Forward -> ix1
                                 Backward -> ix2
@@ -267,12 +238,14 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
                     (pure Nothing)
                     (throwE "timeout argument not present")
                     (either throwE pure . eitherDecodeStrict')
-                fltRegexp <- withArgValue "ch"
+                flt <- withArgValue "ch"
                     (pure Nothing)
                     (throwE "ch argument not present")
                     (either throwE (pure . Just) . eitherDecodeStrict')
-                let producer :: Producer (DirectoryIndex, UdpEvent) (PS.SafeT IO) ()
-                    producer = mkPlayerF player direction ix timeout fltRegexp
+                let producer :: Producer (Index, UdpEvent) (PS.SafeT IO) ()
+                    producer = mkPlayer player direction ix $ case flt of
+                        Nothing -> Nothing
+                        Just val -> Just (val, timeout)
                 return (producer >-> limit, includeIndex)
             case eArgs of
                 Left err -> do

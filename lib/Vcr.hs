@@ -3,21 +3,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE RankNTypes #-}
 
 module Vcr where
 
 import           GHC.Generics (Generic)
-import           Data.Kind (Type)
 import           Data.Text as Text
 import           Data.Aeson
 import           Data.Maybe
+import qualified Data.List.NonEmpty as NE
 import           Control.Monad
 import           Control.Monad.Catch
 import           Control.Monad.Trans.Maybe
@@ -27,8 +24,6 @@ import qualified Text.Regex.TDFA as Reg
 import qualified Text.Regex.TDFA.Text as Reg
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-
-import           Test.QuickCheck
 
 -- local imports
 import           Time
@@ -43,7 +38,7 @@ data VcrException
     = RegexCompileError String
     | PlayError String
     | IndexError String
-    | JSONDecodeError String
+    | DecodeError String
     deriving Show
 
 instance Exception VcrException
@@ -55,7 +50,7 @@ encodeJSON = BSL.toStrict . Data.Aeson.encode
 -- | Decode JSON object.
 decodeJSON :: (MonadThrow m, FromJSON a) => BS.ByteString -> m a
 decodeJSON s = case eitherDecodeStrict s of
-    Left e -> throwM $ JSONDecodeError $ show s ++ ", error: " ++ e
+    Left e -> throwM $ DecodeError $ show s ++ ", error: " ++ e
     Right val -> return val
 
 data Event a = Event
@@ -89,114 +84,84 @@ instance (FromJSON a) => FromJSON (Event a) where
         <*> v .: "sequence"
         <*> v .: "value"
 
-instance (Arbitrary a) => Arbitrary (Event a) where
-    arbitrary = Event
-        <$> fmap Text.pack arbitrary
-        <*> arbitrary
-        <*> arbitraryUtc
-        <*> fmap Text.pack arbitrary
-        <*> fmap Text.pack arbitrary
-        <*> arbitrary
-        <*> arbitrary
-
--- | Event generator (for testing purposes).
-eventGen :: Monad m => (a -> m a) -> a -> Producer a m b
-eventGen f a = do
-    yield a
-    a' <- lift $ f a
-    eventGen f a'
-
--- | Add delta-t (nanoseconds) to each event, for testing purposes.
-eventGenAddTime :: Monad m => MonoTimeNs -> Event a -> Producer (Event a) m b
-eventGenAddTime dt = eventGen f where
-    f e = return $ e
-        { eTimeMono = eTimeMono e + dt
-        , eTimeUtc = addMonoTimeNS dt (eTimeUtc e)
-        }
-
 -- | Streaming components
 
--- | Recorders (Item consumers)
+type Recorder m a r = (Text -> m ()) -> Consumer a m r
 
-class Monad m => Recorder s m a where
-    mkRecorder :: s
-        -> (Text -> m ())   -- log message function
-        -> Consumer a m r
-
--- | Create 'Event' recorder from 'ByteString' recorder.
-instance {-# OVERLAPPABLE #-} (ToJSON a, Recorder s m BS.ByteString) => Recorder s m (Event a) where
-    mkRecorder s logM =
-        PP.map encodeJSON
-        >-> mkRecorder s logM
+-- | Create JSON based recorder from ByteString recorder.
+jsonRecorder :: (ToJSON a, Functor m) => Recorder m BS.ByteString r -> Recorder m a r
+jsonRecorder rec = \logM -> PP.map encodeJSON >-> rec logM
 
 -- | Player direction.
 data Direction = Forward | Backward
     deriving (Generic, Eq, Show)
 
-instance Arbitrary Direction where
-    arbitrary = elements [Forward, Backward]
-
--- | Data structures with 'Index'.
-class (Monad m, Ord (Index s)) => Indexed s m where
-    type Index s :: Type    -- index type
-
-    -- | Return (first, overflow) index of the structure.
-    limits :: s -> m (Index s, Index s)
-
-    -- | Calculate valid index near the middle of the interval,
-    middle :: s -> Index s -> Index s -> m (Index s)
-
--- | Can peek item at given index.
-class Indexed s m => HasItem s m a where
-    peekItem :: s -> Index s -> m a
-
--- | Players (Item producers)
-
--- | Fast player (no filter support)
-class Indexed s m => Player s m a where
-    -- | Create producer.
-    mkPlayer ::
-        s
-        -> Direction
-        -> Index s
-        -> Producer (Index s, a) m ()
-
--- | Player wtih channel filter support.
-class Indexed s m => PlayerF s m a where
-    mkPlayerF ::
-        s
-        -> Direction
-        -> Index s
-
-        -- Optional timeout interval makes a producer to
-        -- yield some (otherwise filtered out) event,
-        -- so that consumer can progress.
-        -> Maybe MonoTimeNs
-
-        -- Regex, representing channel filter
+-- | Player methods structure.
+data Player m ix a = Player
+    { limits    :: m (ix, ix)       -- (first, overflow) index of a player
+    , middle    :: ix -> ix -> m ix -- get valid index near the middle of the interval
+    , peekItem  :: ix -> m a        -- peek item at given index
+    , mkPlayer  :: Direction -> ix
+        -- Optional regex, representing channel filter.
         -- This needs to be simple type, to be able
         -- to encode this argument over http(s).
-        -> Maybe Text
+        -- When a filter is active, there might also
+        -- be a timeout interval. This makes a producer
+        -- 'leaky', to yield some (otherwise filtered out) event,
+        -- so that consumer can progress.
+        -> Maybe (Text, Maybe MonoTimeNs)
+        -> Producer (ix, a) m ()
+    }
 
-        -> Producer (Index s, Event a) m ()
+-- | 'Player m ix' is a functor.
+instance Monad m => Functor (Player m ix) where
+    fmap f player = Player
+        { limits = limits player
+        , middle = middle player
+        , peekItem = \ix -> f <$> peekItem player ix
+        , mkPlayer = \direction ix flt -> do
+            mkPlayer player direction ix flt >-> PP.mapM (\(a,b) -> do
+                return (a, f b))
+        }
 
-instance Monad m => Indexed [a] m where
-    type Index [a] = Int
+-- | Common index data type for all players
+-- Correct 'Ord' instance is important for 'bisect' function.
+data Index
+    = Index (NE.NonEmpty Integer)
+    deriving (Generic, Eq, Ord, Show, ToJSON, FromJSON)
 
-    limits lst = return $ (0, Prelude.length lst)
-    middle _lst a b = return ((a + b) `div` 2)
+-- | Index convesion functions.
+-- It is important to preserve ordering, that is:
+-- compare ix1 ix2 == compare (toIndex ix1) (toIndex ix2)
+-- compare ix1 ix2 == compare (fromIndex ix1) (fromIndex ix2)
+class IsIndex ix where
+    toIndex   :: ix -> Index
+    fromIndex :: Index -> ix
 
-instance Monad m => HasItem [a] m a where
-    peekItem lst ix = return (lst !! ix)
+instance IsIndex Index where
+    toIndex = id
+    fromIndex = id
 
-instance Monad m => Player [a] m a where
-    mkPlayer lst direction ix = case direction of
-        Forward -> do
-            each (Prelude.drop ix lst')
-        Backward -> do
-            each (Prelude.reverse $ Prelude.take ix lst')
-      where
-        lst' = Prelude.zip [0..] lst
+instance {-# OVERLAPPABLE #-} Integral a => IsIndex a where
+    toIndex val = Index $ (toInteger val) NE.:| []
+    fromIndex (Index lst) = fromInteger $ NE.head lst
+
+-- | Change player's index type.
+reindex :: (IsIndex ix, Monad m) => Player m ix a -> Player m Index a
+reindex player = Player
+    { limits = do
+        (ix1, ix2) <- limits player
+        return (toIndex ix1, toIndex ix2)
+    , middle = \ix1 ix2 -> do
+        ix <- middle player (fromIndex ix1) (fromIndex ix2)
+        return $ toIndex ix
+    , peekItem = \ix -> do
+        peekItem player (fromIndex ix)
+    , mkPlayer = \direction ix flt -> do
+        let ix' = fromIndex ix
+        mkPlayer player direction ix' flt >-> PP.mapM (\(a,b) -> do
+            return (toIndex a, b))
+    }
 
 -- | Compile regular expression
 regexCompile :: Text -> Either String Reg.Regex
@@ -213,13 +178,13 @@ chPredicate t = mkPredicate <$> regexCompile t
 -- | Filter events.
 -- When timeout expires, allow first event to pass through,
 -- regardless of the filter.
-dashEvents :: Functor m => Direction -> Maybe MonoTimeNs -> (Channel -> Bool)
+dashEvents :: Functor m => Direction -> ((Channel -> Bool), Maybe MonoTimeNs)
     -> Pipe (ix, Event a) (ix, Event a) m r
-dashEvents _direction Nothing flt = forever $ do
+dashEvents _direction (flt, Nothing) = forever $ do
     (ix, event) <- await
     when (flt $ eChannel event) $ do
         yield (ix, event)
-dashEvents direction (Just timeout) flt = do
+dashEvents direction (flt, Just timeout) = do
     (ix, event) <- await
     yield (ix, event)
     loop event
@@ -244,27 +209,22 @@ dashEvents direction (Just timeout) flt = do
 -- | Create channel filter pipe.
 dashEvents' :: MonadThrow m
     => Direction
-    -> Maybe MonoTimeNs     -- timeout
-    -> Maybe Text           -- ch filter regex
+    -> Maybe (Text, Maybe MonoTimeNs)
     -> Pipe (ix, Event a) (ix, Event a) m r
-dashEvents' _direction _timeout Nothing = cat
-dashEvents' direction timeout (Just flt) = either
-    (throwM . RegexCompileError) (dashEvents direction timeout) (chPredicate flt)
-
--- | Create 'PlayerF a' from 'Player (Event a)'.
-instance {-# OVERLAPPABLE #-} (MonadThrow m, Indexed s m, Player s m (Event a)) => PlayerF s m a where
-    mkPlayerF s direction ix timeout flt =
-        mkPlayer s direction ix
-        >-> dashEvents' direction timeout flt
+dashEvents' _direction Nothing = cat
+dashEvents' direction (Just (flt, timeout)) = case chPredicate flt of
+    Left e -> throwM $ RegexCompileError e
+    Right predicate -> dashEvents direction (predicate, timeout)
 
 -- | Find (ix, item) where item condition changes from '<', to '>='.
-bisect :: HasItem s m a => s -> (a -> Ordering) -> m (Maybe (Index s, a))
-bisect s checkItem = do
-    (i1, i2) <- limits s
+bisect :: (Ord ix, Monad m) =>
+    Player m ix a -> (a -> Ordering) -> m (Maybe (ix, a))
+bisect player checkItem = do
+    (i1, i2) <- limits player
     runMaybeT $ go i2 i1 i2
   where
     probe i = do
-        a <- peekItem s i
+        a <- peekItem player i
         return (a, checkItem a)
     go iOut i1 i2 = do
         guard (i2 > i1)
@@ -274,7 +234,7 @@ bisect s checkItem = do
             True -> return (i1, a1)   -- exact match
             False -> do
                 guard (x1 == LT)
-                i <- lift $ middle s i1 i2
+                i <- lift $ middle player i1 i2
                 case i == i1 of
                     False -> do     -- big interval
                         (a, x) <- lift $ probe i
@@ -289,6 +249,7 @@ bisect s checkItem = do
                         return (i2, a)
 
 -- | Find UTC time.
-findEventByTimeUtc :: forall a s m. HasItem s m (Event a) => s -> UtcTime -> m (Maybe (Index s, Event a))
+findEventByTimeUtc :: (Ord ix, Monad m) =>
+    Player m ix (Event a) -> UtcTime -> m (Maybe (ix, Event a))
 findEventByTimeUtc s t = bisect s $ \evt -> compare (eTimeUtc evt) t
 

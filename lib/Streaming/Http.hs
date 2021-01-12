@@ -94,45 +94,6 @@ fetchUrlRaw url = runGetRequest url consumer where
 fetchUrl :: FromJSON a => String -> IO a
 fetchUrl url = fetchUrlRaw url >>= decodeJSON
 
--- | Http/Https streaming
-
--- TODO: Http Archive may have 'any' other 'HasItem/Player...' as a backend,
--- for example:
---  - directory (normally)
---  - a file
---  - another http server
---  - ...
---     data HttpArchive where
---          :: forall backend. String -> backend -> HttpArchive
-data HttpArchive = HttpArchive String
-
-instance MonadIO m => Indexed HttpArchive m where
-    type Index HttpArchive = DirectoryIndex
-
-    limits (HttpArchive url) = liftIO $ fetchUrl
-        ( url ++ "limits"
-        )
-
-    middle (HttpArchive url) ix1 ix2 = liftIO $ fetchUrl
-        ( url ++ "middle"
-       ++ "?ix1=" ++ objToUrl ix1
-       ++ "&ix2=" ++ objToUrl ix2
-        )
-
-instance MonadIO m => HasItem HttpArchive m BS.ByteString where
-    peekItem (HttpArchive url) ix = liftIO $ fetchUrlRaw
-        ( url ++ "peekRaw"
-       ++ "?ix=" ++ objToUrl ix
-        )
-
-instance (FromJSON a, MonadIO m) => HasItem HttpArchive m (Event a) where
-    peekItem (HttpArchive url) ix = liftIO $ do
-        s <- fetchUrlRaw
-            ( url ++ "peek"
-           ++ "?ix=" ++ objToUrl ix
-            )
-        decodeJSON s
-
 -- | Create 'player' from request.
 playUrl :: String -> Producer BS8.ByteString (SafeT IO) ()
 playUrl url = bracket acquire HTC.responseClose $ \h ->
@@ -167,31 +128,41 @@ decodeEvents = forever $ do
     s <- await
     lift (decodeJSON s) >>= yield
 
-instance FromJSON a => Player HttpArchive (SafeT IO) (Event a) where
-    mkPlayer (HttpArchive url) direction ix =
-        playUrl request >-> toLines mempty >-> decodeEvents
-      where
-        request = url ++ "events"
-            ++ "?ix=" ++ objToUrl ix
-            ++ "&includeIndex"
-            ++ case direction of
-                Forward -> ""
-                Backward -> "&backward"
+-- | Http/Https streaming
 
-instance FromJSON a => PlayerF HttpArchive (SafeT IO) (Event a) where
-    mkPlayerF (HttpArchive url) direction ix timeout flt =
-        playUrl request >-> toLines mempty >-> decodeEvents
-      where
-        request = url ++ "events"
-            ++ "?ix=" ++ objToUrl ix
-            ++ "&includeIndex"
-            ++ case direction of
-                Forward -> ""
-                Backward -> "&backward"
-            ++ case timeout of
-                Nothing -> ""
-                Just val -> "&timeout=" ++ objToUrl val
-            ++ case flt of
-                Nothing -> ""
-                Just val -> "&ch=" ++ objToUrl val
+data HttpArchive = HttpArchive String
+
+mkHttpPlayer :: FromJSON a => HttpArchive -> Player (SafeT IO) Index (Event a)
+mkHttpPlayer (HttpArchive url) = Player
+    { limits = liftIO $ fetchUrl
+        ( url ++ "limits"
+        )
+    , middle = \ix1 ix2 -> liftIO $ fetchUrl
+        ( url ++ "middle"
+       ++ "?ix1=" ++ objToUrl ix1
+       ++ "&ix2=" ++ objToUrl ix2
+        )
+    , peekItem = \ix -> liftIO $ do
+        s <- fetchUrlRaw
+            ( url ++ "peek"
+           ++ "?ix=" ++ objToUrl ix
+            )
+        decodeJSON s
+
+    , mkPlayer = \direction ix flt ->
+        let request = url ++ "events"
+                ++ "?ix=" ++ objToUrl ix
+                ++ "&includeIndex"
+                ++ case direction of
+                    Forward -> ""
+                    Backward -> "&backward"
+                ++ case flt of
+                    Nothing -> ""
+                    Just (val1, timeout) ->
+                        "&ch=" ++ objToUrl val1
+                        ++ case timeout of
+                            Nothing -> ""
+                            Just val2 -> "&timeout=" ++ objToUrl val2
+        in playUrl request >-> toLines mempty >-> decodeEvents
+    }
 

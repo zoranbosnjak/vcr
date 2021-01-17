@@ -61,10 +61,6 @@ import           Common
 
 import           Streaming.Disk (DirectoryIndex)
 
--- | Pre-fetch buffer size.
-prefetch :: Int
-prefetch = 1000
-
 -- | Url encode JSON object
 objToUrl :: ToJSON a => a -> String
 objToUrl = BS8.unpack . HT.urlEncode False . encodeJSON

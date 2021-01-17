@@ -18,6 +18,7 @@ import           System.Random
 import           System.IO
 import           Data.Time
 import           Data.Aeson
+import qualified Data.ByteString as BS
 
 import           Test.Tasty
 import           Test.Tasty.QuickCheck as QC
@@ -40,6 +41,25 @@ fileSuffixP = QC.testProperty "file suffix" $ \(t::UtcTime) (dir::FilePath) (rec
         fileName = fileSuffixToFileName base fileSuffix
         fileSuffix' = getFileSuffix base fileName
     in (fileSuffix' == Just fileSuffix)
+
+limitsP :: TestTree
+limitsP = QC.testProperty "file limits" $ \(enc::FileEncoding) -> QC.ioProperty $ do
+    sizes <- generate $ listOf1 $ choose (1, 2*chunkSize)
+    withSystemTempDirectory "vcr-test" $ \base -> do
+        let f = base </> "rec"
+        lst <- withFile f WriteMode $ \h -> do
+            forM sizes $ \n -> do
+                let s = BS.pack $ replicate n 255
+                writeBytes enc h s
+                return s
+
+        let lst' = init lst
+            x = fromIntegral (sum (fmap BS.length lst'))
+                + fromIntegral ((length lst' * delimiterSize enc))
+
+        (o1, o2) <- getFileLimits enc f
+        assertEqual "offset1" 0 o1
+        assertEqual "offset2" x o2
 
 vcrEvents :: Ord ix =>
     TestName
@@ -67,10 +87,10 @@ vcrEvents title mkRec mkPl = testCaseSteps title $ \step -> do
             readback <- do
                 (ix1, ix2) <- runSafeT $ limits player
 
-                result1 <- runSafeT $ PP.toListM $ mkPlayer player Forward ix1 Nothing
+                result1 <- runSafeT $ PP.toListM $ runPlayer player Forward ix1 Nothing
                 assertEqual "complete" (length samples) (length result1)
 
-                result2 <- runSafeT $ PP.toListM $ mkPlayer player Backward ix2 Nothing
+                result2 <- runSafeT $ PP.toListM $ runPlayer player Backward ix2 Nothing
                 assertBool "reversed" (result1 == reverse result2)
 
                 forM_ (zip samples result1) $ \(x, (i, y)) -> do
@@ -87,13 +107,13 @@ vcrEvents title mkRec mkPl = testCaseSteps title $ \step -> do
                 step "forward"
                 forM_ (zip [0..] validIndices) $ \(n,ix) -> do
                     let expected = drop n readback
-                    result <- runSafeT $ PP.toListM $ mkPlayer player Forward ix Nothing
+                    result <- runSafeT $ PP.toListM $ runPlayer player Forward ix Nothing
                     assertBool "same result" (expected == result)
 
                 step "backward"
                 forM_ (zip [0..] validIndices) $ \(n,ix) -> do
-                    let expected = reverse $ take n readback
-                    result <- runSafeT $ PP.toListM $ mkPlayer player Backward ix Nothing
+                    let expected = reverse $ take (succ n) readback
+                    result <- runSafeT $ PP.toListM $ runPlayer player Backward ix Nothing
                     assertBool "same result" (expected == result)
 
 -- | Save some items to a file, using a generator
@@ -121,7 +141,7 @@ locateEvents step t1 player samples = do
     step "readback"
     readback <- do
         (a, _b) <- runSafeT $ limits player
-        let p = mkPlayer player Forward a Nothing
+        let p = runPlayer player Forward a Nothing
         result <- runSafeT $ PP.toListM p
         return result
     assertEqual "readback" samples (fmap snd readback)
@@ -227,7 +247,7 @@ dirRotate numFiles = testCaseSteps title $ \step -> do
             step "readback"
             readback <- do
                 (a, _b) <- runSafeT $ limits player
-                runSafeT $ PP.toListM $ mkPlayer player Forward a Nothing
+                runSafeT $ PP.toListM $ runPlayer player Forward a Nothing
             assertEqual "readback" (join samples) (fmap snd readback)
 
             step "replay from any valid index"
@@ -237,13 +257,13 @@ dirRotate numFiles = testCaseSteps title $ \step -> do
                 step "forward"
                 forM_ (zip [0..] validIndices) $ \(n,ix) -> do
                     let expected = drop n readback
-                    result <- runSafeT $ PP.toListM $ mkPlayer player Forward ix Nothing
+                    result <- runSafeT $ PP.toListM $ runPlayer player Forward ix Nothing
                     assertBool "same result" (expected == result)
 
                 step "backward"
                 forM_ (zip [0..] validIndices) $ \(n,ix) -> do
-                    let expected = reverse $ take n readback
-                    result <- runSafeT $ PP.toListM $ mkPlayer player Backward ix Nothing
+                    let expected = reverse $ take (succ n) readback
+                    result <- runSafeT $ PP.toListM $ runPlayer player Backward ix Nothing
                     assertBool "same result" (expected == result)
   where
     title = "read from " <> show numFiles <> " rotated file(s)"
@@ -251,6 +271,7 @@ dirRotate numFiles = testCaseSteps title $ \step -> do
 propTests :: TestTree
 propTests = testGroup "Property tests"
     [ fileSuffixP
+    , limitsP
     ]
 
 unitTests :: TestTree

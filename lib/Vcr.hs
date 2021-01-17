@@ -94,14 +94,14 @@ jsonRecorder rec = \logM -> PP.map encodeJSON >-> rec logM
 
 -- | Player direction.
 data Direction = Forward | Backward
-    deriving (Generic, Eq, Show)
+    deriving (Generic, Eq, Enum, Bounded, Show)
 
 -- | Player methods structure.
 data Player m ix a = Player
-    { limits    :: m (ix, ix)       -- (first, overflow) index of a player
+    { limits    :: m (ix, ix)       -- (first, last) index of a player
     , middle    :: ix -> ix -> m ix -- get valid index near the middle of the interval
     , peekItem  :: ix -> m a        -- peek item at given index
-    , mkPlayer  :: Direction -> ix
+    , runPlayer :: Direction -> ix
         -- Optional regex, representing channel filter.
         -- This needs to be simple type, to be able
         -- to encode this argument over http(s).
@@ -113,14 +113,22 @@ data Player m ix a = Player
         -> Producer (ix, a) m ()
     }
 
+-- | Make one step from given index and return next (ix, a).
+nextItem :: MonadThrow m => Player m ix a -> ix -> Direction -> m (ix, a)
+nextItem player ix direction = do
+    result <- next (runPlayer player direction ix Nothing >-> PP.drop 1)
+    case result of
+        Left e -> throwM $ PlayError $ show e
+        Right (val, _producer') -> return val
+
 -- | 'Player m ix' is a functor.
 instance Monad m => Functor (Player m ix) where
     fmap f player = Player
         { limits = limits player
         , middle = middle player
         , peekItem = \ix -> f <$> peekItem player ix
-        , mkPlayer = \direction ix flt -> do
-            mkPlayer player direction ix flt >-> PP.mapM (\(a,b) -> do
+        , runPlayer = \direction ix flt -> do
+            runPlayer player direction ix flt >-> PP.mapM (\(a,b) -> do
                 return (a, f b))
         }
 
@@ -157,9 +165,9 @@ reindex player = Player
         return $ toIndex ix
     , peekItem = \ix -> do
         peekItem player (fromIndex ix)
-    , mkPlayer = \direction ix flt -> do
+    , runPlayer = \direction ix flt -> do
         let ix' = fromIndex ix
-        mkPlayer player direction ix' flt >-> PP.mapM (\(a,b) -> do
+        runPlayer player direction ix' flt >-> PP.mapM (\(a,b) -> do
             return (toIndex a, b))
     }
 
@@ -221,13 +229,13 @@ bisect :: (Ord ix, Monad m) =>
     Player m ix a -> (a -> Ordering) -> m (Maybe (ix, a))
 bisect player checkItem = do
     (i1, i2) <- limits player
-    runMaybeT $ go i2 i1 i2
+    runMaybeT $ go i1 i2
   where
     probe i = do
         a <- peekItem player i
         return (a, checkItem a)
-    go iOut i1 i2 = do
-        guard (i2 > i1)
+    go i1 i2 = do
+        guard (i2 >= i1)
         (a1, x1) <- lift $ probe i1
         guard (x1 /= GT)
         case x1 == EQ of
@@ -239,11 +247,10 @@ bisect player checkItem = do
                     False -> do     -- big interval
                         (a, x) <- lift $ probe i
                         case x of
-                            LT -> go iOut i i2
+                            LT -> go i i2
                             EQ -> return (i, a)
-                            GT -> go iOut i1 i
+                            GT -> go i1 i
                     True -> do      -- no more items between i1 and i2
-                        guard (i2 /= iOut)
                         (a, x2) <- lift $ probe i2
                         guard (x2 /= LT)
                         return (i2, a)

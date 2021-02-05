@@ -96,7 +96,7 @@ bisectTest2 = QC.testProperty "bisect - find in interval" $ forAll (choose (1,15
         result :: Maybe (Int, Event Int)
         result = fromJust $ bisect p (\x -> compare (eValue x) (eValue eProbe))
     return $ if
-        | pVal < 30 || pVal > 90 -> isNothing result
+        | pVal > 90 -> isNothing result
         | otherwise -> isJust result
 
 -- | Bisection test - reindex

@@ -8,10 +8,9 @@ module CmdCapture where
 -- standard imports
 import           Control.Monad
 import           Control.Monad.Fix
-import           Control.Exception (mask, try, finally, IOException)
+import           UnliftIO
+import qualified Control.Concurrent.STM as STM
 import           GHC.Generics (Generic)
-import           Control.Concurrent.STM
-import           Control.Concurrent.Async
 import           Options.Applicative
 import qualified Data.UUID
 import           Data.UUID.V4 (nextRandom)
@@ -25,12 +24,12 @@ import           Network.Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import           Network.HTTP.Types
 import           Data.Aeson
-import qualified Data.Aeson.Encode.Pretty as AesonP
 import           System.Posix.Signals
 import           Pipes
 import qualified Pipes.Safe as PS
 
 -- local imports
+import           Logging
 import           Common
 import           Vcr
 import           Time
@@ -129,11 +128,6 @@ options = CmdOptions
             <*> flag HttpConfigDisabled HttpConfigEnabled (long "enableHttpConfig")
             <*> flag SigHUPConfigDisabled SigHUPConfigEnabled (long "enableSigHUPConfig")
 
--- | Encode (pretty) to JSON.
-encodePretty :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
-encodePretty = AesonP.encodePretty'
-    AesonP.defConfig {AesonP.confCompare = compare}
-
 -- | Http server.
 httpServer ::
     (Priority -> String -> IO ())
@@ -158,7 +152,7 @@ httpServer logM startTimeMono startTimeUtc sesId config logAlarms cfgMethod (ip,
         jsonEncFormat :: Data.Aeson.ToJSON a => a -> BSL.ByteString
         jsonEncFormat = case "pretty" `elem` (fst <$> queryString request) of
             False -> encode
-            True -> encodePretty
+            True -> encodeJSONPrettyL
 
         withLog act = case parseMethod (requestMethod request) of
             Left _ -> respond $ responseLBS
@@ -208,7 +202,7 @@ httpServer logM startTimeMono startTimeUtc sesId config logAlarms cfgMethod (ip,
                         when (cfg /= oldCfg) $ do
                             logM INFO $ "New configuration received: " ++ show cfg
                             logM INFO $ "Writting configuration to: " ++ show path
-                            BSL.writeFile path $  encodePretty cfg
+                            BSL.writeFile path $ encodeJSONPrettyL cfg
                         respond $ responseLBS
                             status200
                             [("Content-Type", "text/plain")]
@@ -247,10 +241,10 @@ singleInput sesId logM consume ch i = do
     logM INFO $ "ch: " ++ show ch ++ ", " ++ show i ++ " -> trackId:" ++ show trackId
     let src = udpReader i
     forever $ do
-        result <- try $ PS.runSafeT $ runEffect $
+        result <- tryIO $ PS.runSafeT $ runEffect $
             src >-> mkEvent trackId firstSequence >-> dst
         let msg = case result of
-                Left e -> "with exception: " ++ show (e :: IOException)
+                Left e -> "with exception: " ++ show e
                 Right _ -> "without exception"
         logM NOTICE $ "Input terminated: " ++ show i ++ ", " ++ msg
         threadDelaySec 3
@@ -306,7 +300,7 @@ processInputs sesId logM consume getInputs = do
     loop active current = do
         newCfg <- atomically $ do
             newCfg <- getInputs
-            when (newCfg == current) retry
+            when (newCfg == current) retrySTM
             return newCfg
 
         let removed = current `Map.difference` newCfg
@@ -339,7 +333,7 @@ runRecorder logM' getConfig fetchEvent = do
     -- process input queue while monitoring config change
     src cfg = fix $ \loop -> do
         event <- liftIO $ atomically
-            (fmap Left cfgChange `orElse` fmap Right fetchEvent)
+            (fmap Left cfgChange `STM.orElse` fmap Right fetchEvent)
         case event of
             Left cfg' -> return cfg'
             Right val -> do
@@ -348,7 +342,7 @@ runRecorder logM' getConfig fetchEvent = do
       where
         cfgChange = do
             newConfig <- getConfig
-            when (newConfig == cfg) retry
+            when (newConfig == cfg) retrySTM
             return newConfig
 
     -- run until config change, then restart with new config
@@ -366,9 +360,11 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
     startTimeMono <- getMonoTimeNs
     startTimeUtc <- getUtcTime
 
-    -- last severe log event is held for some time
+    -- Hold last severe log message for some time,
+    -- so that it can be polled via http as status.
     logAlarms <- newAlarmIO (optAlarmHold opt)
-    let log2Alarm prio name msg = when (prio >= NOTICE) $ do
+    let log2Alarm :: Logger IO
+        log2Alarm name prio msg = when (prio >= NOTICE) $ do
             atomically $ refreshAlarm logAlarms (prio, name, msg)
 
     logM <- setupLogging pName "capture" (optVerbose opt) (optSyslog opt) (Just log2Alarm)
@@ -385,7 +381,7 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
 
     proceed <- case optConfig opt of
         ConfigArguments cfg True -> do
-            BSL.putStr $ encodePretty cfg
+            BSL.putStr $ encodeJSONPrettyL cfg
             return False
         ConfigArguments cfg False -> do
             atomically $ writeTVar config cfg
@@ -393,14 +389,14 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
         ConfigFile path _httpFlag sigHupFlag -> do
             let loadConfig = do
                     logM "main" INFO $ "Loading configuration from " ++ show path
-                    result <- try $ do
+                    result <- tryIO $ do
                         s <- BSL.readFile path
                         case eitherDecode s of
                             Right val -> return val
                             Left e -> fail e
                     case result of
                         Left e -> do
-                            let msg = "Error loading file: " ++ show (e :: IOException)
+                            let msg = "Error loading file: " ++ show e
                             logM "main" NOTICE msg
                         Right cfg -> do
                             logM "main" INFO $ show cfg

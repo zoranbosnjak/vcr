@@ -37,6 +37,8 @@ executable vcr
   build-depends:
     base < 5
     , vcr
+    , unliftio
+    , exceptions
     , template-haskell
     , process
     , temporary
@@ -46,7 +48,6 @@ executable vcr
     , unix
     , transformers
     , stm
-    , async
     , uuid
     , containers
     , text
@@ -60,8 +61,6 @@ executable vcr
     , pipes
     , pipes-concurrency
     , pipes-safe
-    , regex-tdfa
-    , regex-tdfa-text
     , time
     , ekg
 

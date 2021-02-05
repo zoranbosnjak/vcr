@@ -9,57 +9,24 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeApplications #-}
 
-{-# OPTIONS_GHC -Wno-unused-imports #-}
-
 module Streaming.Http where
 
-import           GHC.Generics (Generic)
 import           Control.Monad
 import           Control.Monad.Fix
-import           Control.Monad.Trans.Maybe
-import           Control.Monad.Trans.Except
-import qualified Data.Vector as V
 import           Data.Aeson
-import           Data.Void
-import qualified Data.Aeson.Types as AT
-import qualified System.IO as IO
-import qualified Data.ByteString as BS
-import           Data.ByteString.Lazy.Internal (defaultChunkSize)
-import qualified Data.ByteString.Lazy as BSL
-import qualified Data.ByteString.Char8 as BS8
-import qualified Data.Time
-import           Data.List (sort)
-import           Data.Maybe
-import           System.Directory
-import           System.FilePath
-import qualified Data.Text as T
-import           Text.Printf
-import qualified Text.Megaparsec as MP
-import qualified Text.Megaparsec.Char as MPC
-import qualified Text.Megaparsec.Char.Lexer as L
-import           Test.QuickCheck
-
-import           Control.Concurrent.STM
-import           Control.Concurrent.Async
-import           Control.Exception (try)
-
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
-import qualified Data.ByteString.Lazy as BSL
+
 import qualified Network.HTTP.Client as HTC
 import qualified Network.HTTP.Client.TLS as HTCS
 import qualified Network.HTTP.Types as HT
 
 import           Pipes
 import           Pipes.Safe
-import qualified Pipes.Prelude as PP
 
 -- local imports
-import           Time
 import           Vcr
 import           Common
-
-import           Streaming.Disk (DirectoryIndex)
 
 -- | Url encode JSON object
 objToUrl :: ToJSON a => a -> String
@@ -145,7 +112,7 @@ mkHttpPlayer (HttpArchive url) = Player
             )
         decodeJSON s
 
-    , mkPlayer = \direction ix flt ->
+    , runPlayer = \direction ix flt ->
         let request = url ++ "events"
                 ++ "?ix=" ++ objToUrl ix
                 ++ "&includeIndex"

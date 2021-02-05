@@ -24,7 +24,10 @@ library
     , Sequential
     , Time
     , Udp
-    , Replay
+    , Logging
+    , Streaming
+    , Streaming.Disk
+    , Streaming.Http
   -- other-modules:
   -- other-extensions:
   -- hs-source-dirs:
@@ -40,6 +43,8 @@ library
     -Wpartial-fields
   build-depends:
     base < 5
+    , unliftio
+    , exceptions
     , optparse-applicative
     , ekg
     , template-haskell
@@ -62,7 +67,6 @@ library
     , QuickCheck
     , stm
     , clock
-    , async
     , transformers
     , hslogger
     , hsyslog
@@ -76,25 +80,40 @@ library
     , pipes
     , pipes-concurrency
     , pipes-safe
-    , regex-tdfa
-    , regex-tdfa-text
     , wx
     , wxcore
     , http-types
     , http-client
     , http-client-tls
     , vector
-    , exceptions
 
 test-suite vcr-test
   default-language:    Haskell2010
   type:                exitcode-stdio-1.0
   hs-source-dirs:      test
-  main-is:             VcrTest.hs
+  main-is:             Main.hs
+  other-modules:
+    TestCommon
+    , DiskTest
+    , VcrTest
   build-depends:
     base < 5
     , vcr
+    , unliftio
+    , exceptions
+    , time
+    , text
+    , bytestring
+    , base16-bytestring
+    , base64-bytestring
+    , pipes
+    , pipes-concurrency
+    , pipes-safe
     , tasty
     , tasty-quickcheck
     , tasty-hunit
+    , temporary
+    , filepath
+    , random
+    , aeson
 

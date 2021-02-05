@@ -8,7 +8,6 @@ module Main where
 
 -- standard imports
 import           Options.Applicative
-import           Control.Exception (catch, SomeException)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified System.Environment
@@ -92,11 +91,5 @@ main = do
         _ <- Ekg.forkServer ip port
         return ()
 
-    let onError :: SomeException -> IO ()
-        onError e = do
-            hPutStrLn stderr $ show pName ++ " error:"
-            hPutStrLn stderr $ show e
-            exitWith $ ExitFailure 1
-
-    (optCommand opt) pName pArgs versionString ghcBase wxcLib `catch` onError
+    (optCommand opt) pName pArgs versionString ghcBase wxcLib
 

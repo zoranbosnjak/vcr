@@ -304,7 +304,7 @@ instance IsIndex DirectoryIndex where
         (lst NE.!! 6)
 
 utcToFileSuffix :: UtcTime -> FileSuffix
-utcToFileSuffix utc = FileSuffix
+utcToFileSuffix t = FileSuffix
     { fsYear    = year
     , fsMonth   = month
     , fsDay     = day
@@ -313,8 +313,8 @@ utcToFileSuffix utc = FileSuffix
     , fsSecond  = ceiling (Data.Time.todSec tod)
     }
   where
-    (year, month, day) = Data.Time.toGregorian $ Data.Time.utctDay utc
-    tod = Data.Time.timeToTimeOfDay $ Data.Time.utctDayTime utc
+    (year, month, day) = Data.Time.toGregorian $ Data.Time.utctDay t
+    tod = Data.Time.timeToTimeOfDay $ Data.Time.utctDayTime t
 
 fileSuffixToFileName :: FilePath -> FileSuffix -> FilePath
 fileSuffixToFileName base suf = base ++ "-" ++ printf "%d-%02d-%02dT%02d-%02d-%02d"

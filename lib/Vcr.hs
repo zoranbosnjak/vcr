@@ -13,15 +13,13 @@ module Vcr where
 import           GHC.Generics (Generic)
 import           Data.Text as Text
 import           Data.Aeson
-import           Data.Maybe
+import qualified Data.Aeson.Encode.Pretty as AesonP
 import qualified Data.List.NonEmpty as NE
 import           Control.Monad
 import           Control.Monad.Catch
 import           Control.Monad.Trans.Maybe
 import           Pipes
 import qualified Pipes.Prelude as PP
-import qualified Text.Regex.TDFA as Reg
-import qualified Text.Regex.TDFA.Text as Reg
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 
@@ -35,8 +33,7 @@ type TrackId = Text
 type SequenceNumber = Periodic 0x100000000
 
 data VcrException
-    = RegexCompileError String
-    | PlayError String
+    = PlayError String
     | IndexError String
     | DecodeError String
     deriving Show
@@ -52,6 +49,11 @@ decodeJSON :: (MonadThrow m, FromJSON a) => BS.ByteString -> m a
 decodeJSON s = case eitherDecodeStrict s of
     Left e -> throwM $ DecodeError $ show s ++ ", error: " ++ e
     Right val -> return val
+
+-- | Encode (pretty) to JSON.
+encodeJSONPrettyL :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
+encodeJSONPrettyL = AesonP.encodePretty'
+    AesonP.defConfig {AesonP.confCompare = compare}
 
 data Event a = Event
     { eChannel      :: Channel          -- channel name
@@ -96,21 +98,70 @@ jsonRecorder rec = \logM -> PP.map encodeJSON >-> rec logM
 data Direction = Forward | Backward
     deriving (Generic, Eq, Enum, Bounded, Show)
 
+-- | Available text based filters.
+data TextFilter
+    = TextFilterMatch Text      -- match exactly
+    | TextFilterIsPrefix Text   -- starts with given text
+    | TextFilterIsSuffix Text   -- ends with given text
+    | TextFilterIsInfix Text    -- contains given text
+    deriving (Generic, Eq, Show, ToJSON, FromJSON)
+
+applyTextFilter :: TextFilter -> Text -> Bool
+applyTextFilter = \case
+    TextFilterMatch t -> (==) t
+    TextFilterIsPrefix t -> Text.isPrefixOf t
+    TextFilterIsSuffix t -> Text.isSuffixOf t
+    TextFilterIsInfix t -> Text.isInfixOf t
+
+-- | Event filters.
+-- We want predicates of type (Event a -> Bool),
+-- but this is in general not serializable (over http).
+-- So, instead of a function, use this (serializable) data structure.
+data Filter
+    = FChannel TextFilter
+    | FSession TextFilter
+    | FTrack TextFilter
+    | And Filter Filter
+    | Or Filter Filter
+    | Not Filter
+    | Pass
+    deriving (Generic, Eq, Show, ToJSON, FromJSON)
+
+applyFilter :: Filter -> Event a -> Bool
+applyFilter flt event = case flt of
+    FChannel tf -> applyTextFilter tf (eChannel event)
+    FSession tf -> applyTextFilter tf (eSessionId event)
+    FTrack tf   -> applyTextFilter tf (eTrackId event)
+    And f1 f2 -> applyFilter f1 event && applyFilter f2 event
+    Or f1 f2 -> applyFilter f1 event || applyFilter f2 event
+    Not f -> not $ applyFilter f event
+    Pass -> True
+
+-- | Helper function to construct channel filter.
+onlyChannels :: Foldable t => t Channel -> Filter
+onlyChannels = Prelude.foldr (Or . FChannel . TextFilterMatch) (Not Pass)
+
 -- | Player methods structure.
 data Player m ix a = Player
     { limits    :: m (ix, ix)       -- (first, last) index of a player
     , middle    :: ix -> ix -> m ix -- get valid index near the middle of the interval
     , peekItem  :: ix -> m a        -- peek item at given index
     , runPlayer :: Direction -> ix
-        -- Optional regex, representing channel filter.
-        -- This needs to be simple type, to be able
-        -- to encode this argument over http(s).
         -- When a filter is active, there might also
         -- be a timeout interval. This makes a producer
         -- 'leaky', to yield some (otherwise filtered out) event,
         -- so that consumer can progress.
-        -> Maybe (Text, Maybe MonoTimeNs)
+        -> Maybe (Filter, Maybe NominalDiffTime)
         -> Producer (ix, a) m ()
+    }
+
+-- | Dummy player.
+mkDummyPlayer :: MonadThrow m => Player m ix a
+mkDummyPlayer = Player
+    { limits = throwM $ PlayError "dummy player"
+    , middle = \_ix1 _ix2 -> throwM $ PlayError "dummy player"
+    , peekItem = \_ix -> throwM $ PlayError "dummy player"
+    , runPlayer = \_direction _ix _flt -> return ()
     }
 
 -- | Make one step from given index and return next (ix, a).
@@ -136,7 +187,10 @@ instance Monad m => Functor (Player m ix) where
 -- Correct 'Ord' instance is important for 'bisect' function.
 data Index
     = Index (NE.NonEmpty Integer)
-    deriving (Generic, Eq, Ord, Show, ToJSON, FromJSON)
+    deriving (Generic, Eq, Ord, ToJSON, FromJSON)
+
+instance Show Index where
+    show (Index lst) = show $ NE.toList lst
 
 -- | Index convesion functions.
 -- It is important to preserve ordering, that is:
@@ -171,26 +225,14 @@ reindex player = Player
             return (toIndex a, b))
     }
 
--- | Compile regular expression
-regexCompile :: Text -> Either String Reg.Regex
-regexCompile = Reg.compile Reg.defaultCompOpt (Reg.ExecOption False)
-
--- | Create Channel predicate out of compiled regex.
-mkPredicate :: Reg.RegexLike regex source => regex -> source -> Bool
-mkPredicate re ch = isJust $ Reg.matchOnce re ch
-
--- | Turn regex filter to a predicate function.
-chPredicate :: Text -> Either String (Channel -> Bool)
-chPredicate t = mkPredicate <$> regexCompile t
-
 -- | Filter events.
 -- When timeout expires, allow first event to pass through,
 -- regardless of the filter.
-dashEvents :: Functor m => Direction -> ((Channel -> Bool), Maybe MonoTimeNs)
+dashEvents :: Functor m => Direction -> (Filter, Maybe NominalDiffTime)
     -> Pipe (ix, Event a) (ix, Event a) m r
 dashEvents _direction (flt, Nothing) = forever $ do
     (ix, event) <- await
-    when (flt $ eChannel event) $ do
+    when (applyFilter flt event) $ do
         yield (ix, event)
 dashEvents direction (flt, Just timeout) = do
     (ix, event) <- await
@@ -202,9 +244,9 @@ dashEvents direction (flt, Just timeout) = do
         Backward -> (<=)
     loop event = do
         (ix, event') <- await
-        case flt (eChannel event') of
+        case applyFilter flt event' of
             False -> do
-                let dt = eTimeMono event' - eTimeMono event
+                let dt = diffUTCTime (eTimeUtc event') (eTimeUtc event)
                 case dt `compareOperator` timeout of
                     False -> loop event
                     True -> do
@@ -215,14 +257,11 @@ dashEvents direction (flt, Just timeout) = do
                 loop event'
 
 -- | Create channel filter pipe.
-dashEvents' :: MonadThrow m
-    => Direction
-    -> Maybe (Text, Maybe MonoTimeNs)
+dashEvents' :: Functor m => Direction -> Maybe (Filter, Maybe NominalDiffTime)
     -> Pipe (ix, Event a) (ix, Event a) m r
 dashEvents' _direction Nothing = cat
-dashEvents' direction (Just (flt, timeout)) = case chPredicate flt of
-    Left e -> throwM $ RegexCompileError e
-    Right predicate -> dashEvents direction (predicate, timeout)
+dashEvents' direction (Just (flt, timeout)) =
+    dashEvents direction (flt, timeout)
 
 -- | Find (ix, item) where item condition changes from '<', to '>='.
 bisect :: (Ord ix, Monad m) =>
@@ -237,10 +276,9 @@ bisect player checkItem = do
     go i1 i2 = do
         guard (i2 >= i1)
         (a1, x1) <- lift $ probe i1
-        guard (x1 /= GT)
-        case x1 == EQ of
-            True -> return (i1, a1)   -- exact match
-            False -> do
+        case x1 == LT of
+            False -> return (i1, a1)   -- found it
+            True -> do
                 guard (x1 == LT)
                 i <- lift $ middle player i1 i2
                 case i == i1 of

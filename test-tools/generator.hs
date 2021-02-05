@@ -6,9 +6,9 @@
 
 module Main where
 
-import qualified Control.Exception as Ex
 import           Control.Concurrent (threadDelay)
 import           Options.Applicative
+import           UnliftIO
 import qualified Network.Socket as Net
 import qualified Network.Socket.ByteString as NB
 import qualified Network.Multicast as Mcast
@@ -45,7 +45,7 @@ parser = (,,)
 
 main :: IO ()
 main = execParser options >>= \(out, payload, rate) -> do
-    Ex.bracket (acquire out) release $ \(sock, dst) -> do
+    bracket (acquire out) release $ \(sock, dst) -> do
         let loop n = do
             let msg = BS.singleton n <> BS.replicate (toEnum payload - 1) 0
             NB.sendAllTo sock msg dst

@@ -1,7 +1,13 @@
 
-module Time where
+module Time
+    ( module Time
+    , module Data.Time
+    , module Data.Time.Clock
+    )
+where
 
 import           Data.Time
+import           Data.Time.Clock
 import qualified Data.Time.Clock.POSIX as DTP
 import qualified System.Clock
 import           Numeric (showFFloat)

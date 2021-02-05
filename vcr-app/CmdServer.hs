@@ -7,8 +7,8 @@ module CmdServer where
 
 -- standard imports
 import           Control.Monad.Trans.Except
-import           Control.Exception (try, IOException)
 import           GHC.Generics (Generic)
+import           UnliftIO
 import           Options.Applicative
 import           Data.String (fromString)
 import           Data.Text (Text)
@@ -21,30 +21,23 @@ import           Network.Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import           Network.HTTP.Types
 import           Data.Aeson
-import qualified Data.Aeson.Encode.Pretty as AesonP
 import           Pipes
 import qualified Pipes.Safe as PS
 import qualified Pipes.Prelude as PP
 
 -- local imports
+import           Logging
 import           Common
 import           Vcr
 import           Time
 import           Udp
-import           Streaming.Disk
-import           Streaming.Http
-
-data Store
-    = StoreFile FilePath
-    | StoreDir FilePath
-    | StoreHttp String
-    deriving (Generic, Eq, Show)
+import           Streaming
 
 -- | Speciffic command options.
 data CmdOptions = CmdOptions
     { optVerbose    :: Maybe Priority
     , optSyslog     :: Maybe Priority
-    , optStore      :: Store
+    , optSource     :: Source
     , optHttp       :: (String, Warp.Port)
     } deriving (Generic, Eq, Show)
 
@@ -56,7 +49,7 @@ options = CmdOptions
     <*> optional (option auto
         ( long "syslog" <> metavar "LEVEL"
        <> help ("Set syslog verbosity level, one of: " ++ show levels)))
-    <*> (storeFile <|> storeDir <|> storeHttp)
+    <*> (srcFile <|> srcDir <|> srcHttp)
     <*> httpOptions
   where
     levels = [minBound..maxBound] :: [Priority]
@@ -64,26 +57,25 @@ options = CmdOptions
         <$> strOption (long "http" <> metavar "IP")
         <*> option auto (long "httpPort" <> metavar "PORT")
 
-    storeFile = StoreFile
-        <$> strOption (long "file" <> metavar "FILE" <> help "file backend")
-    storeDir = StoreDir
-        <$> strOption (long "dir" <> metavar "FILE" <> help "directory backend (base filename)")
-    storeHttp = StoreHttp
-        <$> strOption (long "url" <> metavar "URL" <> help "url backend")
+    srcFile = SFile
+        <$> pure TextEncoding
+        <*> strOption (long "file" <> metavar "FILE" <> help "file backend")
 
--- | Encode (pretty) to JSON.
-encodePretty :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
-encodePretty = AesonP.encodePretty'
-    AesonP.defConfig {AesonP.confCompare = compare}
+    srcDir = SDirectory
+        <$> pure TextEncoding
+        <*> strOption (long "dir" <> metavar "FILE" <> help "directory backend (base filename)")
+
+    srcHttp = SHttp
+        <$> strOption (long "url" <> metavar "URL" <> help "url backend")
 
 httpServer ::
     (Priority -> String -> IO ())
     -> MonoTimeNs
     -> UtcTime
-    -> Store
+    -> Source
     -> (String, Warp.Port)
     -> IO ()
-httpServer logM startTimeMono startTimeUtc store (ip, port) = do
+httpServer logM startTimeMono startTimeUtc src (ip, port) = do
     let settings =
             Warp.setPort port $
             Warp.setHost (fromString ip) $
@@ -96,7 +88,7 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
         jsonEncFormat :: Data.Aeson.ToJSON a => a -> BSL.ByteString
         jsonEncFormat = case "pretty" `elem` (fst <$> queryString request) of
             False -> encode
-            True -> encodePretty
+            True -> encodeJSONPrettyL
 
         withLog ::
             ([Text] -> StdMethod -> IO ResponseReceived)
@@ -156,13 +148,7 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
         onError status = either (\e -> Left (status,e)) Right
 
         player :: Player (PS.SafeT IO) Index UdpEvent
-        player = case store of
-            StoreFile path -> reindex $
-                mkFilePlayer $ FileArchive TextEncoding path
-            StoreDir base -> reindex $
-                mkDirectoryPlayer $ DirectoryArchive TextEncoding base
-            StoreHttp url ->
-                mkHttpPlayer $ HttpArchive url
+        player = mkPlayer src
 
         go ["ping"] GET = respond $ responseLBS
             status200
@@ -234,7 +220,7 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
                         (either throwE pure . eitherDecodeStrict')
                 limit <- getLimit
                 includeIndex <- getIncludeIndex
-                timeout <- withArgValue "timeout"
+                to <- withArgValue "timeout"
                     (pure Nothing)
                     (throwE "timeout argument not present")
                     (either throwE pure . eitherDecodeStrict')
@@ -243,9 +229,9 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
                     (throwE "ch argument not present")
                     (either throwE (pure . Just) . eitherDecodeStrict')
                 let producer :: Producer (Index, UdpEvent) (PS.SafeT IO) ()
-                    producer = mkPlayer player direction ix $ case flt of
+                    producer = runPlayer player direction ix $ case flt of
                         Nothing -> Nothing
-                        Just val -> Just (val, timeout)
+                        Just val -> Just (val, to)
                 return (producer >-> limit, includeIndex)
             case eArgs of
                 Left err -> do
@@ -260,8 +246,8 @@ httpServer logM startTimeMono startTimeUtc store (ip, port) = do
                                         True  -> encodeJSON (ix, event)
                                 write $ BSBB.byteString $ line <> "\n"
                                 flush
-                        try (PS.runSafeT $ runEffect effect) >>= \case
-                            Left (e :: IOException) -> logM DEBUG $ show e
+                        tryIO (PS.runSafeT $ runEffect effect) >>= \case
+                            Left e -> logM DEBUG $ show e
                             Right _ -> return ()
           where
             getIncludeIndex :: Monad m => ExceptT String m Bool
@@ -294,7 +280,7 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
             logM "main" INFO $ "uptime: " ++ uptime ++ ", " ++ version
 
         -- http server
-        , httpServer (logM "main") startTimeMono startTimeUtc (optStore opt) (optHttp opt)
+        , httpServer (logM "main") startTimeMono startTimeUtc (optSource opt) (optHttp opt)
         ]
 
     logM "main" NOTICE $ "process terminated, index: " ++ show ix

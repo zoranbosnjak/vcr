@@ -9,9 +9,6 @@
 
 module Common
     ( Prog, Args, Version, Command, GhcBase, WxcLib
-    , LoggerName
-    , ErrorMsg
-    , Priority(..)
     , threadDelaySec
     , runAll
     , periodic
@@ -22,7 +19,6 @@ module Common
     , hexlify, unhexlify
     , Alarm(..), newAlarmIO, runAlarm, refreshAlarm, getAlarm
     , UpdatingVar(..), newUpdatingVarIO, updateVar, restartOnUpdate
-    , setupLogging
     , newline
     )
   where
@@ -30,20 +26,13 @@ module Common
 import           Control.Monad
 import           Control.Concurrent.STM
 import           Control.Concurrent (threadDelay)
-import           Control.Concurrent.Async (race)
 import           Data.Bool
-import           Data.Maybe
+import           UnliftIO.Async (race)
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Base16 as B16
 import           Data.Word (Word8)
-
-import qualified System.Log.Logger as Log
-import           System.Log.Logger (Priority(..))
-import           System.Log.Handler.Simple (verboseStreamHandler)
-import           System.Log.Handler.Syslog (openlog, Option(PID), Facility(USER))
-import           System.IO
 
 type Prog = String
 type Args = [String]
@@ -52,25 +41,29 @@ type GhcBase = String
 type WxcLib = String
 type Command = Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()
 
-type LoggerName = String
-type ErrorMsg = String
+data UpdatingVar a = UpdatingVar (TVar a) (TQueue a)
 
-data UpdatingVar a = UpdatingVar a (TQueue a)
-
--- | Create UpdatingVar
-newUpdatingVarIO :: a ->  IO (UpdatingVar a)
-newUpdatingVarIO val = UpdatingVar <$> pure val <*> newTQueueIO
+-- | Create 'UpdatingVar'
+newUpdatingVarIO :: a -> IO (UpdatingVar a)
+newUpdatingVarIO val = UpdatingVar <$> newTVarIO val <*> newTQueueIO
 
 -- | Update 'UpdatingVar'
-updateVar :: UpdatingVar a -> a -> STM ()
-updateVar (UpdatingVar _initial queue) val = writeTQueue queue val
+updateVar :: UpdatingVar a -> (a -> Maybe a) -> STM ()
+updateVar (UpdatingVar var queue) f = do
+    val <- readTVar var
+    case f val of
+        Nothing -> return ()
+        Just val' -> do
+            writeTVar var val'
+            writeTQueue queue val'
 
 -- | Restart process on variable update.
-restartOnUpdate :: UpdatingVar a -> (TVar a -> IO b) -> IO b
-restartOnUpdate (UpdatingVar initial queue) act = go initial where
+restartOnUpdate :: UpdatingVar a -> (a -> IO b) -> IO b
+restartOnUpdate (UpdatingVar tvar queue) act = do
+    atomically (readTVar tvar) >>= go
+  where
     go x = do
-        var <- newTVarIO x
-        race (act var) (atomically $ readTQueue queue) >>= \case
+        race (act x) (atomically $ readTQueue queue) >>= \case
             Left a -> return a
             Right y -> go y
 
@@ -160,43 +153,6 @@ unhexlify st = do
     let (a,b) = B16.decode $ BS8.pack st
     guard $ BS.null b
     return a
-
--- | Setup logging, return logM function.
-setupLogging :: Prog -> String -> Maybe Priority -> Maybe Priority
-    -> Maybe (Priority -> String -> String -> IO ())
-    -> IO (LoggerName -> Priority -> String -> IO ())
-setupLogging pName cmdName optVerbose optSyslog optAux = do
-
-    -- setup logging
-    when (isJust optVerbose || isJust optSyslog) $ do
-        Log.updateGlobalLogger Log.rootLoggerName
-            (Log.setLevel minBound . Log.removeHandler)
-
-        -- console logger
-        runMaybe optVerbose $ \level -> do
-            hConsole <- verboseStreamHandler stdout level
-            Log.updateGlobalLogger Log.rootLoggerName (Log.addHandler hConsole)
-
-        -- syslog
-        runMaybe optSyslog $ \level -> do
-            sl <- openlog (pName) [PID] USER level
-            Log.updateGlobalLogger Log.rootLoggerName (Log.addHandler sl)
-
-    let logM :: LoggerName -> Priority -> String -> IO ()
-        logM name prio s = do
-            Log.logM fullName prio msg
-            case optAux of
-                Nothing -> return ()
-                Just func -> func prio cmdName s
-          where
-            fullName = pName ++ "/" ++ cmdName ++ "/" ++  name
-            -- Make sure that a message is not too long (problems with syslog).
-            n = 1000
-            msg = case Prelude.length s > n of
-                True -> Prelude.take n s ++ "..."
-                False -> s
-
-    return logM
 
 -- | Newline character, represented as Word8 (ByteString)
 newline :: Word8

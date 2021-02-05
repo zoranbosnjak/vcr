@@ -8,9 +8,7 @@ module Main where
 
 import           Control.Monad
 import           Control.Monad.Fix
-import qualified Control.Exception as Ex
-import           Control.Concurrent.STM
-import           Control.Concurrent.Async
+import           UnliftIO
 import           Control.Concurrent (threadDelay)
 import           Options.Applicative
 import qualified Network.Socket as Net
@@ -58,7 +56,7 @@ main = execParser options >>= \(addr, rate) -> do
                 <*> swapTVar cntErr 0
                 <*> readTVar cntErrTotal
             putStrLn $ "ok: " ++ show c1 ++ ", err: " ++ show c2 ++ ", errTotal: " ++ show c3
-    withAsync report $ \_ -> Ex.bracket (acquire addr) release $ \sock -> do
+    withAsync report $ \_ -> bracket (acquire addr) release $ \sock -> do
         let loop n = do
                 x <- getFirst sock
                 atomically $ case x == n of

@@ -1,12 +1,15 @@
 { mkDerivation, aeson, aeson-pretty, base, base16-bytestring
 , base64-bytestring, bytestring, clock, containers, deepseq, deseo
 , directory, ekg, exceptions, filepath, hslogger, hsyslog
-, http-client, http-client-tls, http-types, megaparsec, network
-, network-multicast, optparse-applicative, pipes, pipes-concurrency
-, pipes-safe, process, QuickCheck, random, stdenv, stm, tasty
-, tasty-hunit, tasty-quickcheck, template-haskell, temporary, text
-, text-format, time, transformers, unix, unliftio
-, unordered-containers, uuid, vector, wai, warp, wx, wxcore
+, http-client, http-client-tls, http-types, keera-callbacks
+, keera-hails-mvc-view, keera-hails-reactive-cbmvar
+, keera-hails-reactive-wx, keera-hails-reactivevalues, megaparsec
+, microlens-platform, network, network-multicast
+, optparse-applicative, pipes, pipes-concurrency, pipes-safe
+, process, QuickCheck, random, stdenv, stm, tasty, tasty-hunit
+, tasty-quickcheck, template-haskell, temporary, text, text-format
+, time, transformers, unix, unliftio, unordered-containers, uuid
+, vector, wai, warp, wx, wxcore
 }:
 mkDerivation {
   pname = "vcr";
@@ -16,8 +19,10 @@ mkDerivation {
     aeson aeson-pretty base base16-bytestring base64-bytestring
     bytestring clock containers deepseq deseo directory ekg exceptions
     filepath hslogger hsyslog http-client http-client-tls http-types
-    megaparsec network network-multicast optparse-applicative pipes
-    pipes-concurrency pipes-safe process QuickCheck stm
+    keera-callbacks keera-hails-mvc-view keera-hails-reactive-cbmvar
+    keera-hails-reactive-wx keera-hails-reactivevalues megaparsec
+    microlens-platform network network-multicast optparse-applicative
+    pipes pipes-concurrency pipes-safe process QuickCheck stm
     template-haskell temporary text text-format time transformers unix
     unliftio unordered-containers uuid vector wai warp wx wxcore
   ];

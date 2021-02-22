@@ -1,5 +1,5 @@
 #! /usr/bin/env nix-shell
-#! nix-shell <nixpkgs> -i runghc -p "ghc.withPackages (x: [ x.optparse-applicative x.network x.network-multicast x.async ])"
+#! nix-shell <nixpkgs> -i runghc -p "ghc.withPackages (x: [ x.optparse-applicative x.network x.network-multicast x.async x.unliftio ])"
 
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -25,14 +25,21 @@ type TTL = Int
 type Payload = Int
 type Rate = Double
 
+data Direction
+    = Forward
+    | Backward
+    deriving (Eq, Show)
+
 data Destination
     = Unicast Ip Port
     | Multicast Ip Port Ip
     deriving (Eq, Show)
 
-parser :: Parser (Destination, Rate)
-parser = (,)
-    <$> (parseUnicast <|> parseMulticast)
+parser :: Parser (Direction, Destination, Rate)
+parser = (,,)
+    <$> (flag' Backward ( long "backward" <> help "assume backward replay")
+        <|> pure Forward)
+    <*> (parseUnicast <|> parseMulticast)
     <*> option auto (long "rate" <> value 1 <> showDefault
         <> help "check interval (seconds)")
   where
@@ -45,11 +52,14 @@ parser = (,)
         <*> strOption (long "localif" <> help "Local interface Ip")
 
 main :: IO ()
-main = execParser options >>= \(addr, rate) -> do
+main = execParser options >>= \(direction, addr, rate) -> do
     cntOk <- newTVarIO (0::Int)
     cntErr <- newTVarIO (0::Int)
     cntErrTotal <- newTVarIO (0::Integer)
-    let report = forever $ do
+    let operator = case direction of
+            Forward -> (+)
+            Backward -> (-)
+        report = forever $ do
             threadDelay $ round $ (1000*1000 * rate)
             (c1,c2,c3) <- atomically $ (,,)
                 <$> swapTVar cntOk 0
@@ -65,10 +75,10 @@ main = execParser options >>= \(addr, rate) -> do
                         modifyTVar cntErr succ
                         modifyTVar cntErrTotal succ
 
-                loop (x+1)
+                loop (x `operator` 1)
         x <- getFirst sock
         atomically $ modifyTVar cntOk succ
-        loop (x+1)
+        loop (x `operator` 1)
   where
     getFirst sock = fix $ \loop -> do
         msg <- fst <$> NB.recvFrom sock (2^(16::Int))

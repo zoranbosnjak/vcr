@@ -234,7 +234,7 @@ httpServer logM startTimeMono startTimeUtc sesId config logAlarms cfgMethod (ip,
             "404 - Not Found\n"
 
 -- | Single UDP input handler.
-singleInput :: SessionId -> (Priority -> String -> IO ()) -> (UdpEvent -> STM ())
+singleInput :: SessionId -> (Priority -> String -> IO ()) -> (Event UdpContent -> STM ())
     -> Channel -> UdpIn -> IO ()
 singleInput sesId logM consume ch i = do
     trackId <- Data.UUID.toText <$> nextRandom
@@ -267,7 +267,7 @@ singleInput sesId logM consume ch i = do
 -- Process configured inputs.
 processInputs :: SessionId
     -> (Priority -> String -> IO ())
-    -> (UdpEvent -> STM ())
+    -> (Event UdpContent -> STM ())
     -> STM (Map.Map Channel UdpIn)
     -> IO ()
 processInputs sesId logM consume getInputs = do
@@ -321,7 +321,7 @@ processInputs sesId logM consume getInputs = do
 runRecorder ::
     (Priority -> String -> IO ())       -- log message
     -> STM (Maybe (FilePath, Rotate))   -- get configuration
-    -> STM UdpEvent                     -- get value to write
+    -> STM (Event UdpContent)           -- get value to write
     -> IO ()
 runRecorder logM' getConfig fetchEvent = do
     logM' INFO "startup"

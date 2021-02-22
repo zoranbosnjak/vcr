@@ -12,8 +12,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified System.Environment
 import           Text.Read (readMaybe)
-import           System.IO (stderr, hPutStrLn)
-import           System.Exit (exitWith, ExitCode(ExitFailure,ExitSuccess))
+import           System.Exit (exitWith, ExitCode(ExitSuccess))
 import qualified System.Remote.Monitoring as Ekg
 
 -- local imports

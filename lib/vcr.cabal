@@ -28,6 +28,13 @@ library
     , Streaming
     , Streaming.Disk
     , Streaming.Http
+    , Data.ReactiveValue.Extended
+    , Graphics.UI.WX.Reactive.Extended
+    , Replay
+    , Replay.Controller
+    , Replay.Engine
+    , Replay.Types
+    , Replay.View.Wx
   -- other-modules:
   -- other-extensions:
   -- hs-source-dirs:
@@ -44,6 +51,7 @@ library
   build-depends:
     base < 5
     , unliftio
+    , microlens-platform
     , exceptions
     , optparse-applicative
     , ekg
@@ -82,6 +90,11 @@ library
     , pipes-safe
     , wx
     , wxcore
+    , keera-hails-reactivevalues
+    , keera-hails-reactive-cbmvar
+    , keera-hails-reactive-wx
+    , keera-hails-mvc-view
+    , keera-callbacks
     , http-types
     , http-client
     , http-client-tls

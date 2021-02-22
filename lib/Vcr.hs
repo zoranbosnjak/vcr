@@ -88,7 +88,8 @@ instance (FromJSON a) => FromJSON (Event a) where
 
 -- | Streaming components
 
-type Recorder m a r = (Text -> m ()) -> Consumer a m r
+type LogAction m = Text -> m ()
+type Recorder m a r = LogAction m -> Consumer a m r
 
 -- | Create JSON based recorder from ByteString recorder.
 jsonRecorder :: (ToJSON a, Functor m) => Recorder m BS.ByteString r -> Recorder m a r

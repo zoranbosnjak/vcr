@@ -16,14 +16,10 @@ vcr custom --program "</abs/path/to/this/script>" --validate
 -}
 
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE LambdaCase #-}
 
 -- standard imports
-import           Options.Applicative
-import           Control.Monad
 import qualified Data.Text as T
 import qualified Data.ByteString as BS
-import           Data.Time
 import           Data.List (nub)
 import           Data.Bool
 import           Data.Char (toUpper)
@@ -31,26 +27,22 @@ import           Data.Word
 import           Text.Printf
 import           System.Directory (getDirectoryContents)
 import           System.FilePath ((</>))
-import           Pipes
 import qualified Pipes.Safe as PS
 import qualified Pipes.Prelude as PP
 
 -- VCR imports
-import           Common (hexlify)
 import           Replay
-import qualified Udp
-import           Time
-import           Vcr
 
 -- Asterix processor
 import qualified Data.Asterix as Ast
 import qualified Data.BitString as Bits
 
 -- List of recorders.
-recorders :: [(Name, Recorder)]
+recorders :: [(Name, Source)] -- Replay.GUI.Recorder)]
 recorders =
-    [ ("rec1", "http://127.0.0.1:12345")
-    , ("rec2", "https://127.0.0.1:12346")
+    [ ("dir1", SDirectory TextEncoding "rec/recording")
+    , ("rec1", SHttp "http://127.0.0.1:12345")
+    , ("rec2", SHttp "https://127.0.0.1:12346")
     -- add more recorders as necessary
     ]
 
@@ -78,11 +70,11 @@ channelMaps =
 -- | This is an example dump function.
 -- In this example, show utc time, channel name and
 -- the first part of the datagram.
-dump :: PrintfType t => Event Udp.UdpContent -> t
+dump :: PrintfType t => Event UdpContent -> t
 dump evt = printf "%s: %-10s: 0x%-10s...\n"
     (tf $ eTimeUtc evt)
     (T.take 10 $ eChannel evt)
-    (fmap toUpper $ take 10 $ hexlify $ Udp.udpDatagram $ eValue evt)
+    (fmap toUpper $ take 10 $ hexlify $ udpDatagram $ eValue evt)
   where
     tf = formatTime defaultTimeLocale "%H:%M:%S%3Q"
 
@@ -94,14 +86,14 @@ prepend b = PP.map (\bs -> BS.singleton b <> bs)
 -- It manipulates timestamp in some asterix records,
 -- such that it looks like the record was just generated.
 -- Take into consideration original delay when restamping.
-dgRestamp :: MonadIO m => Ast.Profiles -> Pipe (Event Udp.UdpContent) BS.ByteString m ()
+dgRestamp :: MonadIO m => Ast.Profiles -> Pipe (Event UdpContent) BS.ByteString m ()
 dgRestamp uaps = forever $ do
     event <- await
     now <- tod <$> liftIO getUtcTime
     yield $ processDatagram
         now
         (tod $ eTimeUtc event)
-        (Udp.udpDatagram $ eValue event)
+        (udpDatagram $ eValue event)
   where
 
     tod :: UtcTime -> Ast.EValue
@@ -142,61 +134,66 @@ dgRestamp uaps = forever $ do
                         Ast.fromRaw (t4 :: Int) dsc
 
 -- | Extract datagram from event.
-dg :: Monad m => Pipe (Event Udp.UdpContent) BS.ByteString m ()
-dg = PP.map (Udp.udpDatagram . eValue)
+dg :: Monad m => Pipe (Event UdpContent) BS.ByteString m ()
+dg = PP.map (udpDatagram . eValue)
 
 -- Send event to UDP unicast.
-txUnicast :: Udp.Ip -> Udp.Port -> Consumer BS.ByteString (PS.SafeT IO) ()
-txUnicast ip port = Udp.udpWriter (Udp.UdpOutUnicast ip port)
+txUnicast ::
+    Pipe (Event UdpContent) BS.ByteString (PS.SafeT IO) ()
+    -> Ip -> Port -> Output
+txUnicast prefilter ip port = Output
+    (prefilter >-> udpWriter (UdpOutUnicast ip port))
+    ("unicast "++ show ip ++ " " ++ show port)
 
 -- Send event to UDP multicast.
-txMulticast :: Udp.Ip -> Udp.Port -> Udp.Ip -> Udp.TTL
-    -> Consumer BS.ByteString (PS.SafeT IO) ()
-txMulticast ip port localIp ttl =
-    Udp.udpWriter (Udp.UdpOutMulticast ip port (Just localIp) (Just ttl))
+txMulticast ::
+    Pipe (Event UdpContent) BS.ByteString (PS.SafeT IO) ()
+    -> Ip -> Port -> Ip -> TTL -> Output
+txMulticast prefilter ip port localIp ttl = Output
+    (prefilter >-> udpWriter (UdpOutMulticast ip port (Just localIp) (Just ttl)))
+    ("multicast "++ show ip ++ " " ++ show port)
 
-blink :: Double -> Udp.UdpEvent -> Maybe Double
+blink :: Double -> Event UdpContent -> Maybe Double
 blink t _event = Just t
 
-noBlink :: Udp.UdpEvent -> Maybe Double
+noBlink :: Event UdpContent -> Maybe Double
 noBlink _event = Nothing
 
 -- | Replay sessions.
 outputs ::
     Ast.Profiles        -- asterix profiles
     -> [ (Name      -- session name
-       , [ ( Channel                                -- channel name
-           , Udp.UdpEvent -> Maybe Double           -- seconds to switch on active indicator
-           , Udp.UdpEvent -> String                 -- console dump function
-           , Consumer Udp.UdpEvent (PS.SafeT IO) () -- event consumer
-           , String                                 -- tooltip string
-           )
-         ])
-       ]
+       , [ ( Channel        -- channel name
+           , BlinkTime      -- seconds to switch on active indicator
+           , ConsoleDump    -- console dump function
+           , Output         -- event consumer
+           )]
+       )]
 outputs uaps =
     [ ("normal",   -- normal replay
-        [ ("ch1", blink 1.0, dump, dg >-> txUnicast "127.0.0.1" "59001", "local 59001")
-        , ("ch2", blink 0.1, dump, dg >-> txUnicast "127.0.0.1" "59002", "local 59002")
-        , ("ch3", blink 0.2, dump, dg >-> txUnicast "127.0.0.1" "59003", "local 59003")
-        , ("ch4", noBlink,   dump, dg >-> txUnicast "127.0.0.1" "59004", "local 59004")
+        [ ("ch1", blink 1.0, dump, txUnicast dg "127.0.0.1" "59001")
+        , ("ch2", blink 0.1, dump, txUnicast dg "127.0.0.1" "59002")
+        , ("ch3", blink 0.2, dump, txUnicast dg "127.0.0.1" "59003")
+        , ("ch4", noBlink  , dump, txUnicast dg "127.0.0.1" "59004")
+        , ("čšžtest", blink 1.0, dump, txUnicast dg "127.0.0.1" "59005")
         ])
     , ("prepend",   -- prepend byte
-        [ ("ch1", blink 1.0, dump, dg >-> prepend 1 >-> txUnicast "127.0.0.1" "59001", "local 59001")
-        , ("ch2", blink 1.0, dump, dg >-> prepend 2 >-> txUnicast "127.0.0.1" "59002", "local 59002")
-        , ("ch3", blink 1.0, dump, dg >-> prepend 3 >-> txUnicast "127.0.0.1" "59003", "local 59003")
-        , ("ch4", blink 1.0, dump, dg >-> prepend 4 >-> txUnicast "127.0.0.1" "59004", "local 59004")
+        [ ("ch1", blink 1.0, dump, txUnicast (dg >-> prepend 1) "127.0.0.1" "59001")
+        , ("ch2", blink 1.0, dump, txUnicast (dg >-> prepend 2) "127.0.0.1" "59002")
+        , ("ch3", blink 1.0, dump, txUnicast (dg >-> prepend 3) "127.0.0.1" "59003")
+        , ("ch4", blink 1.0, dump, txUnicast (dg >-> prepend 4) "127.0.0.1" "59004")
         ])
     , ("restamp",   -- restamp asterix
-        [ ("ch1", blink 1.0, dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59001", "local 59001")
-        , ("ch2", blink 1.0, dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59002", "local 59002")
-        , ("ch3", blink 1.0, dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59003", "local 59003")
-        , ("ch4", blink 1.0, dump, dgRestamp uaps >-> txUnicast "127.0.0.1" "59004", "local 59004")
+        [ ("ch1", blink 1.0, dump, txUnicast (dgRestamp uaps) "127.0.0.1" "59001")
+        , ("ch2", blink 1.0, dump, txUnicast (dgRestamp uaps) "127.0.0.1" "59002")
+        , ("ch3", blink 1.0, dump, txUnicast (dgRestamp uaps) "127.0.0.1" "59003")
+        , ("ch4", blink 1.0, dump, txUnicast (dgRestamp uaps) "127.0.0.1" "59004")
         ])
     , ("multicast",   -- send to multicast
-        [ ("ch1", blink 1.0, dump, dg >-> txMulticast "239.0.0.1" "59001" "127.0.0.1" 32, "mc 59001")
-        , ("ch2", blink 1.0, dump, dg >-> txMulticast "239.0.0.1" "59002" "127.0.0.1" 32, "mc 59002")
-        , ("ch3", blink 1.0, dump, dg >-> txMulticast "239.0.0.1" "59003" "127.0.0.1" 32, "mc 59003")
-        , ("ch4", blink 1.0, dump, dg >-> txMulticast "239.0.0.1" "59004" "127.0.0.1" 32, "mc 59004")
+        [ ("ch1", blink 1.0, dump, txMulticast dg "239.0.0.1" "59001" "127.0.0.1" 32)
+        , ("ch2", blink 1.0, dump, txMulticast dg "239.0.0.1" "59002" "127.0.0.1" 32)
+        , ("ch3", blink 1.0, dump, txMulticast dg "239.0.0.1" "59003" "127.0.0.1" 32)
+        , ("ch4", blink 1.0, dump, txMulticast dg "239.0.0.1" "59004" "127.0.0.1" 32)
         ])
     ]
 
@@ -229,8 +226,7 @@ main = do
                 Left msg -> error msg
                 Right val -> return val
 
-    -- run gui
-    replayGUI
+    runReplay
         (50*1000) -- console buffer size
         recorders channelMaps (outputs uaps)
 

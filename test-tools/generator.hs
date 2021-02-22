@@ -1,5 +1,5 @@
 #! /usr/bin/env nix-shell
-#! nix-shell <nixpkgs> -i runghc -p "ghc.withPackages (x: [ x.optparse-applicative x.network x.network-multicast ])"
+#! nix-shell <nixpkgs> -i runghc -p "ghc.withPackages (x: [ x.optparse-applicative x.network x.network-multicast x.unliftio ])"
 
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}

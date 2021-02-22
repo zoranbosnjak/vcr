@@ -23,6 +23,10 @@ let
       wxdirect = haskellPackagesNew.callPackage ./nix/wxdirect.nix { };
       wxc = haskellPackagesNew.callPackage ./nix/wxc.nix { };
       deseo = haskellPackagesNew.callPackage ./nix/deseo.nix { };
+      keera-hails-reactivevalues = haskellPackagesNew.callPackage ./nix/keera-hails-reactivevalues.nix { };
+      keera-hails-reactive-cbmvar = haskellPackagesNew.callPackage ./nix/keera-hails-reactive-cbmvar.nix { };
+      keera-hails-reactive-wx = haskellPackagesNew.callPackage ./nix/keera-hails-reactive-wx.nix { };
+      keera-hails-mvc-view = haskellPackagesNew.callPackage ./nix/keera-hails-mvc-view.nix { };
       vcr = vcrLib;
     };
   };
@@ -38,7 +42,9 @@ let
 
   drv = vcrApp.overrideDerivation (oldAttrs: {
     src = builtins.filterSource
-      (path: type: type != "directory" || baseNameOf path != ".git")
+      (path: type:
+          (type != "directory" || baseNameOf path != ".git")
+          && (type != "symlink" || baseNameOf path != "result"))
       ./.;
     preBuild = ''
       export SW_VERSION=$(cat *.cabal | grep "^version:" | awk '{print $2}')
@@ -52,8 +58,8 @@ let
       cp test-tools/generator $out/bin/vcr-generator
       cp test-tools/receiver $out/bin/vcr-receiver
       cp scripts/vcr-custom.sh $out/bin
-      mkdir $out/replay
-      cp replay/* $out/replay
+      mkdir $out/examples
+      cp examples/* $out/examples
     '';
   });
 

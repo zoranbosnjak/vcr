@@ -147,7 +147,7 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
         onError :: Status -> Either e a -> Either (Status,e) a
         onError status = either (\e -> Left (status,e)) Right
 
-        player :: Player (PS.SafeT IO) Index UdpEvent
+        player :: Player (PS.SafeT IO) Index (Event UdpContent)
         player = mkPlayer src
 
         go ["ping"] GET = respond $ responseLBS
@@ -181,7 +181,7 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
             act = do
                 ix <- getIndex "ix"
                 event <- lift $ PS.runSafeT $ peekItem player ix
-                return (event :: UdpEvent)
+                return (event :: Event UdpContent)
 
         go ["next"] GET = runExceptT act >>= respondJson where
             act = do
@@ -193,7 +193,7 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
                 result <- lift $ PS.runSafeT $ findEventByTimeUtc player t
                 case result of
                     Nothing -> return Nothing
-                    Just (ix, _ :: UdpEvent) -> return (Just ix)
+                    Just (ix, _ :: Event UdpContent) -> return (Just ix)
 
         -- stream events from the recording files
         --  - optionally starting from some index
@@ -228,7 +228,7 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
                     (pure Nothing)
                     (throwE "ch argument not present")
                     (either throwE (pure . Just) . eitherDecodeStrict')
-                let producer :: Producer (Index, UdpEvent) (PS.SafeT IO) ()
+                let producer :: Producer (Index, Event UdpContent) (PS.SafeT IO) ()
                     producer = runPlayer player direction ix $ case flt of
                         Nothing -> Nothing
                         Just val -> Just (val, to)

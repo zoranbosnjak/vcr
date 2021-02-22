@@ -18,7 +18,6 @@ module Common
     , restartOnChange
     , hexlify, unhexlify
     , Alarm(..), newAlarmIO, runAlarm, refreshAlarm, getAlarm
-    , UpdatingVar(..), newUpdatingVarIO, updateVar, restartOnUpdate
     , newline
     )
   where
@@ -40,32 +39,6 @@ type Version = String
 type GhcBase = String
 type WxcLib = String
 type Command = Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()
-
-data UpdatingVar a = UpdatingVar (TVar a) (TQueue a)
-
--- | Create 'UpdatingVar'
-newUpdatingVarIO :: a -> IO (UpdatingVar a)
-newUpdatingVarIO val = UpdatingVar <$> newTVarIO val <*> newTQueueIO
-
--- | Update 'UpdatingVar'
-updateVar :: UpdatingVar a -> (a -> Maybe a) -> STM ()
-updateVar (UpdatingVar var queue) f = do
-    val <- readTVar var
-    case f val of
-        Nothing -> return ()
-        Just val' -> do
-            writeTVar var val'
-            writeTQueue queue val'
-
--- | Restart process on variable update.
-restartOnUpdate :: UpdatingVar a -> (a -> IO b) -> IO b
-restartOnUpdate (UpdatingVar tvar queue) act = do
-    atomically (readTVar tvar) >>= go
-  where
-    go x = do
-        race (act x) (atomically $ readTQueue queue) >>= \case
-            Left a -> return a
-            Right y -> go y
 
 -- | Alarm with automatic timeout.
 data Alarm a = Alarm

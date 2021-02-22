@@ -18,7 +18,6 @@ import           Pipes.Safe
 
 -- local imports
 import           Common
-import           Vcr
 
 type Host = Text
 type Mcast = Text
@@ -45,9 +44,6 @@ instance FromJSON UdpContent where
         parseData px = do
             s <- px
             maybe (fail "unable to parse") pure (unhexlify s)
-
--- This is what get's recorded when listening on UDP
-type UdpEvent = Event UdpContent
 
 data UdpIn
     = UdpInUnicast Ip Port

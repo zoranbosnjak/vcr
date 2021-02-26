@@ -193,3 +193,49 @@ Features:
 - receives UDP unicast or multicast
 - configurable statistic reporting interval
 
+# Basic test
+
+Start some test UDP generators:
+
+```bash
+vcr-generator --unicast 127.0.0.1 --port 56001 --size 100 --rate 4
+vcr-generator --unicast 127.0.0.1 --port 56002 --size 100 --rate 4
+...
+```
+
+Run capture, use example configuration:
+
+```bash
+mkdir rec
+vcr capture -v INFO --file --path result/examples/vcrconfig.json
+```
+
+Check recording files:
+
+```bash
+ls -l rec/*
+```
+
+Run server:
+```bash
+vcr server -v INFO --dir rec/recording --http "127.0.0.1" --httpPort 12345
+```
+
+Start test UDP receivers:
+
+```bash
+vcr-receiver --unicast 127.0.0.1 --port 59001
+vcr-receiver --unicast 127.0.0.1 --port 59002
+...
+```
+
+Run replay:
+
+```bash
+vcr custom --program "/path/to/examples/replay.hs --asterix /path/to/asterix-data/xml" --run
+```
+- select recorder
+- select output
+- run replay
+- check results on the receiver
+

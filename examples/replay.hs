@@ -38,11 +38,11 @@ import qualified Data.Asterix as Ast
 import qualified Data.BitString as Bits
 
 -- List of recorders.
-recorders :: [(Name, Source)] -- Replay.GUI.Recorder)]
+recorders :: [(Name, Source)]
 recorders =
     [ ("dir1", SDirectory TextEncoding "rec/recording")
-    , ("rec1", SHttp "http://127.0.0.1:12345")
-    , ("rec2", SHttp "https://127.0.0.1:12346")
+    , ("rec1", SHttp "http://127.0.0.1:12345/")
+    , ("rec2", SHttp "https://127.0.0.1:12346/")
     -- add more recorders as necessary
     ]
 

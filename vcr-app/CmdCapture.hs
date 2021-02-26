@@ -91,8 +91,8 @@ options = CmdOptions
   where
     levels = [minBound..maxBound] :: [Priority]
     httpOptions = (,)
-        <$> strOption (long "http" <> metavar "IP")
-        <*> option auto (long "httpPort" <> metavar "PORT")
+        <$> strOption (long "http" <> metavar "IP" <> help "enable http server")
+        <*> option auto (long "httpPort" <> metavar "PORT" <> help "http server port")
     configMethod
         = (flag' () (long "arguments" <> help "use command line arguments")) *> confArguments
         <|> (flag' () (long "file" <> help "use config file")) *> confFile
@@ -125,8 +125,10 @@ options = CmdOptions
                     <*> optional (strOption (long "local" <> metavar "IP"))
         confFile = ConfigFile
             <$> strOption (long "path" <> metavar "FILE" <> help "config file")
-            <*> flag HttpConfigDisabled HttpConfigEnabled (long "enableHttpConfig")
-            <*> flag SigHUPConfigDisabled SigHUPConfigEnabled (long "enableSigHUPConfig")
+            <*> flag HttpConfigDisabled HttpConfigEnabled
+                (long "enableHttpConfig" <> help "enable http reconfiguration")
+            <*> flag SigHUPConfigDisabled SigHUPConfigEnabled
+                (long "enableSigHUPConfig" <> help "enable SIGHUP reconfiguration")
 
 -- | Http server.
 httpServer ::
@@ -234,21 +236,26 @@ httpServer logM startTimeMono startTimeUtc sesId config logAlarms cfgMethod (ip,
             "404 - Not Found\n"
 
 -- | Single UDP input handler.
-singleInput :: SessionId -> (Priority -> String -> IO ()) -> (Event UdpContent -> STM ())
-    -> Channel -> UdpIn -> IO ()
-singleInput sesId logM consume ch i = do
+singleInput ::
+    SessionId
+    -> (Priority -> String -> IO ())
+    -> (Event UdpContent -> STM ())
+    -> Channel
+    -> UdpIn
+    -> IO ()
+singleInput sesId logM consume ch i = forever $ do
     trackId <- Data.UUID.toText <$> nextRandom
     logM INFO $ "ch: " ++ show ch ++ ", " ++ show i ++ " -> trackId:" ++ show trackId
     let src = udpReader i
-    forever $ do
-        result <- tryIO $ PS.runSafeT $ runEffect $
-            src >-> mkEvent trackId firstSequence >-> dst
-        let msg = case result of
-                Left e -> "with exception: " ++ show e
-                Right _ -> "without exception"
-        logM NOTICE $ "Input terminated: " ++ show i ++ ", " ++ msg
-        threadDelaySec 3
-        logM INFO $ "Auto restarting input " ++ show i
+
+    result <- tryIO $ PS.runSafeT $ runEffect $
+        src >-> mkEvent trackId (firstSequence :: SequenceNumber) >-> dst
+    let msg = case result of
+            Left e -> "with exception: " ++ show e
+            Right _ -> "without exception"
+    logM NOTICE $ "Input terminated: " ++ show i ++ ", " ++ msg
+    threadDelaySec 3
+    logM INFO $ "Auto restarting input " ++ show i
   where
     mkEvent trackId = fix $ \loop n -> do
         (datagram, sender) <- await
@@ -258,7 +265,7 @@ singleInput sesId logM consume ch i = do
         case lookupResult of
             (Just senderHost, Just senderPort) -> do
                 yield $ Event ch timeMono timeUtc sesId trackId n $ UdpContent datagram (senderHost, senderPort)
-                loop $ nextSequence n
+                loop $! nextSequence n
             _ -> do
                 liftIO $ logM ERROR $ "ch: " ++ show ch ++ ", " ++ show i ++ " host/port lookup error"
 
@@ -377,7 +384,7 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
 
     config <- newTVarIO emptyConfig
 
-    q <- newBroadcastTChanIO
+    q <- newTBQueueIO 10000
 
     proceed <- case optConfig opt of
         ConfigArguments cfg True -> do
@@ -425,13 +432,12 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
 
             -- recorder
             , do
-                ch <- atomically $ dupTChan q
                 let getConfig = confOutputFile <$> readTVar config
-                runRecorder (logM "recorder") getConfig (readTChan ch)
+                runRecorder (logM "recorder") getConfig (readTBQueue q)
 
             -- input processing
             , processInputs sesId (logM "processInputs")
-                (writeTChan q)
+                (writeTBQueue q)
                 (confInputs <$> readTVar config)
             ]
 

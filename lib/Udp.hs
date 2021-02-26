@@ -6,6 +6,7 @@
 module Udp where
 
 import           GHC.Generics (Generic)
+import qualified UnliftIO as UIO
 import           Control.Monad
 import           Data.Text as Text
 import qualified Data.ByteString as BS
@@ -77,7 +78,9 @@ udpReader addr = bracket acquire Net.close action
             Just mloc -> do
                 Net.setSocketOption sock Net.ReuseAddr 1
                 Mcast.addMembership sock ip mloc
-        Net.bind sock (Net.addrAddress serveraddr)
+        UIO.onException
+            (Net.bind sock (Net.addrAddress serveraddr))
+            (Net.close sock)
         return sock
 
     action sock = forever $ do

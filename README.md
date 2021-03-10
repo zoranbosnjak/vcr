@@ -207,7 +207,7 @@ Run capture, use example configuration:
 
 ```bash
 mkdir rec
-vcr capture -v INFO --file --path result/examples/vcrconfig.json
+vcr capture -v INFO --file --path result/examples/capture-config.json
 ```
 
 Check recording files:
@@ -239,3 +239,8 @@ vcr custom --program "/path/to/examples/replay.hs --asterix /path/to/asterix-dat
 - run replay
 - check results on the receiver
 
+Run configurator:
+
+```bash
+vcr custom --program "/path/to/examples/configurator.hs" --run
+```

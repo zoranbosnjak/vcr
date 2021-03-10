@@ -36,17 +36,14 @@ import           Time
 import           Sequential
 import           Udp
 import           Streaming.Disk
+import           Capture.Types
 
-data Config = Config
-    { confInputs :: Map.Map Channel UdpIn
-    , confOutputFile :: Maybe (FilePath, Rotate)
-    } deriving (Generic, Eq, Show, ToJSON, FromJSON)
-
-emptyConfig :: Config
-emptyConfig = Config
-    { confInputs = mempty
-    , confOutputFile = Nothing
+data InputProcess = InputProcess
+    { inProcess :: Async ()
+    , inStatus :: TVar (TVar Bool)
     }
+
+type InputStatus = Map.Map Channel InputProcess
 
 type Bootstrap = Bool
 
@@ -67,7 +64,6 @@ data CmdOptions = CmdOptions
     , optSyslog     :: Maybe Priority
     , optHttp       :: Maybe (String, Warp.Port)
     , optConfig     :: ConfigMethod
-    , optAlarmHold  :: Double
     } deriving (Generic, Eq, Show)
 
 -- | Option parser.
@@ -81,13 +77,6 @@ options = CmdOptions
        <> help ("Set syslog verbosity level, one of: " ++ show levels)))
     <*> optional httpOptions
     <*> configMethod
-    <*> option auto
-        ( long "alarmHold"
-       <> metavar "SEC"
-       <> help "Hold last alarm (NOTICE) for number of seconds"
-       <> showDefault
-       <> value 60.0
-        )
   where
     levels = [minBound..maxBound] :: [Priority]
     httpOptions = (,)
@@ -137,11 +126,11 @@ httpServer ::
     -> UtcTime
     -> SessionId
     -> TVar Config
-    -> Alarm (Priority, String, String)
+    -> STM InputStatus
     -> ConfigMethod
     -> (String, Warp.Port)
     -> IO ()
-httpServer logM startTimeMono startTimeUtc sesId config logAlarms cfgMethod (ip, port) = do
+httpServer logM startTimeMono startTimeUtc sesId config getStatus cfgMethod (ip, port) = do
     let settings =
             Warp.setPort port $
             Warp.setHost (fromString ip) $
@@ -212,21 +201,12 @@ httpServer logM startTimeMono startTimeUtc sesId config logAlarms cfgMethod (ip,
             _ -> notFound
 
         go ["status"] GET = do
-            alm <- atomically $ do
-                getAlarm logAlarms
-            let logError = case alm of
-                    Nothing -> Null
-                    Just (prio, name, msg) -> object
-                        [ ("priority", String $ T.pack $ show prio)
-                        , ("module", String $ T.pack name)
-                        , ("message", String $ T.pack msg)
-                        ]
-                status = object
-                    [ ("log error", logError)
-                    ]
+            status <- atomically $ do
+                t <- fmap (Map.map inStatus) getStatus
+                mapM (readTVar >=> readTVar) t
             respond $ responseLBS status200
                 [("Content-Type", "application/json")]
-                (jsonEncFormat status)
+                (jsonEncFormat (status :: Map.Map Channel Bool))
 
         go _ _ = notFound
 
@@ -242,20 +222,12 @@ singleInput ::
     -> (Event UdpContent -> STM ())
     -> Channel
     -> UdpIn
-    -> IO ()
-singleInput sesId logM consume ch i = forever $ do
-    trackId <- Data.UUID.toText <$> nextRandom
-    logM INFO $ "ch: " ++ show ch ++ ", " ++ show i ++ " -> trackId:" ++ show trackId
-    let src = udpReader i
-
-    result <- tryIO $ PS.runSafeT $ runEffect $
-        src >-> mkEvent trackId (firstSequence :: SequenceNumber) >-> dst
-    let msg = case result of
-            Left e -> "with exception: " ++ show e
-            Right _ -> "without exception"
-    logM NOTICE $ "Input terminated: " ++ show i ++ ", " ++ msg
-    threadDelaySec 3
-    logM INFO $ "Auto restarting input " ++ show i
+    -> IO InputProcess
+singleInput sesId logM consume ch i = do
+    status <- newTVarIO True >>= newTVarIO
+    InputProcess
+        <$> async (runInput status)
+        <*> pure status
   where
     mkEvent trackId = fix $ \loop n -> do
         (datagram, sender) <- await
@@ -271,40 +243,63 @@ singleInput sesId logM consume ch i = forever $ do
 
     dst = forever $ await >>= liftIO . atomically . consume
 
+    runInput status = forever $ do
+        let retryTimeoutSec = 3.0
+
+        trackId <- Data.UUID.toText <$> nextRandom
+        logM INFO $ "ch: " ++ show ch ++ ", " ++ show i ++ " -> trackId:" ++ show trackId
+        let src = udpReader i
+
+        result <- tryIO $ PS.runSafeT $ runEffect $
+            src >-> mkEvent trackId (firstSequence :: SequenceNumber) >-> dst
+        let msg = case result of
+                Left e -> "with exception: " ++ show e
+                Right _ -> "without exception"
+        logM NOTICE $ "Input terminated: " ++ show i ++ ", " ++ msg
+        -- Status will become 'True' evenutally, when stable long enough,
+        -- that is: no more need for auto restart.
+        -- The network interface might become alive for example.
+        registerDelay (round $ retryTimeoutSec * 1.5 * 1000 * 1000)
+            >>= atomically . writeTVar status
+        threadDelaySec retryTimeoutSec
+        logM INFO $ "Auto restarting input " ++ show i
+
 -- Process configured inputs.
 processInputs :: SessionId
     -> (Priority -> String -> IO ())
     -> (Event UdpContent -> STM ())
     -> STM (Map.Map Channel UdpIn)
+    -> TVar InputStatus
     -> IO ()
-processInputs sesId logM consume getInputs = do
+processInputs sesId logM consume getInputs inputStatus = do
     logM INFO "starting process"
-    active <- newTVarIO mempty
-    loop active mempty `finally` terminate active
+    loop mempty `finally` terminate
   where
-    terminate active = atomically (readTVar active) >>= mapM_ cancel
+    terminate = mask $ \_restore -> do
+        atomically (readTVar inputStatus) >>= mapM_ (cancel . inProcess)
+        atomically (writeTVar inputStatus mempty)
 
-    onStart active ch i = do
+    onStart ch i = do
         logM INFO $ "Starting input, ch: " ++ show ch ++ ", " ++ show i
         mask $ \restore -> do
-            a <- async $ restore $ singleInput sesId logM consume ch i
-            link a
-            atomically $ modifyTVar' active $ Map.insert i a
+            p <- restore $ singleInput sesId logM consume ch i
+            link $ inProcess p
+            atomically $ modifyTVar' inputStatus $ Map.insert ch p
 
-    onStop active ch i = do
+    onStop ch i = do
         logM INFO $ "Stopping input, ch: " ++ show ch ++ ", " ++ show i
         mask $ \_restore -> do
-            Just a <- atomically $ do
-                orig <- readTVar active
-                modifyTVar' active $ Map.delete i
-                return $ Map.lookup i orig
-            cancel a
+            Just p <- atomically $ do
+                orig <- readTVar inputStatus
+                modifyTVar' inputStatus $ Map.delete ch
+                return $ Map.lookup ch orig
+            cancel $ inProcess p
 
-    onRestart active ch (i,j) = do
-        onStop active ch i
-        onStart active ch j
+    onRestart ch (i,j) = do
+        onStop ch i
+        onStart ch j
 
-    loop active current = do
+    loop current = do
         newCfg <- atomically $ do
             newCfg <- getInputs
             when (newCfg == current) retrySTM
@@ -319,11 +314,11 @@ processInputs sesId logM consume getInputs = do
                 return (v, newParam)
             changed = Map.mapMaybeWithKey checkF current
 
-        _ <- Map.traverseWithKey (onStop active) removed
-        _ <- Map.traverseWithKey (onStart active) added
-        _ <- Map.traverseWithKey (onRestart active) changed
+        _ <- Map.traverseWithKey onStop removed
+        _ <- Map.traverseWithKey onStart added
+        _ <- Map.traverseWithKey onRestart changed
 
-        loop active newCfg
+        loop newCfg
 
 runRecorder ::
     (Priority -> String -> IO ())       -- log message
@@ -367,14 +362,7 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
     startTimeMono <- getMonoTimeNs
     startTimeUtc <- getUtcTime
 
-    -- Hold last severe log message for some time,
-    -- so that it can be polled via http as status.
-    logAlarms <- newAlarmIO (optAlarmHold opt)
-    let log2Alarm :: Logger IO
-        log2Alarm name prio msg = when (prio >= NOTICE) $ do
-            atomically $ refreshAlarm logAlarms (prio, name, msg)
-
-    logM <- setupLogging pName "capture" (optVerbose opt) (optSyslog opt) (Just log2Alarm)
+    logM <- setupLogging pName "capture" (optVerbose opt) (optSyslog opt) Nothing
 
     logM "main" INFO $ "startup " ++ show pName ++ ", " ++ version ++ ", " ++ show pArgs
     logM "main" INFO $ show opt
@@ -383,6 +371,7 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
     logM "main" INFO $ "session: " ++ show sesId
 
     config <- newTVarIO emptyConfig
+    inputStatus <- newTVarIO Map.empty
 
     q <- newTBQueueIO 10000
 
@@ -418,16 +407,13 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
 
     when proceed $ do
         ix <- runAll
-            -- handle log alarms
-            [ runAlarm logAlarms
-
             -- periodic uptime logging
-            , periodic 600 $ do
+            [ periodic 600 $ do
                 uptime <- uptimeDaysStr startTimeMono <$> getMonoTimeNs
                 logM "main" INFO $ "uptime: " ++ uptime ++ ", " ++ version
 
             -- http server
-            , httpServer (logM "main") startTimeMono startTimeUtc sesId config logAlarms (optConfig opt)
+            , httpServer (logM "main") startTimeMono startTimeUtc sesId config (readTVar inputStatus) (optConfig opt)
                 `whenSpecified` (optHttp opt)
 
             -- recorder
@@ -439,6 +425,7 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
             , processInputs sesId (logM "processInputs")
                 (writeTBQueue q)
                 (confInputs <$> readTVar config)
+                inputStatus
             ]
 
         logM "main" NOTICE $ "process terminated, index: " ++ show ix

@@ -57,6 +57,17 @@ fetchUrlRaw url = runGetRequest url consumer where
 fetchUrl :: FromJSON a => String -> IO a
 fetchUrl url = fetchUrlRaw url >>= decodeJSON
 
+-- | Send JSON object via PUT method.
+putUrl :: ToJSON a => String -> a -> IO ()
+putUrl url obj = do
+    initialRequest <- HTC.setRequestCheckStatus <$> HTC.parseRequest url
+    let request = initialRequest
+            { HTC.method = "PUT"
+            , HTC.requestBody = HTC.RequestBodyLBS $ encode obj
+            }
+    manager <- mkManager request
+    void $ HTC.httpLbs request manager
+
 -- | Create 'player' from request.
 playUrl :: String -> Producer BS8.ByteString (SafeT IO) ()
 playUrl url = bracket acquire HTC.responseClose $ \h ->

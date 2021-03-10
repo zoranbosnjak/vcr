@@ -35,6 +35,8 @@ library
     , Replay.Engine
     , Replay.Types
     , Replay.View.Wx
+    , Capture.Types
+    , Configurator
   -- other-modules:
   -- other-extensions:
   -- hs-source-dirs:

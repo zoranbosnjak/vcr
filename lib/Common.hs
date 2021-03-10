@@ -17,7 +17,6 @@ module Common
     , whenSpecified
     , restartOnChange
     , hexlify, unhexlify
-    , Alarm(..), newAlarmIO, runAlarm, refreshAlarm, getAlarm
     , newline
     )
   where
@@ -39,41 +38,6 @@ type Version = String
 type GhcBase = String
 type WxcLib = String
 type Command = Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()
-
--- | Alarm with automatic timeout.
-data Alarm a = Alarm
-    { almTimeout :: Double      -- timeout in seconds
-    , almQueue :: TQueue a      -- message queue
-    , almAlm :: TVar (Maybe a)  -- current alarm value
-    }
-
--- | Create alarm
-newAlarmIO :: Double -> IO (Alarm a)
-newAlarmIO t = Alarm
-    <$> pure t
-    <*> newTQueueIO
-    <*> newTVarIO Nothing
-
--- | Run alarm inside IO.
-runAlarm :: Alarm a -> IO ()
-runAlarm (Alarm t q alm) = waitMessage where
-    waitMessage = do
-        atomically (readTQueue q >>= writeTVar alm . Just)
-        expire <- registerDelay $ round $ t * 1000 * 1000
-        waitMessageOrExpire expire
-    waitMessageOrExpire expire = do
-        let expired = readTVar expire >>= bool retry (writeTVar alm Nothing)
-            msgReady = isEmptyTQueue q >>= bool (return ()) retry
-        atomically $ expired `orElse` msgReady
-        waitMessage
-
--- | Refresh alarm with new message.
-refreshAlarm :: Alarm a -> a -> STM ()
-refreshAlarm alm val = writeTQueue (almQueue alm) val
-
--- | Get current alarm value.
-getAlarm :: Alarm a -> STM (Maybe a)
-getAlarm = readTVar . almAlm
 
 -- | Wait for given number of seconds.
 threadDelaySec :: Double -> IO ()

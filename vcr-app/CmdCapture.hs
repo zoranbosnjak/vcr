@@ -362,7 +362,9 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
     startTimeMono <- getMonoTimeNs
     startTimeUtc <- getUtcTime
 
-    logM <- setupLogging pName "capture" (optVerbose opt) (optSyslog opt) Nothing
+    logM <- case optConfig opt of
+        ConfigArguments _cfg True -> return noLogger -- no logging on bootstrap
+        _ -> setupLogging pName "capture" (optVerbose opt) (optSyslog opt) Nothing
 
     logM "main" INFO $ "startup " ++ show pName ++ ", " ++ version ++ ", " ++ show pArgs
     logM "main" INFO $ show opt

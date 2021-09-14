@@ -91,7 +91,7 @@ cabal2nix . > app.nix
 # Running replay in devel mode (inside nix-shell)
 ```bash
 nix-shell
-runhaskell -Wall -ilib -ivcr-app ./replay/example.hs --asterix path/to/xml
+runhaskell -Wall -ilib -ivcr-app ./examples/replay.hs --asterix path/to/xml
 ```
 
 # Http server API

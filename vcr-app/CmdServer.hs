@@ -289,5 +289,5 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
 cmdServer :: ParserInfo Command
 cmdServer = info
     ((runCmd <$> options) <**> helper)
-    (progDesc "Event recorder")
+    (progDesc "Http interface to recording")
 

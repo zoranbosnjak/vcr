@@ -215,6 +215,10 @@ httpServer logM startTimeMono startTimeUtc sesId config getStatus cfgMethod (ip,
             [("Content-Type", "text/plain")]
             "404 - Not Found\n"
 
+-- | Generate short random identifier.
+randomId :: IO T.Text
+randomId = T.take 8 . Data.UUID.toText <$> nextRandom
+
 -- | Single UDP input handler.
 singleInput ::
     SessionId
@@ -246,7 +250,7 @@ singleInput sesId logM consume ch i = do
     runInput status = forever $ do
         let retryTimeoutSec = 3.0
 
-        trackId <- Data.UUID.toText <$> nextRandom
+        trackId <- randomId
         logM INFO $ "ch: " ++ show ch ++ ", " ++ show i ++ " -> trackId:" ++ show trackId
         let src = udpReader i
 
@@ -369,7 +373,7 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
     logM "main" INFO $ "startup " ++ show pName ++ ", " ++ version ++ ", " ++ show pArgs
     logM "main" INFO $ show opt
 
-    sesId <- Data.UUID.toText <$> nextRandom
+    sesId <- randomId
     logM "main" INFO $ "session: " ++ show sesId
 
     config <- newTVarIO emptyConfig

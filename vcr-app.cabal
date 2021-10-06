@@ -3,7 +3,7 @@ cabal-version:       >=1.10
 -- further documentation, see http://haskell.org/cabal/users-guide/
 
 name:                vcr-app
-version:             0.13.2
+version:             1.0.0
 synopsis:            event recorder
 -- description:
 -- bug-reports:

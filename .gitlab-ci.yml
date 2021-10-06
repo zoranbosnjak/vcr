@@ -18,17 +18,6 @@ mirror latest master:
         - nix-build --argstr gitrev $CI_COMMIT_SHORT_SHA
         - nix-store --add-root $TARGET/latest-master-$CI_COMMIT_SHORT_SHA --indirect -r $(readlink result)
 
-mirror latest other:
-    stage: deliver
-    except:
-        - master
-    script:
-        - set -u
-        - mkdir -p $TARGET
-        - rm -f $TARGET/latest-other-*
-        - nix-build --argstr gitrev $CI_COMMIT_SHORT_SHA
-        - nix-store --add-root $TARGET/latest-other-$CI_COMMIT_SHORT_SHA --indirect -r $(readlink result)
-
 mirror manual:
     stage: deliver
     when: manual

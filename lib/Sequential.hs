@@ -1,10 +1,13 @@
-
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+
+-- | This module implements 'Periodic' value which can be
+-- used as a 'sequence number' for the 'Event'.
+-- The value wraps around to 'zero', when reaches a 'Period'.
 
 module Sequential where
 
@@ -26,6 +29,7 @@ class Sequential a where
     countSequential     = go firstSequence where
         go x = x:go (nextSequence x)
 
+-- | For test purposes only. It never wraps to zero.
 instance Sequential Integer where
     sequenceToInteger   = id
     firstSequence       = 0

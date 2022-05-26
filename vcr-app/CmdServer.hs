@@ -3,6 +3,8 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
+-- | VCR 'server' command.
+
 module CmdServer where
 
 -- standard imports

@@ -1,11 +1,9 @@
---------
--- Common functions and definitions
---
-
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+
+-- | Common functions and definitions.
 
 module Common
     ( Prog, Args, Version, Command, GhcBase, WxcLib

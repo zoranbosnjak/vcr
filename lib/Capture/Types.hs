@@ -1,6 +1,8 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
 
+-- | Common type definitions.
+
 module Capture.Types where
 
 import           GHC.Generics (Generic)

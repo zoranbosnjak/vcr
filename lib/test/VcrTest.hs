@@ -3,6 +3,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
+-- | VCR unit and property tests.
+
 module VcrTest where
 
 import           Control.Monad

@@ -9,6 +9,8 @@
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
+-- | Disk streaming unit and property tests.
+
 module DiskTest where
 
 import           Control.Monad

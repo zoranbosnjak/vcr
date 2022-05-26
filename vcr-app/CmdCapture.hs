@@ -3,6 +3,8 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
 
+-- | VCR capture command.
+
 module CmdCapture where
 
 -- standard imports

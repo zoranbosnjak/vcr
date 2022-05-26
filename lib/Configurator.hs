@@ -1,9 +1,10 @@
-
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+
+-- | Recorder configurator GUI application.
 
 module Configurator
     ( runConfigurator

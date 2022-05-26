@@ -1,5 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 
+-- | This module extends 'Graphics.UI.WX.Reactive' module with various widgets.
+
 module Graphics.UI.WX.Reactive.Extended
     -- re-exports
     ( module Graphics.UI.WX.Reactive

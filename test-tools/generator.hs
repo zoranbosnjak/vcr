@@ -4,6 +4,8 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | Simple UDP data generator - for test purposes.
+
 module Main where
 
 import           Control.Concurrent (threadDelay)

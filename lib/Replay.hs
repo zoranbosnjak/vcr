@@ -1,3 +1,4 @@
+-- | This module reexports internal VCR submodules.
 
 module Replay
     ( module Replay.Types

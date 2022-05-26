@@ -2,6 +2,10 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
+-- | This module implements VCR controller.
+-- The controller creates and connects required reactive values,
+-- then starts the main VCR 'engine' process.
+
 module Replay.Controller where
 
 import           Control.Monad

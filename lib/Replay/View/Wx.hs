@@ -6,6 +6,8 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 
+-- | This module implements GUI part of VCR replay.
+
 module Replay.View.Wx where
 
 import           UnliftIO

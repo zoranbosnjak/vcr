@@ -1,3 +1,4 @@
+-- | Monotonic and UTC time routines.
 
 module Time
     ( module Time

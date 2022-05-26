@@ -8,6 +8,8 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
 
+-- | Common VCR data types and helper functions.
+
 module Vcr where
 
 import           GHC.Generics (Generic)

@@ -1,5 +1,8 @@
 {-# LANGUAGE FlexibleContexts #-}
 
+-- | This module extends 'Data.ReactiveValue' module with some
+-- missing functions.
+
 module Data.ReactiveValue.Extended
     -- re-exports
     ( module Data.ReactiveValue

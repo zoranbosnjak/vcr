@@ -1,7 +1,11 @@
-
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
+
+-- | VCR 'custom' command.
+--
+-- The custom command will recompile and run user defined
+-- haskell application.
 
 module CmdCustom where
 

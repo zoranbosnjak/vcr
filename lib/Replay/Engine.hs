@@ -2,6 +2,8 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 
+-- | This module implements main 'replay engine' process.
+
 module Replay.Engine where
 
 import           GHC.Natural

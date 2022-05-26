@@ -4,6 +4,8 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+-- | Simple UDP receiver - for test purposes.
+
 module Main where
 
 import           Control.Monad

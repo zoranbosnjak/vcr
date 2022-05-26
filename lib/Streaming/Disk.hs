@@ -5,6 +5,8 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE BangPatterns #-}
 
+-- | This module implements recording and replay to/from disk.
+
 module Streaming.Disk where
 
 import           GHC.Generics (Generic)

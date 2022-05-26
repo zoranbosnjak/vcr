@@ -1,3 +1,5 @@
+-- | Template haskell helper functions.
+
 module TH ( getEnvVariableExpr ) where
 
 import Language.Haskell.TH (Q, Exp, runIO)

@@ -3,6 +3,9 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
+-- | This module reexports streaming components to/from
+-- various sources (Disk, Http...).
+
 module Streaming
     ( module Streaming
     , FileEncoding (..)

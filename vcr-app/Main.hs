@@ -1,8 +1,9 @@
-
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TemplateHaskell #-}
+
+-- | Main VCR application.
 
 module Main where
 

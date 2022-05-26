@@ -1,6 +1,4 @@
---------
--- Logging framework
---
+-- | VCR logging framework.
 
 module Logging
     ( module Logging

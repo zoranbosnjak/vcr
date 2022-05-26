@@ -1,5 +1,7 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
+-- | Test structures and helper functions.
+
 module TestCommon where
 
 import           Data.Time

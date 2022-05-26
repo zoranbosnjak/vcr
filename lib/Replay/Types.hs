@@ -1,3 +1,4 @@
+-- | Common replay data type definitions.
 
 module Replay.Types where
 

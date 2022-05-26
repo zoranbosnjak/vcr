@@ -9,6 +9,8 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeApplications #-}
 
+-- | This module implements data replay from HTTP.
+
 module Streaming.Http where
 
 import           Control.Monad

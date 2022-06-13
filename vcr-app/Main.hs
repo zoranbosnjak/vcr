@@ -22,12 +22,14 @@ import           TH (getEnvVariableExpr)
 import           CmdCustom (cmdCustom)
 import           CmdCapture (cmdCapture)
 import           CmdServer (cmdServer)
+import           CmdCat (cmdCat)
 
 commands :: [(String, ParserInfo Command)]
 commands =
     [ ("custom", cmdCustom)
     , ("capture", cmdCapture)
     , ("server", cmdServer)
+    , ("cat", cmdCat)
     ]
 
 data Options = Options

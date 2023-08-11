@@ -59,6 +59,7 @@ ghcid "--command=ghci -Wall -ilib -ivcr-app vcr-app/Main.hs"
 
 ```bash
 nix-shell
+ghcid "--command=ghci -Wall -ilib -ilib/test lib/test/Main.hs"
 runhaskell -Wall -ilib -ilib/test lib/test/Main.hs
 ```
 
@@ -84,6 +85,7 @@ nix-build
 When changing `*.cabal` file, run:
 
 ```bash
+nix-shell
 cabal2nix lib > lib.nix
 cabal2nix . > app.nix
 ```

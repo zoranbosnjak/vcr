@@ -146,7 +146,7 @@ runCmd opt _pName _pArgs _version _ghc _wxcLib = do
                 Follow -> do
                     let dt = 0.3
                         go ix = do
-                            result <- tryAny $ PS.runSafeT $ nextItem player ix Forward
+                            result <- tryAny $ PS.runSafeT $ nextItem player Forward ix flt
                             case result of
                                 Left _e -> do
                                     threadDelaySec dt

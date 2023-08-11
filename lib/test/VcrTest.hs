@@ -60,12 +60,12 @@ nextItemTest = QC.testProperty "check limits" $ \utc0 -> do
 
         results1 = do
             ix <- [0..pred (pred n)]
-            let Just (ix', a') = nextItem p ix Forward
+            let Just (ix', a') = nextItem p Forward ix Nothing
             return ((succ ix, events !! succ ix) === (ix', a'))
 
         results2 = do
             ix <- [1..pred n]
-            let Just (ix', a') = nextItem p ix Backward
+            let Just (ix', a') = nextItem p Backward ix Nothing
             return ((pred ix, events !! pred ix) === (ix', a'))
 
     return (conjoin results1 .&&. conjoin results2)

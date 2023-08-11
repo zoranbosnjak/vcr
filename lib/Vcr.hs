@@ -168,9 +168,10 @@ mkDummyPlayer = Player
     }
 
 -- | Make one step from given index and return next (ix, a).
-nextItem :: MonadThrow m => Player m ix a -> ix -> Direction -> m (ix, a)
-nextItem player ix direction = do
-    result <- next (runPlayer player direction ix Nothing >-> PP.drop 1)
+nextItem :: MonadThrow m => Player m ix a -> Direction -> ix
+    -> Maybe (Filter, Maybe NominalDiffTime) -> m (ix, a)
+nextItem player direction ix flt = do
+    result <- next (runPlayer player direction ix flt >-> PP.drop 1)
     case result of
         Left e -> throwM $ PlayError $ show e
         Right (val, _producer') -> return val

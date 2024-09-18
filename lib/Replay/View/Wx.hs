@@ -279,7 +279,8 @@ saveAs f cfg = do
                                 return fn
                     let logM _msg = return ()
                         fa = FileArchive TextEncoding targetFile'
-                        recorder = jsonRecorder $ mkFileRecorder fa
+                        buffering = Buffering Nothing False
+                        recorder = jsonRecorder $ mkFileRecorder buffering fa
                         consumer = recorder logM
 
                     PS.runSafeT $ runEffect
@@ -756,4 +757,3 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
             -- run periodic action from controller
             periodicAction
         ]
-

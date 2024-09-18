@@ -43,6 +43,11 @@ import           Pipes.Safe
 import           Time
 import           Vcr
 
+data Buffering = Buffering
+    { bFileMode :: Maybe IO.BufferMode
+    , bFlushEachEvent :: Bool
+    }
+
 chunkSize :: Integral n => n
 chunkSize = max (fromIntegral defaultChunkSize) 10000
 
@@ -84,12 +89,22 @@ delimiterSize = \case
 
 data FileArchive = FileArchive FileEncoding FilePath
 
-mkFileRecorder :: FileArchive -> Recorder (SafeT IO) BS.ByteString r
-mkFileRecorder (FileArchive enc path) _logM =
-    bracket (IO.openFile path IO.AppendMode) IO.hClose $ \h ->
+mkFileRecorder :: Buffering -> FileArchive -> Recorder (SafeT IO) BS.ByteString r
+mkFileRecorder buf (FileArchive enc path) _logM =
+    bracket acquireResource IO.hClose $ \h ->
         forever $ do
             s <- await
-            liftIO $ writeBytes enc h s
+            liftIO $ writeEvent h s
+  where
+    acquireResource = do
+        h <- IO.openFile path IO.AppendMode
+        maybe (pure ()) (IO.hSetBuffering h) (bFileMode buf)
+        pure h
+    writeEvent h s = case bFlushEachEvent buf of
+        False -> writeBytes enc h s
+        True -> do
+            writeBytes enc h s
+            IO.hFlush h
 
 -- | Calculate first and last valid index in a file.
 getFileLimits :: FileEncoding -> FilePath -> IO (FileOffset, FileOffset)
@@ -404,8 +419,8 @@ getDirMiddle enc base di1@(DirectoryIndex fsA i1) di2@(DirectoryIndex fsB i2)
                 when (result >= di2) $ throwM $ IndexError "internal index error"
                 return result
 
-mkDirectoryRecorder :: (DirectoryArchive, Rotate) -> Recorder (SafeT IO) BS.ByteString r
-mkDirectoryRecorder (DirectoryArchive enc base, rotate) logM = forever $ do
+mkDirectoryRecorder :: Buffering -> (DirectoryArchive, Rotate) -> Recorder (SafeT IO) BS.ByteString r
+mkDirectoryRecorder buf (DirectoryArchive enc base, rotate) logM = forever $ do
     -- cleanup directory
     case rotateKeep rotate of
         Nothing -> return ()
@@ -420,13 +435,21 @@ mkDirectoryRecorder (DirectoryArchive enc base, rotate) logM = forever $ do
     nowUtc <- liftIO getUtcTime
     nowPosix <- liftIO getPOSIXTime
     let recFile = fileSuffixToFileName base (utcToFileSuffix nowUtc)
-        acquireResource = IO.openFile recFile IO.AppendMode
+        acquireResource = do
+            h <- IO.openFile recFile IO.AppendMode
+            maybe (pure ()) (IO.hSetBuffering h) (bFileMode buf)
+            pure h
         releaseResource h = do
             n <- IO.hFileSize h
             IO.hClose h
             when (n == 0) $ do
                 runSafeT $ logM $ "removing empty file " <> (T.pack $ show recFile)
                 removeFile recFile
+        writeEvent h s = case bFlushEachEvent buf of
+            False -> writeBytes enc h s
+            True -> do
+                writeBytes enc h s
+                IO.hFlush h
 
         -- recorder loop
         recorder !n t0 h = do
@@ -441,7 +464,7 @@ mkDirectoryRecorder (DirectoryArchive enc base, rotate) logM = forever $ do
                 timeLimit = case rotateTimeHours rotate of
                     Nothing -> False
                     Just hours -> (round fileAge) >= ((round $ hours * 3600)::Integer)
-            liftIO $ writeBytes enc h s
+            liftIO $ writeEvent h s
             case (sizeLimit || timeLimit) of
                 True -> return ()
                 False -> recorder n' t0 h
@@ -500,4 +523,3 @@ mkDirectoryPlayer (DirectoryArchive enc base) = Player
             return (i, s'))
         >-> dashEvents' direction flt
     }
-

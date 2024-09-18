@@ -279,19 +279,21 @@ propTests = testGroup "Property tests"
 unitTests :: TestTree
 unitTests = testGroup "Unit tests" $
     [ vcrEvents "file"
-        (\base enc -> jsonRecorder $ mkFileRecorder $ FileArchive enc (base </> "recording"))
+        (\base enc -> jsonRecorder $ mkFileRecorder buf $ FileArchive enc (base </> "recording"))
         (\base enc -> mkFilePlayer $ FileArchive enc (base </> "recording"))
     , vcrEvents "directory no-rotate"
-        (\base enc -> jsonRecorder $ mkDirectoryRecorder (DirectoryArchive enc (base </> "rec"), Rotate Nothing Nothing Nothing))
+        (\base enc -> jsonRecorder $ mkDirectoryRecorder buf
+            (DirectoryArchive enc (base </> "rec"), Rotate Nothing Nothing Nothing))
         (\base enc -> mkDirectoryPlayer $ DirectoryArchive enc (base </> "rec"))
     , locateEventsInFile
     , locateEventsInDirectory
     ]
     ++ [ dirRotate n | n <- [1..5]]
+  where
+    buf = Buffering Nothing False
 
 tests :: TestTree
 tests = testGroup "DiskTest" [propTests, unitTests]
 
 main :: IO ()
 main = defaultMain tests
-

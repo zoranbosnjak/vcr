@@ -27,6 +27,7 @@ import qualified Network.Wai.Handler.Warp as Warp
 import           Network.HTTP.Types
 import           Data.Aeson
 import           System.Posix.Signals
+import qualified System.IO as IO
 import           Pipes
 import qualified Pipes.Safe as PS
 
@@ -66,6 +67,8 @@ data CmdOptions = CmdOptions
     , optSyslog     :: Maybe Priority
     , optHttp       :: Maybe (String, Warp.Port)
     , optConfig     :: ConfigMethod
+    , optFileMode   :: Maybe IO.BufferMode
+    , optFlushEvents :: Bool
     } deriving (Generic, Eq, Show)
 
 -- | Option parser.
@@ -79,7 +82,28 @@ options = CmdOptions
        <> help ("Set syslog verbosity level, one of: " ++ show levels)))
     <*> optional httpOptions
     <*> configMethod
+    <*> ( noBuffering
+      <|> lineBuffering
+      <|> blockBufferingDefault
+      <|> blockBufferingSize
+      <|> pure Nothing)
+    <*> switch
+        ( long "flush-each-event"
+       <> help "Explicit buffer flush after each recorded event")
   where
+    noBuffering = flag' (Just IO.NoBuffering)
+        ( long "no-buffering"
+       <> help "Set no-buffering mode")
+    lineBuffering = flag' (Just IO.LineBuffering)
+        ( long "line-buffering"
+       <> help "Set line buffering mode")
+    blockBufferingDefault = flag' (Just (IO.BlockBuffering Nothing))
+        ( long "block-buffering-default"
+       <> help "Set block buffering mode with system default buffer size")
+    blockBufferingSize = Just . IO.BlockBuffering . Just <$> option auto
+        ( long "block-buffering-size"
+       <> metavar "INT"
+       <> help "Set block buffering mode with explicit buffer item size")
     levels = [minBound..maxBound] :: [Priority]
     httpOptions = (,)
         <$> strOption (long "http" <> metavar "IP" <> help "enable http server")
@@ -327,11 +351,12 @@ processInputs sesId logM consume getInputs inputStatus = do
         loop newCfg
 
 runRecorder ::
-    (Priority -> String -> IO ())       -- log message
+    Buffering                           -- buffering configuration
+    -> (Priority -> String -> IO ())    -- log message
     -> STM (Maybe (FilePath, Rotate))   -- get configuration
     -> STM (Event UdpContent)           -- get value to write
     -> IO ()
-runRecorder logM' getConfig fetchEvent = do
+runRecorder buf logM' getConfig fetchEvent = do
     logM' INFO "startup"
     cfg <- atomically getConfig
     go cfg
@@ -360,7 +385,7 @@ runRecorder logM' getConfig fetchEvent = do
                 Just (base, rotate) ->
                     let dirArchive :: DirectoryArchive
                         dirArchive = DirectoryArchive TextEncoding base
-                    in jsonRecorder (mkDirectoryRecorder (dirArchive, rotate)) logM
+                    in jsonRecorder (mkDirectoryRecorder buf (dirArchive, rotate)) logM
         PS.runSafeT (runEffect (src cfg >-> dst)) >>= go
 
 runCmd :: CmdOptions -> Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()
@@ -427,7 +452,8 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
             -- recorder
             , do
                 let getConfig = confOutputFile <$> readTVar config
-                runRecorder (logM "recorder") getConfig (readTBQueue q)
+                    buf = Buffering (optFileMode opt) (optFlushEvents opt)
+                runRecorder buf (logM "recorder") getConfig (readTBQueue q)
 
             -- input processing
             , processInputs sesId (logM "processInputs")
@@ -443,4 +469,3 @@ cmdCapture :: ParserInfo Command
 cmdCapture = info
     ((runCmd <$> options) <**> helper)
     (progDesc "Event recorder")
-

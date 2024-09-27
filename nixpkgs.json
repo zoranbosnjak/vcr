@@ -1,6 +1,0 @@
-{
-  "name": "nixos-pinned",
-  "url": "https://github.com/NixOS/nixpkgs-channels.git",
-  "ref": "nixos-20.03",
-  "rev": "42674051d12540d4a996504990c6ea3619505953"
-}

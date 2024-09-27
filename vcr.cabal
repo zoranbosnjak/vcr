@@ -1,0 +1,126 @@
+cabal-version:      3.0
+name:               vcr
+version:            2.0.0
+synopsis:           UDP datagram recorder and replay
+-- description:
+homepage:           https://github.com/zoranbosnjak/vcr
+license:            GPL-3.0-or-later
+license-file:       LICENSE
+author:             Zoran Bošnjak
+maintainer:         zoran.bosnjak@via.si
+-- copyright:
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+-- extra-source-files:
+
+common base
+    ghc-options:
+        -Wall
+        -Wincomplete-uni-patterns
+        -Wincomplete-record-updates
+        -Wcompat
+        -Widentities
+        -Wredundant-constraints
+    default-language:
+        GHC2021
+    build-depends:
+        base < 5
+        , with-utf8
+        , unliftio
+        , microlens-platform
+        , exceptions
+        , optparse-applicative
+        , template-haskell
+        , temporary
+        , process
+        , directory
+        , filepath
+        , unix
+        , bytestring
+        , base16-bytestring
+        , base64-bytestring
+        , text
+        , text-format
+        , time
+        , containers
+        , unordered-containers
+        , network
+        , network-multicast
+        , QuickCheck
+        , stm
+        , clock
+        , transformers
+        , hslogger
+        , hsyslog
+        , deepseq
+        , aeson
+        , aeson-pretty
+        , uuid
+        , wai
+        , warp
+        , megaparsec
+        , pipes
+        , pipes-concurrency
+        , pipes-safe
+        , http-types
+        , http-client
+        , http-client-tls
+        , vector
+        , ekg
+        --, wx
+        --, wxcore
+        --, keera-hails-reactivevalues
+        --, keera-hails-reactive-cbmvar
+        --, keera-hails-reactive-wx
+        --, keera-hails-mvc-view
+        --, keera-callbacks
+        , deseo
+
+library
+    import:           base
+    exposed-modules:
+        TH
+        , Vcr
+        , Common
+        , Sequential
+        , Time
+        , Udp
+        , Logging
+        , Streaming
+        , Streaming.Disk
+        , Streaming.Http
+        , Data.ReactiveValue.Extended
+        , Graphics.UI.WX.Reactive.Extended
+        , Replay
+        , Replay.Controller
+        , Replay.Engine
+        , Replay.Types
+        , Replay.View.Wx
+        , Capture.Types
+        , Configurator
+    hs-source-dirs:   lib
+
+executable vcr
+    import:           base
+    ghc-options:
+        -O2 -rtsopts -funbox-strict-fields -with-rtsopts=-T -threaded
+    main-is:          Main.hs
+    other-modules:
+        Paths_vcr
+    build-depends:
+        vcr
+    hs-source-dirs:   app
+    default-language: GHC2021
+
+test-suite vcr-test
+    import:           base
+    default-language: GHC2021
+    other-modules:
+        TestCommon
+        , DiskTest
+        , VcrTest
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Main.hs
+    build-depends:
+        vcr

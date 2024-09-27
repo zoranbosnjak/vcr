@@ -1,6 +1,3 @@
-#! /usr/bin/env nix-shell
-#! nix-shell <nixpkgs> -i runghc -p "ghc.withPackages (x: [ x.optparse-applicative x.network x.network-multicast x.unliftio ])"
-
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -77,4 +74,3 @@ main = execParser options >>= \(out, payload, rate) -> do
         return (sock, Net.addrAddress serveraddr)
 
     release = Net.close . fst
-

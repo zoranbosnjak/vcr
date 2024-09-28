@@ -3,6 +3,7 @@
 , withHoogle ? false
 , strip ? true
 , static ? false    # build static binary
+, gitrev ? "devel"
 }:
 
 let
@@ -79,9 +80,12 @@ let
         deseo = self.callPackage ./nix/extra/deseo.nix { };
   };};
 
-  buildExports = ''
+  preHook = ''
     export LC_ALL=C.UTF-8
+    export SW_VERSION=$(cat *.cabal | grep "^version:" | awk '{print $2}')
+    export GIT_REV=${gitrev}
     export GHC_BASE=$(which ghc | cut -d '/' -f-4)
+    export WXC_LIB=${haskellPackages.wxc}/lib
   '';
 
   drv1 = haskellPackages.callCabal2nix "vcr" ./. { };
@@ -92,7 +96,7 @@ let
           (type != "directory" || baseNameOf path != ".git")
           && (type != "symlink" || baseNameOf path != "result"))
         ./.;
-      preBuild = buildExports;
+      preBuild = preHook;
       buildInputs = oldAttrs.buildInputs ++ deps;
   });
 
@@ -135,7 +139,7 @@ let
 
     withHoogle = withHoogle;
 
-    shellHook = buildExports;
+    shellHook = preHook;
   };
 
 in

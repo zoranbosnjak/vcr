@@ -1,7 +1,5 @@
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE MultiWayIf #-}
 
 -- | VCR unit and property tests.
 
@@ -41,9 +39,9 @@ limitsTest = QC.testProperty "check limits" $ \utc0 -> do
     let p :: Player Maybe Int (Event ())
         p = mkListPlayer events
 
-        Just (i1, i2) = limits p
-        Just a1 = peekItem p i1
-        Just a2 = peekItem p i2
+        (i1, i2) = fromJust $ limits p
+        a1 = fromJust $ peekItem p i1
+        a2 = fromJust $ peekItem p i2
 
     return
         (   ((i1, a1) === (0, events !! 0))
@@ -60,12 +58,12 @@ nextItemTest = QC.testProperty "check limits" $ \utc0 -> do
 
         results1 = do
             ix <- [0..pred (pred n)]
-            let Just (ix', a') = nextItem p Forward ix Nothing
+            let (ix', a') = fromJust $ nextItem p Forward ix Nothing
             return ((succ ix, events !! succ ix) === (ix', a'))
 
         results2 = do
             ix <- [1..pred n]
-            let Just (ix', a') = nextItem p Backward ix Nothing
+            let (ix', a') = fromJust $ nextItem p Backward ix Nothing
             return ((pred ix, events !! pred ix) === (ix', a'))
 
     return (conjoin results1 .&&. conjoin results2)
@@ -166,7 +164,7 @@ playerSteps = testCaseSteps "player" $ \step -> do
 
     step "replay forward/backward"
     do
-        let Just (a, b) = limits player
+        let (a, b) = fromJust $ limits player
             result1 = fromJust $ PP.toListM $ runPlayer player Forward a Nothing
             result2 = fromJust $ PP.toListM $ runPlayer player Backward b Nothing
 
@@ -201,4 +199,3 @@ tests = testGroup "VcrTest" [propTests, unitTests]
 
 main :: IO ()
 main = defaultMain tests
-

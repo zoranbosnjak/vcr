@@ -1,5 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-
 -- | This module extends 'Data.ReactiveValue' module with some
 -- missing functions.
 
@@ -29,11 +27,10 @@ follow val act = do
 
 -- | Lift a transformation, create a new RV.
 liftR4 ::
-    ( ReactiveValueRead a1 b1 m
-    , ReactiveValueRead a1 a5 m, ReactiveValueRead a2 a6 m
-    , ReactiveValueRead a3 a7 m, ReactiveValueRead a4 a8 m) =>
-    (a5 -> a6 -> a7 -> a8 -> a9)
-    -> a1 -> a2 -> a3 -> a4 -> ReactiveFieldRead m a9
+    ( ReactiveValueRead p1 t1 m, ReactiveValueRead p2 t2 m
+    , ReactiveValueRead p3 t3 m, ReactiveValueRead p4 t4 m)
+    => (t2 -> t3 -> t1 -> t4 -> a) -> p2 -> p3 -> p1 -> p4
+    -> ReactiveFieldRead m a
 liftR4 f e1 e2 e3 e4 = ReactiveFieldRead getter notifier
   where
     getter = f
@@ -49,12 +46,11 @@ liftR4 f e1 e2 e3 e4 = ReactiveFieldRead getter notifier
 
 -- | Lift a transformation, create a new RV.
 liftR5 ::
-    ( ReactiveValueRead a1 b1 m
-    , ReactiveValueRead a1 a6 m
-    , ReactiveValueRead a2 a7 m, ReactiveValueRead a3 a8 m
-    , ReactiveValueRead a4 a9 m, ReactiveValueRead a5 a10 m) =>
-    (a6 -> a7 -> a8 -> a9 -> a10 -> a11)
-    -> a1 -> a2 -> a3 -> a4 -> a5 -> ReactiveFieldRead m a11
+    ( ReactiveValueRead p1 t1 m, ReactiveValueRead p2 t2 m
+    , ReactiveValueRead p3 t3 m, ReactiveValueRead p4 t4 m
+    , ReactiveValueRead p5 t5 m)
+    => (t3 -> t2 -> t4 -> t1 -> t5 -> a) -> p3 -> p2 -> p4 -> p1 -> p5
+    -> ReactiveFieldRead m a
 liftR5 f e1 e2 e3 e4 e5 = ReactiveFieldRead getter notifier
   where
     getter = f
@@ -72,12 +68,11 @@ liftR5 f e1 e2 e3 e4 e5 = ReactiveFieldRead getter notifier
 
 -- | Lift a transformation, create a new RV.
 liftR6 ::
-    ( ReactiveValueRead a1 b1 m
-    , ReactiveValueRead a1 a7 m, ReactiveValueRead a2 a8 m
-    , ReactiveValueRead a3 a9 m, ReactiveValueRead a4 a10 m
-    , ReactiveValueRead a5 a11 m, ReactiveValueRead a6 a12 m) =>
-    (a7 -> a8 -> a9 -> a10 -> a11 -> a12 -> a13)
-    -> a1 -> a2 -> a3 -> a4 -> a5 -> a6 -> ReactiveFieldRead m a13
+    ( ReactiveValueRead p1 t1 m, ReactiveValueRead p2 t2 m
+    , ReactiveValueRead p3 t3 m, ReactiveValueRead p4 t4 m
+    , ReactiveValueRead p5 t5 m, ReactiveValueRead p6 t6 m)
+    => (t3 -> t4 -> t2 -> t5 -> t1 -> t6 -> a) -> p3 -> p4 -> p2 -> p5 -> p1 -> p6
+    -> ReactiveFieldRead m a
 liftR6 f e1 e2 e3 e4 e5 e6 = ReactiveFieldRead getter notifier
   where
     getter = f
@@ -109,4 +104,3 @@ withConfig cfg action = do
         >>= bool (last <$> flushTQueue q) retrySTM
     loop q val = race (getConfig q) (action val)
         >>= either (loop q) pure
-

@@ -1,7 +1,5 @@
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase #-}
 
 -- | Common functions and definitions.
 
@@ -84,12 +82,8 @@ hexlify = BS8.unpack . B16.encode
 
 -- | Convert hex representation back to a bytestring.
 unhexlify :: String -> Maybe BS.ByteString
-unhexlify st = do
-    let (a,b) = B16.decode $ BS8.pack st
-    guard $ BS.null b
-    return a
+unhexlify = either (const Nothing) Just . B16.decode . BS8.pack
 
 -- | Newline character, represented as Word8 (ByteString)
 newline :: Word8
 newline = BS.head $ BS8.singleton '\n'
-

@@ -25,56 +25,57 @@ common base
         GHC2021
     build-depends:
         base < 5
-        , with-utf8
-        , unliftio
-        , microlens-platform
-        , exceptions
-        , optparse-applicative
-        , template-haskell
-        , temporary
-        , process
-        , directory
-        , filepath
-        , unix
-        , bytestring
-        , base16-bytestring
-        , base64-bytestring
-        , text
-        , text-format
-        , time
-        , containers
-        , unordered-containers
-        , network
-        , network-multicast
-        , QuickCheck
-        , stm
-        , clock
-        , transformers
-        , hslogger
-        , hsyslog
-        , deepseq
-        , aeson
-        , aeson-pretty
-        , uuid
-        , wai
-        , warp
-        , megaparsec
-        , pipes
-        , pipes-concurrency
-        , pipes-safe
-        , http-types
-        , http-client
-        , http-client-tls
-        , vector
-        , ekg
-        , wx
-        , wxcore
-        , keera-hails-reactivevalues
-        , keera-hails-reactive-cbmvar
-        , keera-hails-reactive-wx
-        , keera-hails-mvc-view
-        , keera-callbacks
-        , deseo
+      , with-utf8
+      , unliftio
+      , microlens-platform
+      , exceptions
+      , optparse-applicative
+      , template-haskell
+      , temporary
+      , process
+      , directory
+      , filepath
+      , unix
+      , bytestring
+      , base16-bytestring
+      , base64-bytestring
+      , text
+      , text-format
+      , time
+      , containers
+      , unordered-containers
+      , network
+      , network-multicast
+      , stm
+      , clock
+      , transformers
+      , hslogger
+      , hsyslog
+      , deepseq
+      , aeson
+      , aeson-pretty
+      , uuid
+      , wai
+      , warp
+      , megaparsec
+      , pipes
+      , pipes-concurrency
+      , pipes-safe
+      , http-types
+      , http-client
+      , http-client-tls
+      , vector
+      , ekg
+      , random
+      , QuickCheck
+      , wx
+      , wxcore
+      , keera-hails-reactivevalues
+      , keera-hails-reactive-cbmvar
+      , keera-hails-reactive-wx
+      , keera-hails-mvc-view
+      , keera-callbacks
+      , deseo
 
 library
     import:           base
@@ -107,6 +108,11 @@ executable vcr
     main-is:          Main.hs
     other-modules:
         Paths_vcr
+      , CmdCapture
+      , CmdCat
+      , CmdCustom
+      , CmdServer
+
     build-depends:
         vcr
     hs-source-dirs:   app
@@ -124,3 +130,6 @@ test-suite vcr-test
     main-is:          Main.hs
     build-depends:
         vcr
+      , tasty
+      , tasty-quickcheck
+      , tasty-hunit

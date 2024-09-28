@@ -11,19 +11,7 @@ Given a version number *MAJOR*.*MINOR*.*PATCH*, increment the:
 
 # Development
 
-To update revision of `nixpkgs`, update `nixpkgs.json` file.
-
-To update particular `package` revision, which is included in nix rules:
-
-```bash
-cabal2nix https://{path-to-git-repo}/{package} --revision {rev} > nix/package-ver.nix
-
-# or if subdirectory is included
-cabal2nix https://{path-to-git-repo}/{package} --revision {rev} --subpath {path} > nix/package-ver.nix
-
-# or for local development version
-cabal2nix path/to/package > nix/package-ver.nix
-```
+To update revision of `nixpkgs` or other packages, see `nix/README.md`.
 
 ## Default build using nix-build
 
@@ -43,7 +31,7 @@ nix-build --argstr gitrev $CI_COMMIT_SHORT_SHA
 ### Development build from nix-shell
 
 ```bash
-nix-shell [--argstr compiler ghc881]
+nix-shell
 cabal configure
 cabal build -j
 ```
@@ -52,48 +40,39 @@ cabal build -j
 
 ```bash
 nix-shell
-ghcid "--command=ghci -Wall -ilib -ivcr-app vcr-app/Main.hs"
+ghcid "--command=ghci -Wall -ilib -iapp app/Main.hs"
 ```
 
 ### Running unit/property tests
 
 ```bash
 nix-shell
-ghcid "--command=ghci -Wall -ilib -ilib/test lib/test/Main.hs"
-runhaskell -Wall -ilib -ilib/test lib/test/Main.hs
+ghcid "--command=ghci -Wall -ilib -itest test/Main.hs"
+runhaskell -Wall -ilib -itest test/Main.hs
+cabal test --test-show-details=always
 ```
 
 ### Running (inside nix-shell)
 ```bash
 nix-shell
 cabal build -j && ./dist... +RTS -M300m -RTS {args}
-runhaskell -ilib -ivcr-app vcr-app/Main.hs {args}
+runhaskell -ilib -iapp app/Main.hs -h
 ```
 
 ### Running custom script (inside nix-shell)
 ```bash
 nix-shell
-runhaskell -Wall -ilib -ivcr-app ./vcr-app/Main.hs custom --program "/path/to/custom.hs --custom args" --ghcOpts "-i/path/to -more-opts" --run
+runhaskell -Wall -ilib -iapp ./app/Main.hs custom --program "/path/to/custom.hs --custom args" --ghcOpts "-i/path/to -more-opts" --run
 
 # or
 nix-build
 ./dist.../vcr custom --program /path/to/custom.hs --ghcOpts "-i/path/to/lib -more-opts" --run
 ```
 
-## Changes in cabal file
-
-When changing `*.cabal` file, run:
-
-```bash
-nix-shell
-cabal2nix lib > lib.nix
-cabal2nix . > app.nix
-```
-
 # Running replay in devel mode (inside nix-shell)
 ```bash
 nix-shell
-runhaskell -Wall -ilib -ivcr-app ./examples/replay.hs --asterix path/to/xml
+runhaskell -Wall -ilib -iapp ./examples/replay.hs --asterix path/to/xml
 ```
 
 # Http server API
@@ -129,4 +108,3 @@ curl localhost:12345/events?includeIndex
 curl "localhost:12345/events?includeIndex&channels=ch1"
 curl "localhost:12345/events?includeIndex&channels=ch1|ch2"
 ```
-

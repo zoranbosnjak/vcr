@@ -9,6 +9,7 @@ where
 
 import           Data.Time
 import           Data.Time.Clock
+import Data.Time.Format.ISO8601 (iso8601Show, iso8601ParseM)
 import qualified Data.Time.Clock.POSIX as DTP
 import qualified System.Clock
 import           Numeric (showFFloat)
@@ -40,18 +41,13 @@ uptimeDaysStr t0 t =
 
 -- | Parse ISO time.
 parseIsoTime :: String -> Either String UtcTime
-parseIsoTime s = case parser s of
+parseIsoTime s = case iso8601ParseM s of
     Nothing -> Left $ "Can not parse time: " ++ show s
     Just val -> Right val
-  where
-    -- Once on ghc881, the original parser can be used:
-    -- import Data.Time.Format.ISO8601 (iso8601ParseM)
-    -- parser = iso8601ParseM
-    parser = parseTimeM True defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%QZ"))
 
 -- | Format ISO time.
 fmtTime :: UtcTime -> String
-fmtTime = formatTime defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%QZ"))
+fmtTime = iso8601Show
 
 -- | Helper function to generate arbitrary Utc time.
 arbitraryUtc :: Gen UtcTime
@@ -62,4 +58,3 @@ arbitraryUtc = UTCTime
 -- | Helper function to increment Utc time:
 addMonoTimeNS :: MonoTimeNs -> UtcTime -> UtcTime
 addMonoTimeNS deltaNs t = addUTCTime (fromRational (toRational deltaNs / (1000*1000*1000))) t
-

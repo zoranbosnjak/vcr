@@ -24,6 +24,13 @@ let
     sha256 = wxHaskellRef.sha256;
   };
 
+  khRef = builtins.fromJSON (builtins.readFile ./nix/extra/keera-hails.json);
+  khDir = pkgs.fetchgit {
+    url = khRef.url;
+    rev = khRef.rev;
+    sha256 = khRef.sha256;
+  };
+
   deps = with pkgs; [
     which
     # ...
@@ -44,7 +51,8 @@ let
             pkg;
       in {
         ghc = fixGHC super.ghc;
-        buildHaskellPackages = super.buildHaskellPackages.override (oldBuildHaskellPackages: {
+        buildHaskellPackages = super.buildHaskellPackages.override
+          (oldBuildHaskellPackages: {
           ghc = fixGHC oldBuildHaskellPackages.ghc;
         });
         # haskellPackage1 = self.callPackage ./nix/myPackage1.nix { };
@@ -59,10 +67,14 @@ let
         wxdirect = self.callCabal2nix "wxdirect" "${wxHaskellDir}/wxdirect" { };
         wxc = self.callPackage "${wxHaskellDir}/wxc/package.nix" { };
 
-        #keera-hails-reactivevalues = haskellPackagesNew.callPackage ./nix/keera-hails-reactivevalues.nix { };
-        #keera-hails-reactive-cbmvar = haskellPackagesNew.callPackage ./nix/keera-hails-reactive-cbmvar.nix { };
-        #keera-hails-reactive-wx = haskellPackagesNew.callPackage ./nix/keera-hails-reactive-wx.nix { };
-        #keera-hails-mvc-view = haskellPackagesNew.callPackage ./nix/keera-hails-mvc-view.nix { };
+        keera-hails-reactivevalues = self.callCabal2nix
+          "keera-hails-reactivevalues" "${khDir}/keera-hails-reactivevalues" { };
+        keera-hails-reactive-cbmvar = self.callCabal2nix
+          "keera-hails-reactive-cbmvar" "${khDir}/keera-hails-reactive-cbmvar" { };
+        keera-hails-reactive-wx = self.callCabal2nix
+          "keera-hails-reactive-wx" "${khDir}/keera-hails-reactive-wx" { };
+        keera-hails-reactive-mvc-view = self.callCabal2nix
+          "keera-hails-reactive-mvc-view" "${khDir}/keera-hails-reactive-mvc-view" { };
 
         deseo = self.callPackage ./nix/extra/deseo.nix { };
   };};

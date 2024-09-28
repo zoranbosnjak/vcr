@@ -69,11 +69,11 @@ common base
         , ekg
         , wx
         , wxcore
-        --, keera-hails-reactivevalues
-        --, keera-hails-reactive-cbmvar
-        --, keera-hails-reactive-wx
-        --, keera-hails-mvc-view
-        --, keera-callbacks
+        , keera-hails-reactivevalues
+        , keera-hails-reactive-cbmvar
+        , keera-hails-reactive-wx
+        , keera-hails-mvc-view
+        , keera-callbacks
         , deseo
 
 library

@@ -67,8 +67,8 @@ common base
         , http-client-tls
         , vector
         , ekg
-        --, wx
-        --, wxcore
+        , wx
+        , wxcore
         --, keera-hails-reactivevalues
         --, keera-hails-reactive-cbmvar
         --, keera-hails-reactive-wx

@@ -17,6 +17,13 @@ let
     wxGTK = super.wxGTK32;
   };
 
+  wxHaskellRef = builtins.fromJSON (builtins.readFile ./nix/extra/wxHaskell.json);
+  wxHaskellDir = pkgs.fetchgit {
+    url = wxHaskellRef.url;
+    rev = wxHaskellRef.rev;
+    sha256 = wxHaskellRef.sha256;
+  };
+
   deps = with pkgs; [
     which
     # ...
@@ -41,15 +48,16 @@ let
           ghc = fixGHC oldBuildHaskellPackages.ghc;
         });
         # haskellPackage1 = self.callPackage ./nix/myPackage1.nix { };
+        # haskellPackage2 = self.callCabal2nix "name" "${path}/path" { };
         # ...
 
         ekg = self.callPackage ./nix/extra/ekg.nix { };
         ekg-json = self.callPackage ./nix/extra/ekg-json.nix { };
 
-        #wx = self.callPackage ./nix/extra/wx.nix { };
-        #wxcore = self.callPackage ./nix/extra/wxcore.nix { };
-        #wxdirect = self.callPackage ./nix/extra/wxdirect.nix { };
-        #wxc = self.callPackage ./nix/extra/wxc.nix { };
+        wx = self.callCabal2nix "wx" "${wxHaskellDir}/wx" { };
+        wxcore = self.callPackage ./nix/extra/wxcore.nix { };
+        wxdirect = self.callCabal2nix "wxdirect" "${wxHaskellDir}/wxdirect" { };
+        wxc = self.callPackage "${wxHaskellDir}/wxc/package.nix" { };
 
         #keera-hails-reactivevalues = haskellPackagesNew.callPackage ./nix/keera-hails-reactivevalues.nix { };
         #keera-hails-reactive-cbmvar = haskellPackagesNew.callPackage ./nix/keera-hails-reactive-cbmvar.nix { };

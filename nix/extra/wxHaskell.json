@@ -1,0 +1,12 @@
+{
+  "url": "https://codeberg.org/wxHaskell/wxHaskell.git",
+  "rev": "cbcb56f1b3d49fbea716902994fe7c73619a5582",
+  "date": "2024-08-05T13:01:30Z",
+  "path": "/nix/store/dr34ghlhn7h85z9mzsk2fcx15y4bfl57-wxHaskell",
+  "sha256": "1xh2lyz68w0yy3wk9qgf4dklrvgy3dvrhb7wby71ff4avvnf5ps3",
+  "hash": "sha256-Q9/i7N6KOBeOX/wsmHcb/u1MZyPu4TT58B5wZL6nAvY=",
+  "fetchLFS": false,
+  "fetchSubmodules": false,
+  "deepClone": false,
+  "leaveDotGit": false
+}

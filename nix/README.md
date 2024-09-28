@@ -16,15 +16,18 @@ nix-shell -p niv --run "niv update nixpkgs -b release-..."
 ## haskell packages
 
 ```bash
-# (marked broken in nixpkgs)
+# ekg, ekg-json - marked broken in nixpkgs
 cabal2nix https://github.com/l0negamer/ekg > nix/extra/ekg.nix
 cabal2nix https://github.com/L0neGamer/ekg-json > nix/extra/ekg-json.nix
 
-# (marked broken in nixpkgs)
-# cabal2nix https://codeberg.org/wxHaskell/wxHaskell --subpath wx > nix/extra/wx.nix
-# cabal2nix https://codeberg.org/wxHaskell/wxHaskell --subpath wxcore > nix/extra/wxcore.nix
-# cabal2nix https://codeberg.org/wxHaskell/wxHaskell --subpath wxdirect > nix/extra/wxdirect.nix
-# (does not work) cabal2nix https://codeberg.org/wxHaskell/wxHaskell --subpath wxc > nix/extra/wxc.nix
+# wxHaskell - marked broken in nixpkgs
+hsh=...
+nix-prefetch-git -rev $hsh https://codeberg.org/wxHaskell/wxHaskell.git > nix/extra/wxHaskell.json
+cabal2nix --revision $hsh https://codeberg.org/wxHaskell/wxHaskell --subpath wxcore > nix/extra/wxcore.nix
+vi nix/extra/wxcore.nix
+# append the following mkDerivation attribute (to workaround gcc arg too long problem)
+__propagatePkgConfigDepends = false;
 
+# deseo
 cabal2nix https://github.com/zoranbosnjak/deseo > nix/extra/deseo.nix
 ```

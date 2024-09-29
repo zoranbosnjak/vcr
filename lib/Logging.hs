@@ -7,13 +7,14 @@ module Logging
     where
 
 import           Control.Monad
-import           Data.Maybe
 import           Control.Monad.IO.Class
-import qualified System.Log.Logger as Log
-import           System.Log.Logger (Priority(..))
-import           System.Log.Handler.Simple (verboseStreamHandler)
-import           System.Log.Handler.Syslog (openlog, Option(PID), Facility(USER))
+import           Data.Maybe
 import           System.IO
+import           System.Log.Handler.Simple (verboseStreamHandler)
+import           System.Log.Handler.Syslog (Facility (USER), Option (PID),
+                                            openlog)
+import qualified System.Log.Logger         as Log
+import           System.Log.Logger         (Priority (..))
 
 type ProgName = String
 type LoggerName = String
@@ -22,7 +23,7 @@ type Logger m = LoggerName -> Priority -> String -> m ()
 
 -- | Ignore log messages.
 noLogger :: Monad m => Logger m
-noLogger _loggerName _prio _s = return ()
+noLogger _loggerName _prio _s = pure ()
 
 -- | Format log message.
 fmtLog :: LoggerName -> Priority -> String -> String
@@ -47,23 +48,23 @@ setupLogging pName cmdName optVerbose optSyslog optAux = do
 
         -- console logger
         case optVerbose of
-            Nothing -> return ()
+            Nothing -> pure ()
             Just level -> do
                 hConsole <- verboseStreamHandler stdout level
                 Log.updateGlobalLogger Log.rootLoggerName (Log.addHandler hConsole)
 
         -- syslog
         case optSyslog of
-            Nothing -> return ()
+            Nothing -> pure ()
             Just level -> do
-                sl <- openlog (pName) [PID] USER level
+                sl <- openlog pName [PID] USER level
                 Log.updateGlobalLogger Log.rootLoggerName (Log.addHandler sl)
 
     let logM :: LoggerName -> Priority -> String -> IO ()
         logM name prio s = do
             Log.logM fullName prio msg
             case optAux of
-                Nothing -> return ()
+                Nothing   -> pure ()
                 Just func -> func cmdName prio s
           where
             fullName = pName ++ "/" ++ cmdName ++ "/" ++  name
@@ -71,8 +72,7 @@ setupLogging pName cmdName optVerbose optSyslog optAux = do
             -- 'syslog' has problems with long messages.
             n = 1000
             msg = case Prelude.length s > n of
-                True -> Prelude.take n s ++ "..."
+                True  -> Prelude.take n s ++ "..."
                 False -> s
 
-    return logM
-
+    pure logM

@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase      #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 -- | Main VCR application.
@@ -6,21 +6,22 @@
 module Main where
 
 -- standard imports
+import qualified Data.ByteString          as BS
+import qualified Data.ByteString.Char8    as BS8
+import           Data.Functor
 import           Options.Applicative
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
 import qualified System.Environment
-import           Text.Read (readMaybe)
-import           System.Exit (exitWith, ExitCode(ExitSuccess))
+import           System.Exit              (exitSuccess)
 import qualified System.Remote.Monitoring as Ekg
+import           Text.Read                (readMaybe)
 
 -- local imports
+import           CmdCapture               (cmdCapture)
+import           CmdCat                   (cmdCat)
+import           CmdCustom                (cmdCustom)
+import           CmdServer                (cmdServer)
 import           Common
-import           TH (getEnvVariableExpr)
-import           CmdCustom (cmdCustom)
-import           CmdCapture (cmdCapture)
-import           CmdServer (cmdServer)
-import           CmdCat (cmdCat)
+import           TH                       (getEnvVariableExpr)
 
 commands :: [(String, ParserInfo Command)]
 commands =
@@ -32,7 +33,7 @@ commands =
 
 data Options = Options
     { optCommand :: Command
-    , optEkg        :: Maybe (BS.ByteString, Int)
+    , optEkg     :: Maybe (BS.ByteString, Int)
     }
 
 options :: Parser Options
@@ -78,18 +79,17 @@ main = do
     opt <- do
         let showVersion = flag' True (long "version" <> help "Show version and exit")
             options'
-                = (showVersion *> pure Nothing)
+                = (showVersion $> Nothing)
               <|> fmap Just options
         execParser (info (options' <**> helper) idm) >>= \case
             Nothing -> do
                 putStrLn $ pName ++ ", " ++ versionString
-                exitWith ExitSuccess
-            Just opt -> return opt
+                exitSuccess
+            Just opt -> pure opt
 
     -- EKG monitor
     runMaybe (optEkg opt) $ \(ip, port) -> do
         _ <- Ekg.forkServer ip port
-        return ()
+        pure ()
 
-    (optCommand opt) pName pArgs versionString ghcBase wxcLib
-
+    optCommand opt pName pArgs versionString ghcBase wxcLib

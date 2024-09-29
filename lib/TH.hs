@@ -2,9 +2,9 @@
 
 module TH ( getEnvVariableExpr ) where
 
-import Language.Haskell.TH (Q, Exp, runIO)
-import Language.Haskell.TH.Syntax (lift)
-import System.Environment (getEnvironment)
+import           Language.Haskell.TH        (Exp, Q, runIO)
+import           Language.Haskell.TH.Syntax (lift)
+import           System.Environment         (getEnvironment)
 
 getEnvVariableExpr :: String -> Q Exp
 getEnvVariableExpr envKey = do

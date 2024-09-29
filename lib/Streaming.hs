@@ -9,14 +9,14 @@ module Streaming
     )
 where
 
-import           GHC.Generics (Generic)
 import           Data.Aeson
+import           GHC.Generics   (Generic)
 import           Pipes.Safe
 
-import           Vcr
-import           Streaming.Disk (FileEncoding)
 import qualified Streaming.Disk
+import           Streaming.Disk (FileEncoding)
 import qualified Streaming.Http
+import           Vcr
 
 data Source
     = SFile FileEncoding FilePath

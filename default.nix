@@ -131,6 +131,8 @@ let
       cabal-install
       pkgs.ghcid
       pkgs.cabal2nix
+      hlint
+      stylish-haskell
       # haskell-language-server
       # fast-tags
       # haskell-debug-adapter

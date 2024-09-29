@@ -7,8 +7,8 @@ module Graphics.UI.WX.Reactive.Extended
     , module Graphics.UI.WX.Reactive.Extended
     ) where
 
+import           Control.Monad               (when)
 import           UnliftIO
-import           Control.Monad (when)
 
 import           Graphics.UI.WX
 import           Graphics.UI.WX.Reactive
@@ -24,13 +24,13 @@ selectorR ctr = do
     set ctr
         [ on select := do
             y <- get ctr selection
-            x <- modifyMVar oldValue (\a -> return (y, a))
+            x <- modifyMVar oldValue (\a -> pure (y, a))
             Control.Monad.when (y /= x) $ do
                 readMVar notifiers >>= sequence_
         ]
     let getter = toEnum <$> get ctr selection
-        notifier p = modifyMVar_ notifiers (\x -> return (x ++ [p]))
-    return $ ReactiveFieldRead getter notifier
+        notifier p = modifyMVar_ notifiers (\x -> pure (x ++ [p]))
+    pure $ ReactiveFieldRead getter notifier
 
 -- | Reactive wrapper for checkable widget.
 checkableR :: (Commanding w, Checkable w) => w -> IO (ReactiveFieldRead IO Bool)
@@ -38,8 +38,8 @@ checkableR ctr = do
     notifiers <- newMVar []
     set ctr [ on command :~ \act -> act >> (readMVar notifiers >>= sequence_) ]
     let getter = get ctr checked
-        notifier p = modifyMVar_ notifiers (\x -> return (x ++ [p]))
-    return $ ReactiveFieldRead getter notifier
+        notifier p = modifyMVar_ notifiers (\x -> pure (x ++ [p]))
+    pure $ ReactiveFieldRead getter notifier
 
 -- | Sync control enabled state from reactive value.
 setEnabled :: (ReactiveValueRead a1 a2 IO, Able w, Eq a2) =>

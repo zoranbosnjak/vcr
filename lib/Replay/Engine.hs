@@ -5,25 +5,26 @@
 
 module Replay.Engine where
 
-import           GHC.Natural
 import           Control.Monad
 import           Control.Monad.Fix
-import           UnliftIO
+import qualified Data.Map           as Map
+import           Data.Maybe
+import           Data.Ratio         ((%))
+import qualified Data.Time.Clock    as Clk
+import           GHC.Natural
 import           Pipes
-import qualified Pipes.Prelude as PP
-import qualified Pipes.Safe as PS
-import           Data.Ratio ((%))
-import qualified Data.Map as Map
-import qualified Data.Time.Clock as Clk
+import qualified Pipes.Prelude      as PP
+import qualified Pipes.Safe         as PS
+import           UnliftIO
 
 import           Data.ReactiveValue
 
 -- local imports
 import           Common
-import           Time
-import           Vcr
-import           Udp (UdpContent)
 import           Replay.Types
+import           Time
+import           Udp                (UdpContent)
+import           Vcr
 
 bufferSize :: Natural
 bufferSize = 10*1000
@@ -38,9 +39,9 @@ type ChannelSelection = Map.Map Channel
 -- | Runtime engine configuration (no engine restart required on change).
 data EngineTuning = EngineTuning
     { tunRunningSpeed :: Maybe Double
-    , tunMarker1    :: UtcTime
-    , tunMarker2    :: UtcTime
-    , tunAtMarker   :: AtMarker
+    , tunMarker1      :: UtcTime
+    , tunMarker2      :: UtcTime
+    , tunAtMarker     :: AtMarker
     } deriving (Eq, Show)
 
 -- | Engine feedback actions back to user interface.
@@ -51,11 +52,11 @@ data EngineFeedback = EngineFeedback
 
 -- | Static engine configuration (restart engine on change).
 data EngineConfig = EngineConfig
-    { cfgPlayer     :: Player (PS.SafeT IO) Index (Event UdpContent)
-    , cfgDirection  :: Direction
-    , cfgChannels   :: ChannelSelection
-    , cfgTuning     :: STM EngineTuning
-    , cfgFeedback   :: EngineFeedback
+    { cfgPlayer    :: Player (PS.SafeT IO) Index (Event UdpContent)
+    , cfgDirection :: Direction
+    , cfgChannels  :: ChannelSelection
+    , cfgTuning    :: STM EngineTuning
+    , cfgFeedback  :: EngineFeedback
     }
 
 -- | Fetch events from player to internal buffer.
@@ -73,20 +74,20 @@ fetcher leakTime direction channels player putBuffer t0 = do
         result <- tryAny $ PS.runSafeT $ findEventByTimeUtc player t0
         result' <- case result of
             Left _e -> do
-                return Nothing
+                pure Nothing
             Right Nothing -> do
-                return Nothing
+                pure Nothing
             Right (Just (ix, event)) -> do
-                return $ Just (ix, event)
+                pure $ Just (ix, event)
         case result' of
-            Just val -> return val
+            Just val -> pure val
             Nothing -> do
                 threadDelaySec 1.0
                 loop
 
     -- Run from starting index and restart in case of problems.
     fetchFrom ixVar = forever $ do
-        ix0 <- atomically $ readTVar ixVar
+        ix0 <- readTVarIO ixVar
         let flt = onlyChannels channels
             producer = runPlayer player direction ix0
                 (Just (flt, Just leakTime))
@@ -122,22 +123,22 @@ sender t0 direction getFromBuffer getTuning updateT dumpConsole channels = do
                 liftIO $ do
                     blink event
                     reactiveValueRead consoleRV >>= \case
-                        Nothing -> return ()
+                        Nothing -> pure ()
                         Just dump -> atomically $ dumpConsole $ dump event
-            consumer = maybe (forever (void await)) id mConsumer
+            consumer = fromMaybe (forever (void await)) mConsumer
             act = PS.runSafeT $ runEffect $ producer >-> consumer
-        return (q, act)
+        pure (q, act)
 
     let senderMap = Map.map fst realSenders
 
     result <- race (runAll (snd <$> Map.elems realSenders)) $ do
         (evt, mSp) <- atomically ((,) <$> getFromBuffer <*> getRunningSpeed)
         case mSp of
-            Nothing -> notRunning senderMap t0 evt
+            Nothing    -> notRunning senderMap t0 evt
             Just speed -> startup senderMap t0 speed evt
     case result of
-        Left n -> fail $ "sender " ++ show n ++ " failed"
-        Right val -> return val
+        Left n    -> fail $ "sender " ++ show n ++ " failed"
+        Right val -> pure val
 
   where
 
@@ -147,7 +148,7 @@ sender t0 direction getFromBuffer getTuning updateT dumpConsole channels = do
     -- We don't want to drop events when switching between
     -- notRunning and running modes.
     notRunning senderMap tUtc evt = do
-        speed <- atomically (getRunningSpeed >>= maybe retrySTM return)
+        speed <- atomically (getRunningSpeed >>= maybe retrySTM pure)
         startup senderMap tUtc speed evt
 
     -- Calculate how the virtual time will progress,
@@ -162,37 +163,37 @@ sender t0 direction getFromBuffer getTuning updateT dumpConsole channels = do
             getVirtualMonotonicTime = do
                 dtReal <- (\t -> t - tStartupMono) <$> getMonoTimeNs
                 let dt = round (fromIntegral dtReal * speed)
-                return $ case direction of
-                    Forward -> t0Mono + dt
+                pure $ case direction of
+                    Forward  -> t0Mono + dt
                     Backward -> t0Mono - dt
         running senderMap (eSessionId evt) speed getVirtualMonotonicTime tUtc evt
 
     -- Timing is only valid within the same session.
     running senderMap session speed getVirtualMonotonicTime = fix $ \loop tUtc evt -> do
-        case (eSessionId evt) == session of
+        case eSessionId evt == session of
             -- new session detected, restart
             False -> startup senderMap tUtc speed evt
             True -> do
                 tMono <- getVirtualMonotonicTime
                 let (k, compareF) = case direction of
-                        Forward -> (1.0, (>=))
+                        Forward  -> (1.0, (>=))
                         Backward -> (-1.0, (<=))
                 (tUtc', getNextEvent) <- case compareF tMono (eTimeMono evt) of
                     False -> do
                         threadDelaySec 0.001
                         let deltaT = fromRational (round (speed*1000) % (1000*1000))
                             tUtc' = Clk.addUTCTime (deltaT*k) tUtc
-                        return (tUtc', pure evt)
+                        pure (tUtc', pure evt)
                     True -> do
                         fire senderMap evt
                         let tUtc' = eTimeUtc evt
-                        return (tUtc', getFromBuffer)
+                        pure (tUtc', getFromBuffer)
                 atomically $ updateT tUtc'
                 evt' <- atomically getNextEvent
                 mSpeed' <- atomically getRunningSpeed
-                case mSpeed' == (Just speed) of
+                case mSpeed' == Just speed of
                     False -> case mSpeed' of
-                        Nothing -> notRunning senderMap tUtc' evt'
+                        Nothing     -> notRunning senderMap tUtc' evt'
                         Just speed' -> startup senderMap tUtc' speed' evt'
                     True -> do
                         (t1, t2, atMarker) <- atomically getMarkers
@@ -201,7 +202,7 @@ sender t0 direction getFromBuffer getTuning updateT dumpConsole channels = do
                                 Backward -> tUtc' <= t1
                         if
                             -- finish sending, caller will restart the process
-                            | limitReached && atMarker == Wrap -> return ()
+                            | limitReached && atMarker == Wrap -> pure ()
 
                             -- wait until something changes, then recalculate
                             | limitReached && atMarker == Stop -> do
@@ -216,12 +217,12 @@ sender t0 direction getFromBuffer getTuning updateT dumpConsole channels = do
 
     -- fire event
     fire senderMap evt = case Map.lookup (eChannel evt) senderMap of
-        Nothing -> return ()
-        Just q -> atomically $ writeTBQueue q evt
+        Nothing -> pure ()
+        Just q  -> atomically $ writeTBQueue q evt
 
     getMarkers = do
         tun <- getTuning
-        return (tunMarker1 tun, tunMarker2 tun, tunAtMarker tun)
+        pure (tunMarker1 tun, tunMarker2 tun, tunAtMarker tun)
 
 -- | Calculate buffer level percentage.
 percent :: Clk.NominalDiffTime -> Clk.NominalDiffTime -> Int
@@ -238,7 +239,7 @@ engine ::
     -> EngineConfig
     -> IO ()
 engine prefetchSeconds tUtc cfg = fix $ \loop -> do
-    t <- atomically $ readTVar tUtc
+    t <- readTVarIO tUtc
     tLastInsertedVar <- newTVarIO t
     buffer <- newTBQueueIO bufferSize
 
@@ -246,8 +247,8 @@ engine prefetchSeconds tUtc cfg = fix $ \loop -> do
         getBufferSpan = do
             t1 <- readTVar tLastInsertedVar
             t2 <- readTVar tUtc
-            return $ case cfgDirection cfg of
-                Forward -> Clk.diffUTCTime t1 t2
+            pure $ case cfgDirection cfg of
+                Forward  -> Clk.diffUTCTime t1 t2
                 Backward -> Clk.diffUTCTime t2 t1
 
         putToBuffer event = do
@@ -283,8 +284,7 @@ engine prefetchSeconds tUtc cfg = fix $ \loop -> do
         Left _ -> fail "fetcher failed"
         Right _ -> do    -- sender terminated
             let tv = case cfgDirection cfg of
-                    Forward -> tunMarker1
+                    Forward  -> tunMarker1
                     Backward -> tunMarker2
-            atomically (fmap tv (cfgTuning cfg) >>= writeTVar tUtc)
+            atomically (cfgTuning cfg >>= writeTVar tUtc . tv)
             loop
-

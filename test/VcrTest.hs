@@ -1,5 +1,5 @@
+{-# LANGUAGE MultiWayIf        #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE MultiWayIf #-}
 
 -- | VCR unit and property tests.
 
@@ -7,26 +7,26 @@ module VcrTest where
 
 import           Control.Monad
 import           Control.Monad.Catch
-import           Data.Maybe
 import qualified Data.ByteString.Char8 as BS8
+import           Data.Maybe
 import           Pipes
-import qualified Pipes.Prelude as PP
+import qualified Pipes.Prelude         as PP
 import           Test.Tasty
-import           Test.Tasty.QuickCheck as QC
 import           Test.Tasty.HUnit
+import           Test.Tasty.QuickCheck as QC
 
-import           Vcr
 import           TestCommon
+import           Vcr
 
 mkListPlayer :: MonadThrow m => [Event a] -> Player m Int (Event a)
 mkListPlayer lst = Player
-    { limits = return $ (0, pred $ Prelude.length lst)
-    , middle = \a b -> return ((a + b) `div` 2)
-    , peekItem = \ix -> return (lst !! ix)
+    { limits = pure (0, pred $ Prelude.length lst)
+    , middle = \a b -> pure ((a + b) `div` 2)
+    , peekItem = \ix -> pure (lst !! ix)
     , runPlayer = \direction ix flt -> do
         let lst' = Prelude.zip [0..] lst
             playAll = case direction of
-                Forward -> each (Prelude.drop ix lst')
+                Forward  -> each (Prelude.drop ix lst')
                 Backward -> each (Prelude.reverse $ Prelude.take (succ ix) lst')
         playAll >-> dashEvents' direction flt
     }
@@ -43,9 +43,9 @@ limitsTest = QC.testProperty "check limits" $ \utc0 -> do
         a1 = fromJust $ peekItem p i1
         a2 = fromJust $ peekItem p i2
 
-    return
-        (   ((i1, a1) === (0, events !! 0))
-       .&&. ((i2, a2) === (pred n, events !! (pred n)))
+    pure
+        (   ((i1, a1) === (0, head events))
+       .&&. ((i2, a2) === (pred n, events !! pred n))
         )
 
 -- | Next item test
@@ -59,14 +59,14 @@ nextItemTest = QC.testProperty "check limits" $ \utc0 -> do
         results1 = do
             ix <- [0..pred (pred n)]
             let (ix', a') = fromJust $ nextItem p Forward ix Nothing
-            return ((succ ix, events !! succ ix) === (ix', a'))
+            pure ((succ ix, events !! succ ix) === (ix', a'))
 
         results2 = do
             ix <- [1..pred n]
             let (ix', a') = fromJust $ nextItem p Backward ix Nothing
-            return ((pred ix, events !! pred ix) === (ix', a'))
+            pure ((pred ix, events !! pred ix) === (ix', a'))
 
-    return (conjoin results1 .&&. conjoin results2)
+    pure (conjoin results1 .&&. conjoin results2)
 
 -- | Basic bisection test - find equal elements.
 bisectTest1 :: TestTree
@@ -79,8 +79,8 @@ bisectTest1 = QC.testProperty "bisect - find equal elements" $ \utc0 -> do
             (i::Int, event) <- zip [0..] events
             let result = bisect p
                     (\event' -> compare (eTimeMono event') (eTimeMono event))
-            return $ result == Just (Just (i, event))
-    return (and isCorrect)
+            pure $ result == Just (Just (i, event))
+    pure (and isCorrect)
 
 -- | Bisection test - find inside interval.
 bisectTest2 :: TestTree
@@ -90,12 +90,12 @@ bisectTest2 = QC.testProperty "bisect - find in interval" $ forAll (choose (1,15
         events :: [Event Int]
         events = do
             x <- [30,40..90]
-            return $ event { eValue = x }
+            pure $ event { eValue = x }
         p :: Player Maybe Int (Event Int)
         p = mkListPlayer events
         result :: Maybe (Int, Event Int)
         result = fromJust $ bisect p (\x -> compare (eValue x) (eValue eProbe))
-    return $ if
+    pure $ if
         | pVal > 90 -> isNothing result
         | otherwise -> isJust result
 
@@ -110,8 +110,8 @@ bisectTest3 = QC.testProperty "bisect - reindex" $ \utc0 -> do
             (i, event) <- zip (toIndex <$> [(0::Int)..]) events
             let result = bisect p
                     (\event' -> compare (eTimeMono event') (eTimeMono event))
-            return $ result == Just (Just (i, event))
-    return (and isCorrect)
+            pure $ result == Just (Just (i, event))
+    pure (and isCorrect)
 
 -- | 'findEventByUtc' shall find any exact utc time from the ordered list.
 findEventByUtcTest :: TestTree
@@ -123,8 +123,8 @@ findEventByUtcTest = QC.testProperty "findEventByUtcTest" $ \utc0 -> do
         isCorrect = do
             (i::Int, evt) <- zip [0..] events
             let result = fromJust $ findEventByTimeUtc p $ eTimeUtc evt
-            return $ result == Just (i, evt)
-    return $ and isCorrect
+            pure $ result == Just (i, evt)
+    pure $ and isCorrect
 
 -- | Check if all events are present in replay.
 playerListComplete :: TestTree
@@ -134,14 +134,14 @@ playerListComplete = QC.testProperty "list player" $ \utc0 direction -> do
     let p :: Player Maybe Int (Event ())
         p = mkListPlayer events
         ix = case direction of
-            Forward -> 0
+            Forward  -> 0
             Backward -> length events
         result = fromJust $ PP.toListM $ runPlayer p direction ix Nothing
         indexed = zip [0..] events
         expected = case direction of
-            Forward -> indexed
+            Forward  -> indexed
             Backward -> reverse indexed
-    return $ result == expected
+    pure $ result == expected
 
 validJSON :: TestTree
 validJSON = QC.testProperty "valid json" $ \event ->
@@ -157,7 +157,7 @@ playerSteps = testCaseSteps "player" $ \step -> do
     samples :: [Event ()] <- do
         n <- getPositive <$> generate arbitrary
         t0 <- generate arbitrary
-        generate $ take n <$> (genEvents ["ch1", "ch2"] 100 t0)
+        generate $ take n <$> genEvents ["ch1", "ch2"] 100 t0
 
     let player :: Player Maybe Int (Event ())
         player = mkListPlayer samples

@@ -7,25 +7,25 @@
 module Replay.Controller where
 
 import           Control.Monad
-import           UnliftIO
+import qualified Data.Map                    as Map
 import           Data.Maybe
-import qualified Data.Map as Map
 import           Data.ReactiveValue.Extended
-import qualified Pipes.Safe as PS
+import qualified Pipes.Safe                  as PS
+import           UnliftIO
 
 -- local imports
 import           Common
-import           Vcr
-import           Udp (UdpContent)
-import           Time
-import           Streaming
-import           Replay.Types
 import           Replay.Engine
+import           Replay.Types
+import           Streaming
+import           Time
+import           Udp                         (UdpContent)
+import           Vcr
 
 -- | Check task and exit if not running.
 checkTask :: UI -> String -> Async () -> IO ()
 checkTask ui name task = poll task >>= \case
-    Nothing -> return ()
+    Nothing -> pure ()
     Just x -> do
         print $ name ++ " terminated, result: " ++ show (x :: Either PS.SomeException ())
         uiExit ui
@@ -42,9 +42,9 @@ limitMonitor updateLimits player = do
             (ix1, ix2) <- PS.runSafeT $ limits player
             a <- PS.runSafeT $ peekItem player ix1
             b <- PS.runSafeT $ peekItem player ix2
-            return (eTimeUtc a, eTimeUtc b)
+            pure (eTimeUtc a, eTimeUtc b)
         atomically $ updateLimits $ case result of
-            Left _ -> Nothing
+            Left _    -> Nothing
             Right val -> Just val
 
 -- | Determine channel selection from:
@@ -65,21 +65,21 @@ channelSelectionR ui = do
                 mConsole <- reactiveValueRead consoleRV
                 mSender <- reactiveValueRead senderRV
                 let required = isJust mConsole || isJust mSender
-                return $ case required of
+                pure $ case required of
                     False -> Nothing
                     True -> Just (channel, (readOnly consoleRV, mSender, blink))
-            return $ Map.fromList $ catMaybes result
+            pure $ Map.fromList $ catMaybes result
 
-        notifier p = modifyMVar_ notifiers (\x -> return (x ++ [p]))
+        notifier p = modifyMVar_ notifiers (\x -> pure (x ++ [p]))
 
         getChannelSelection :: IO (Name, Map.Map Channel (Bool, Bool))
         getChannelSelection = do
             i <- reactiveValueRead (uiOutputSet ui)
             let f (consoleRV, mSender, _blink) = do
                     mConsole <- reactiveValueRead consoleRV
-                    return (isJust mConsole, isJust mSender)
+                    pure (isJust mConsole, isJust mSender)
             result <- getter >>= traverse f
-            return (i, result)
+            pure (i, result)
 
     oldValueVar <- getChannelSelection >>= newMVar
     let update = do
@@ -102,7 +102,7 @@ channelSelectionR ui = do
         forM_ lst $ \(_channel, (consoleRV, senderRV, _blink)) -> do
             reactiveValueOnCanRead consoleRV update
             reactiveValueOnCanRead senderRV update
-    return $ ReactiveFieldRead getter notifier
+    pure $ ReactiveFieldRead getter notifier
 
 -- | Create and connect reactive values, start monitor and engine processes.
 controller :: TVar UtcTime -> UI -> IO (ReactiveFieldRead IO EngineConfig, IO ())
@@ -115,7 +115,7 @@ controller tUtc ui = do
 
         speedRV :: ReactiveFieldRead IO (Maybe Double)
         speedRV = liftR2 f (uiRunning ui) (uiSpeed ui) where
-            f False _ = Nothing
+            f False _  = Nothing
             f True val = Just val
 
         engineTuningRV :: ReactiveFieldRead IO EngineTuning
@@ -128,7 +128,7 @@ controller tUtc ui = do
     engineTuningSTM <- do
         var <- reactiveValueRead engineTuningRV >>= newTVarIO
         follow engineTuningRV $ atomically . writeTVar var
-        return var
+        pure var
 
     let engineFeedback :: EngineFeedback
         engineFeedback = EngineFeedback
@@ -159,7 +159,7 @@ controller tUtc ui = do
             withConfig engineConfigRV $ \cfg -> do
                 atomically $ do
                     uiConsole ui ConsoleClear
-                    (uiBufferLevel ui) 0
+                    uiBufferLevel ui 0
 
                 -- Initial delay, to prevent fast respawn during config change.
                 -- Wait, until user makes final config selection, then start.
@@ -171,5 +171,4 @@ controller tUtc ui = do
             checkTask ui "engine" engineTask
 
     -- return engine config RV and periodic action (to be run from GUI)
-    return (engineConfigRV, periodicAction)
-
+    pure (engineConfigRV, periodicAction)

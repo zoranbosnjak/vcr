@@ -1,5 +1,4 @@
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Recorder configurator GUI application.
@@ -15,31 +14,32 @@ module Configurator
     , module Options.Applicative
     ) where
 
-import           UnliftIO
 import           Control.Monad
-import           Options.Applicative hiding (command, columns)
-import qualified Data.Map as Map
-import qualified Data.Text as T
-import qualified Data.Time.Clock as Clk
-import qualified Data.Time.Calendar as Cal
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString             as BS
+import qualified Data.ByteString.Lazy        as BSL
+import qualified Data.Map                    as Map
+import           Data.Maybe
+import qualified Data.Text                   as T
+import qualified Data.Time.Calendar          as Cal
+import qualified Data.Time.Clock             as Clk
+import           Lens.Micro.Platform         hiding (set)
+import           Options.Applicative         hiding (columns, command)
 import           Text.Printf
-import           Lens.Micro.Platform hiding (set)
+import           UnliftIO
 
 import           Data.ReactiveValue.Extended
 
-import           Graphics.UI.WXCore
 import           Graphics.UI.WX
+import           Graphics.UI.WXCore
 
 -- local import
+import qualified Capture.Types               as CT
 import           Common
 import           Replay.Types
-import           Vcr
-import           Udp
-import           Time
 import           Streaming.Http
-import qualified Capture.Types as CT
+import           Time
+import           Udp
+import           Vcr
 
 data TargetStatus
     = TargetUnknown
@@ -50,15 +50,15 @@ data TargetStatus
 type ChannelConfig = Map.Map Channel UdpIn
 
 data Target = Target
-    { trName :: StaticText ()
-    , trPull :: Button ()
-    , trPush :: Button ()
-    , trDiff :: Button ()
+    { trName      :: StaticText ()
+    , trPull      :: Button ()
+    , trPush      :: Button ()
+    , trDiff      :: Button ()
     , trConfigSTM :: TVar (Maybe CT.Config)
-    , trConfigRV :: ReactiveFieldReadWrite IO (Maybe CT.Config)
+    , trConfigRV  :: ReactiveFieldReadWrite IO (Maybe CT.Config)
     , trStatusSTM :: TVar (Maybe (Map.Map Channel Bool))
-    , trStatusRV :: ReactiveFieldReadWrite IO (Maybe (Map.Map Channel Bool))
-    , trTask :: Async ()
+    , trStatusRV  :: ReactiveFieldReadWrite IO (Maybe (Map.Map Channel Bool))
+    , trTask      :: Async ()
     }
 
 showUdpIn :: UdpIn -> String
@@ -106,9 +106,9 @@ addDialog f var = do
         )
 
     case result of
-        Nothing -> return ()
+        Nothing -> pure ()
         Just (ch, sel, t1, t2) -> do
-            case (ch == "" || t1 == "" || t2 == "") of
+            case ch == "" || t1 == "" || t2 == "" of
                 True -> errorDialog f "error" "empty selection error"
                 False -> do
                     let udp = case sel of
@@ -143,7 +143,7 @@ removeDialog f var = do
         , on listEvent := \case
             ListItemSelected idx -> modifyIORef chSelection (setAt idx True)
             ListItemDeselected idx -> modifyIORef chSelection (setAt idx False)
-            _ -> return ()
+            _ -> pure ()
         ]
 
     bCancel <- button d [text := "Cancel"]
@@ -160,13 +160,13 @@ removeDialog f var = do
         )
 
     case result of
-        Nothing -> return ()
+        Nothing -> pure ()
         Just _ -> do
             selected <- do
                 val <- readIORef chSelection
-                return $ Map.fromList (zip channels val)
+                pure $ Map.fromList (zip channels val)
             let check a False = Just a
-                check _ True = Nothing
+                check _ True  = Nothing
             reactiveValueModify var $ flip (Map.differenceWith check) selected
 
 -- | Fetch configuration and status from recorder to STM.
@@ -200,7 +200,7 @@ configChanges confX confY = (added, removed, changed)
         a <- Map.lookup k confX
         b <- Map.lookup k confY
         guard $ b /= a
-        return (b, a)
+        pure (b, a)
     changed = Map.mapMaybeWithKey checkF (Map.union confX confY)
 
 -- | Prepare button tooltip
@@ -216,7 +216,7 @@ mkTooltip direction confX confY =
     showChanges chName chMap =
         "\n" ++ chName ++ ": " ++ case fmap T.unpack (Map.keys chMap) of
             [] -> "-"
-            t -> foldr1 (\a b -> a ++ ", " ++ b) t
+            t  -> foldr1 (\a b -> a ++ ", " ++ b) t
 
 -- | Save configuration to a file
 saveAs :: Window a -> ChannelConfig -> IO ()
@@ -231,9 +231,9 @@ saveAs f cfg = do
         seconds = (sec - hours*3600) `mod` 60
         s = printf "%04d-%02d-%02d %02d:%02d:%02d" year month day hours minutes seconds :: String
         suggestedFile = "capture-inputs-" ++ s ++ ".json"
-            & map (\x -> case x of
+            & map (\case
                 ' ' -> '_'
-                c -> c)
+                c   -> c)
 
     result <- fileSaveDialog f True False "Save configuration"
         [ ("Config",["*.json"])
@@ -241,12 +241,12 @@ saveAs f cfg = do
         ] "" suggestedFile
 
     case result of
-        Nothing -> return ()
+        Nothing -> pure ()
         Just targetFile -> do
             val <- tryAny $ BSL.writeFile targetFile $ encodeJSONPrettyL cfg
             case val of
-                Right _ -> return ()
-                Left e -> errorDialog f "error" (show e)
+                Right _ -> pure ()
+                Left e  -> errorDialog f "error" (show e)
 
 -- | Load configuration from a file
 loadFile :: Window a -> ReactiveFieldReadWrite IO ChannelConfig -> IO ()
@@ -256,11 +256,11 @@ loadFile f channelsRV = do
         , ("Any file", ["*"])
         ] "" ""
     case result of
-        Nothing -> return ()
+        Nothing -> pure ()
         Just filename -> do
             eCfg <- tryAny (BS.readFile filename >>= decodeJSON)
             case eCfg of
-                Left e -> errorDialog f "error" (show e)
+                Left e    -> errorDialog f "error" (show e)
                 Right cfg -> reactiveValueWrite channelsRV cfg
 
 -- | Run configurator GUI.
@@ -304,7 +304,7 @@ runConfigurator recorders initialConfig = start $ do
             [ text := "Pull"
             , on command := do
                 reactiveValueRead cfgRV >>= \case
-                    Nothing -> return ()
+                    Nothing -> pure ()
                     Just val -> reactiveValueWrite channelsRV $ CT.confInputs val
             ]
 
@@ -312,23 +312,23 @@ runConfigurator recorders initialConfig = start $ do
             [ text := "Push"
             , on command := do
                 reactiveValueRead cfgRV >>= \case
-                    Nothing -> return ()
+                    Nothing -> pure ()
                     Just cfg -> do
                         newInputs <- reactiveValueRead channelsRV
                         let cfg' = cfg { CT.confInputs = newInputs }
                         proceed <- case Map.null newInputs of
                             True -> proceedDialog f "Confirm" "Upload empty configuration?"
-                            False -> return True
+                            False -> pure True
                         Control.Monad.when proceed $ pushConfig addr cfg' >>= \case
                             Left e -> errorDialog f "error" (show e)
-                            Right _ -> return ()
+                            Right _ -> pure ()
             ]
 
         bDiff <- button p1s
             [ text := "Diff"
             , on command := do
                 reactiveValueRead allConfig >>= \case
-                    (_, Nothing) -> return ()
+                    (_, Nothing) -> pure ()
                     (myConfig, Just otherConfig) -> do
                         let (added, removed, changed) = configChanges myConfig otherConfig
                             pending =
@@ -339,7 +339,7 @@ runConfigurator recorders initialConfig = start $ do
                                 ++ showChannels removed
 
                                 ++ "\nchanged:\n"
-                                ++ (flip Map.foldMapWithKey changed $ \k (a,b) ->
+                                ++ flip Map.foldMapWithKey changed (\k (a,b) ->
                                     let ch = T.unpack k
                                     in ch ++ " <-\n"
                                         ++ "  - " ++ showUdpIn a ++ "\n"
@@ -355,7 +355,7 @@ runConfigurator recorders initialConfig = start $ do
                                 , text := pending
                                 ]
                             textCtrlSetEditable ctr False
-                            return ctr
+                            pure ctr
                         bOk <- button d [text := "Ok"]
                         set ds [ layout := fill $ widget diffWindow ]
                         set d [ layout := column 5
@@ -373,19 +373,19 @@ runConfigurator recorders initialConfig = start $ do
         -- colorize/enable buttons, update button tooltips
         follow allConfig $ \(myConfig, mOtherConfig) -> do
             let st
-                    | mOtherConfig == Nothing = TargetUnknown
+                    | isNothing mOtherConfig = TargetUnknown
                     | mOtherConfig == Just myConfig = TargetInSync
                     | otherwise = TargetDifferent
                 col = case st of
-                    TargetUnknown -> red
-                    TargetInSync -> green
+                    TargetUnknown   -> red
+                    TargetInSync    -> green
                     TargetDifferent -> yellow
 
             let pullTooltip = case mOtherConfig of
-                    Nothing -> ""
+                    Nothing          -> ""
                     Just otherConfig -> mkTooltip "pull" otherConfig myConfig
                 pushTooltip = case mOtherConfig of
-                    Nothing -> ""
+                    Nothing          -> ""
                     Just otherConfig -> mkTooltip "push" myConfig otherConfig
 
             set bPull [ bgcolor := col, enabled := (st == TargetDifferent), tooltip := pullTooltip ]
@@ -404,7 +404,7 @@ runConfigurator recorders initialConfig = start $ do
             set lab [ text := (name ++ " (" ++ t ++ ")") ]
 
         task <- async $ targetPolling addr (writeTVar cfgSTM) (writeTVar statSTM)
-        return $ Target lab bPull bPush bDiff cfgSTM cfgRV statSTM statRV task
+        pure $ Target lab bPull bPush bDiff cfgSTM cfgRV statSTM statRV task
 
     addChannel <- button p2
         [ text := "Add"
@@ -424,7 +424,7 @@ runConfigurator recorders initialConfig = start $ do
             , text := ""
             ]
         textCtrlSetEditable ctr False
-        return ctr
+        pure ctr
 
     follow channelsRV $ \val -> do
         set chWindow [ text := showChannels val ]
@@ -447,7 +447,7 @@ runConfigurator recorders initialConfig = start $ do
 
     set p1s [ layout := column 5 $ do
         tr <- targets
-        return $ row 5
+        pure $ row 5
             [ widget $ trPull tr
             , widget $ trPush tr
             , widget $ trDiff tr
@@ -484,16 +484,15 @@ runConfigurator recorders initialConfig = start $ do
 
                 -- check task
                 poll (trTask tr) >>= \case
-                    Nothing -> return ()
+                    Nothing -> pure ()
                     Just x -> do
                         print $ "task terrminated, result: " ++ show (x :: Either SomeException ())
                         close f
 
                 -- update STM -> RV
-                atomically (readTVar $ trConfigSTM tr)
+                readTVarIO (trConfigSTM tr)
                     >>= reactiveValueWrite (trConfigRV tr)
-                atomically (readTVar $ trStatusSTM tr)
+                readTVarIO (trStatusSTM tr)
                     >>= reactiveValueWrite (trStatusRV tr)
 
         ]
-

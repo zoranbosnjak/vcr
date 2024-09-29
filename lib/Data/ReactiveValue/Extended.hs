@@ -10,13 +10,13 @@ module Data.ReactiveValue.Extended
     , module Data.ReactiveValue.Extended
     ) where
 
+import           Control.Concurrent.STM.TQueue (flushTQueue)
 import           Data.Bool
 import           UnliftIO
-import           Control.Concurrent.STM.TQueue (flushTQueue)
 
-import           Data.ReactiveValue
 import           Data.CBMVar
 import           Data.CBMVar.Reactive
+import           Data.ReactiveValue
 
 -- | Setup callback, but also run it initially, to make the first update.
 follow :: (ReactiveValueRead a b m) => a -> (b -> m ()) -> m ()

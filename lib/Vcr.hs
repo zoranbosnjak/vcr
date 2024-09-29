@@ -1,29 +1,29 @@
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DataKinds            #-}
+{-# LANGUAGE DeriveAnyClass       #-}
+{-# LANGUAGE LambdaCase           #-}
+{-# LANGUAGE OverloadedStrings    #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | Common VCR data types and helper functions.
 
 module Vcr where
 
-import           GHC.Generics (Generic)
-import           Data.Text as Text
-import           Data.Aeson
-import qualified Data.Aeson.Encode.Pretty as AesonP
-import qualified Data.List.NonEmpty as NE
 import           Control.Monad
 import           Control.Monad.Catch
 import           Control.Monad.Trans.Maybe
+import           Data.Aeson
+import qualified Data.Aeson.Encode.Pretty  as AesonP
+import qualified Data.ByteString           as BS
+import qualified Data.ByteString.Lazy      as BSL
+import qualified Data.List.NonEmpty        as NE
+import           Data.Text                 as Text
+import           GHC.Generics              (Generic)
 import           Pipes
-import qualified Pipes.Prelude as PP
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
+import qualified Pipes.Prelude             as PP
 
 -- local imports
-import           Time
 import           Sequential
+import           Time
 
 type Channel = Text
 type SessionId = Text
@@ -45,8 +45,8 @@ encodeJSON = BSL.toStrict . Data.Aeson.encode
 -- | Decode JSON object.
 decodeJSON :: (MonadThrow m, FromJSON a) => BS.ByteString -> m a
 decodeJSON s = case eitherDecodeStrict s of
-    Left e -> throwM $ DecodeError $ show s ++ ", error: " ++ e
-    Right val -> return val
+    Left e    -> throwM $ DecodeError $ show s ++ ", error: " ++ e
+    Right val -> pure val
 
 -- | Encode (pretty) to JSON.
 encodeJSONPrettyL :: (Data.Aeson.ToJSON a) => a -> BSL.ByteString
@@ -54,13 +54,13 @@ encodeJSONPrettyL = AesonP.encodePretty'
     AesonP.defConfig {AesonP.confCompare = compare}
 
 data Event a = Event
-    { eChannel      :: Channel          -- channel name
-    , eTimeMono     :: MonoTimeNs       -- monotonically incrementing time
-    , eTimeUtc      :: UtcTime          -- utc time
-    , eSessionId    :: SessionId        -- unique session identifier
-    , eTrackId      :: TrackId          -- unique track identifier
-    , eSequence     :: SequenceNumber   -- sequence number
-    , eValue        :: a                -- value
+    { eChannel   :: Channel          -- channel name
+    , eTimeMono  :: MonoTimeNs       -- monotonically incrementing time
+    , eTimeUtc   :: UtcTime          -- utc time
+    , eSessionId :: SessionId        -- unique session identifier
+    , eTrackId   :: TrackId          -- unique track identifier
+    , eSequence  :: SequenceNumber   -- sequence number
+    , eValue     :: a                -- value
     } deriving (Generic, Eq, Show, Functor)
 
 instance (ToJSON a) => ToJSON (Event a) where
@@ -91,7 +91,7 @@ type Recorder m a r = LogAction m -> Consumer a m r
 
 -- | Create JSON based recorder from ByteString recorder.
 jsonRecorder :: (ToJSON a, Functor m) => Recorder m BS.ByteString r -> Recorder m a r
-jsonRecorder rec = \logM -> PP.map encodeJSON >-> rec logM
+jsonRecorder rec logM = PP.map encodeJSON >-> rec logM
 
 -- | Player direction.
 data Direction = Forward | Backward
@@ -131,10 +131,10 @@ applyFilter flt event = case flt of
     FChannel tf -> applyTextFilter tf (eChannel event)
     FSession tf -> applyTextFilter tf (eSessionId event)
     FTrack tf   -> applyTextFilter tf (eTrackId event)
-    And f1 f2 -> applyFilter f1 event && applyFilter f2 event
-    Or f1 f2 -> applyFilter f1 event || applyFilter f2 event
-    Not f -> not $ applyFilter f event
-    Pass -> True
+    And f1 f2   -> applyFilter f1 event && applyFilter f2 event
+    Or f1 f2    -> applyFilter f1 event || applyFilter f2 event
+    Not f       -> not $ applyFilter f event
+    Pass        -> True
 
 -- | Helper function to construct channel filter.
 onlyChannels :: Foldable t => t Channel -> Filter
@@ -160,7 +160,7 @@ mkDummyPlayer = Player
     { limits = throwM $ PlayError "dummy player"
     , middle = \_ix1 _ix2 -> throwM $ PlayError "dummy player"
     , peekItem = \_ix -> throwM $ PlayError "dummy player"
-    , runPlayer = \_direction _ix _flt -> return ()
+    , runPlayer = \_direction _ix _flt -> pure ()
     }
 
 -- | Make one step from given index and return next (ix, a).
@@ -169,25 +169,28 @@ nextItem :: MonadThrow m => Player m ix a -> Direction -> ix
 nextItem player direction ix flt = do
     result <- next (runPlayer player direction ix flt >-> PP.drop 1)
     case result of
-        Left e -> throwM $ PlayError $ show e
-        Right (val, _producer') -> return val
+        Left e                  -> throwM $ PlayError $ show e
+        Right (val, _producer') -> pure val
 
 -- | 'Player m ix' is a functor.
 instance Monad m => Functor (Player m ix) where
     fmap f player = Player
         { limits = limits player
         , middle = middle player
-        , peekItem = \ix -> f <$> peekItem player ix
+        , peekItem = fmap f . peekItem player
         , runPlayer = \direction ix flt -> do
             runPlayer player direction ix flt >-> PP.mapM (\(a,b) -> do
-                return (a, f b))
+                pure (a, f b))
         }
 
 -- | Common index data type for all players
 -- Correct 'Ord' instance is important for 'bisect' function.
-data Index
+newtype Index
     = Index (NE.NonEmpty Integer)
-    deriving (Generic, Eq, Ord, ToJSON, FromJSON)
+    deriving (Generic, Eq, Ord)
+
+instance ToJSON Index
+instance FromJSON Index
 
 instance Show Index where
     show (Index lst) = show $ NE.toList lst
@@ -205,7 +208,7 @@ instance IsIndex Index where
     fromIndex = id
 
 instance {-# OVERLAPPABLE #-} Integral a => IsIndex a where
-    toIndex val = Index $ (toInteger val) NE.:| []
+    toIndex val = Index $ toInteger val NE.:| []
     fromIndex (Index lst) = fromInteger $ NE.head lst
 
 -- | Change player's index type.
@@ -213,16 +216,16 @@ reindex :: (IsIndex ix, Monad m) => Player m ix a -> Player m Index a
 reindex player = Player
     { limits = do
         (ix1, ix2) <- limits player
-        return (toIndex ix1, toIndex ix2)
+        pure (toIndex ix1, toIndex ix2)
     , middle = \ix1 ix2 -> do
         ix <- middle player (fromIndex ix1) (fromIndex ix2)
-        return $ toIndex ix
+        pure $ toIndex ix
     , peekItem = \ix -> do
         peekItem player (fromIndex ix)
     , runPlayer = \direction ix flt -> do
         let ix' = fromIndex ix
         runPlayer player direction ix' flt >-> PP.mapM (\(a,b) -> do
-            return (toIndex a, b))
+            pure (toIndex a, b))
     }
 
 -- | Filter events.
@@ -240,7 +243,7 @@ dashEvents direction (flt, Just timeout) = do
     loop event
   where
     compareOperator = case direction of
-        Forward -> (>=)
+        Forward  -> (>=)
         Backward -> (<=)
     loop event = do
         (ix, event') <- await
@@ -272,12 +275,12 @@ bisect player checkItem = do
   where
     probe i = do
         a <- peekItem player i
-        return (a, checkItem a)
+        pure (a, checkItem a)
     go i1 i2 = do
         guard (i2 >= i1)
         (a1, x1) <- lift $ probe i1
         case x1 == LT of
-            False -> return (i1, a1)   -- found it
+            False -> pure (i1, a1)   -- found it
             True -> do
                 guard (x1 == LT)
                 i <- lift $ middle player i1 i2
@@ -286,15 +289,14 @@ bisect player checkItem = do
                         (a, x) <- lift $ probe i
                         case x of
                             LT -> go i i2
-                            EQ -> return (i, a)
+                            EQ -> pure (i, a)
                             GT -> go i1 i
                     True -> do      -- no more items between i1 and i2
                         (a, x2) <- lift $ probe i2
                         guard (x2 /= LT)
-                        return (i2, a)
+                        pure (i2, a)
 
 -- | Find UTC time.
 findEventByTimeUtc :: (Ord ix, Monad m) =>
     Player m ix (Event a) -> UtcTime -> m (Maybe (ix, Event a))
 findEventByTimeUtc s t = bisect s $ \evt -> compare (eTimeUtc evt) t
-

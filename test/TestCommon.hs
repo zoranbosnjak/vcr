@@ -4,10 +4,10 @@
 
 module TestCommon where
 
+import qualified Data.Text             as T
 import           Data.Time
-import qualified Data.Text as T
-import           Test.Tasty.QuickCheck as QC
 import           Pipes
+import           Test.Tasty.QuickCheck as QC
 
 import           Sequential
 import           Time
@@ -37,7 +37,7 @@ nextEvent :: Monad m => m Channel -> m MonoTimeNs -> Event a -> m (Event a)
 nextEvent getChannel getDt event = do
     ch <- getChannel
     dt <- getDt
-    return $ event
+    pure $ event
         { eChannel = ch
         , eTimeMono = eTimeMono event + dt
         , eTimeUtc = addMonoTimeNS dt (eTimeUtc event)
@@ -77,4 +77,3 @@ produceEvents channels dt t0 = do
             (liftIO $ generate $ choose (dt, 1000*dt))
             event
         go event'
-

@@ -7,19 +7,19 @@ module Streaming.Http where
 import           Control.Monad
 import           Control.Monad.Fix
 import           Data.Aeson
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
+import qualified Data.ByteString         as BS
+import qualified Data.ByteString.Char8   as BS8
 
-import qualified Network.HTTP.Client as HTC
+import qualified Network.HTTP.Client     as HTC
 import qualified Network.HTTP.Client.TLS as HTCS
-import qualified Network.HTTP.Types as HT
+import qualified Network.HTTP.Types      as HT
 
 import           Pipes
 import           Pipes.Safe
 
 -- local imports
-import           Vcr
 import           Common
+import           Vcr
 
 -- | Url encode JSON object
 objToUrl :: ToJSON a => a -> String
@@ -29,7 +29,7 @@ objToUrl = BS8.unpack . HT.urlEncode False . encodeJSON
 mkManager :: HTC.Request -> IO HTC.Manager
 mkManager request = HTC.newManager $ case HTC.secure request of
     False -> HTC.defaultManagerSettings
-    True -> HTCS.tlsManagerSettings
+    True  -> HTCS.tlsManagerSettings
 
 -- | Make http(s) GET request and perform some action on response.
 runGetRequest :: String -> (HTC.Response HTC.BodyReader -> IO a) -> IO a
@@ -43,7 +43,7 @@ fetchUrlRaw :: String -> IO BS.ByteString
 fetchUrlRaw url = runGetRequest url consumer where
     consumer resp = accumulate mempty where
         accumulate x = HTC.responseBody resp >>= \s -> case BS.null s of
-            True -> return x
+            True  -> pure x
             False -> accumulate (x <> s)
 
 -- | Fetch JSON object via GET.
@@ -67,7 +67,7 @@ playUrl url = bracket acquire HTC.responseClose $ \h ->
     fix $ \loop -> do
         chunk <- liftIO $ HTC.responseBody h
         case BS.null chunk of
-            True -> return ()   -- no more data
+            True  -> pure ()   -- no more data
             False -> yield chunk >> loop
   where
     acquire = do
@@ -83,7 +83,7 @@ toLines accumulator = do
     toLines remaining
   where
     process buffer = case BS.elemIndex newline buffer of
-        Nothing -> return buffer
+        Nothing -> pure buffer
         Just ix -> do
             let (a,b) = BS.splitAt ix buffer
             yield a
@@ -97,7 +97,7 @@ decodeEvents = forever $ do
 
 -- | Http/Https streaming
 
-data HttpArchive = HttpArchive String
+newtype HttpArchive = HttpArchive String
 
 mkHttpPlayer :: FromJSON a => HttpArchive -> Player (SafeT IO) Index (Event a)
 mkHttpPlayer (HttpArchive url) = Player
@@ -121,15 +121,14 @@ mkHttpPlayer (HttpArchive url) = Player
                 ++ "?ix=" ++ objToUrl ix
                 ++ "&includeIndex"
                 ++ case direction of
-                    Forward -> ""
+                    Forward  -> ""
                     Backward -> "&backward"
                 ++ case flt of
                     Nothing -> ""
                     Just (val1, timeout) ->
                         "&ch=" ++ objToUrl val1
                         ++ case timeout of
-                            Nothing -> ""
+                            Nothing   -> ""
                             Just val2 -> "&timeout=" ++ objToUrl val2
         in playUrl request >-> toLines mempty >-> decodeEvents
     }
-

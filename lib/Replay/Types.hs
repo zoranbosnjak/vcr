@@ -2,16 +2,16 @@
 
 module Replay.Types where
 
-import           UnliftIO
 import           Data.ReactiveValue
 import           Pipes
-import qualified Pipes.Safe as PS
+import qualified Pipes.Safe         as PS
+import           UnliftIO
 
 -- local imports
-import           Vcr
-import           Udp (UdpContent)
-import           Time
 import           Streaming
+import           Time
+import           Udp                (UdpContent)
+import           Vcr
 
 type Name = String
 type Tooltip = String
@@ -21,7 +21,7 @@ type BlinkTime = Event UdpContent -> Maybe Double
 type ConsoleDump = Event UdpContent -> String
 data Output = Output
     { outConsumer :: Consumer (Event UdpContent) (PS.SafeT IO) ()
-    , outTooltip :: Tooltip
+    , outTooltip  :: Tooltip
     }
 
 -- | Console actions

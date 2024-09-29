@@ -1,19 +1,18 @@
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Simple UDP receiver - for test purposes.
 
 module Main where
 
+import           Control.Concurrent        (threadDelay)
 import           Control.Monad
 import           Control.Monad.Fix
-import           UnliftIO
-import           Control.Concurrent (threadDelay)
-import           Options.Applicative
-import qualified Network.Socket as Net
+import qualified Data.ByteString           as BS
+import qualified Network.Multicast         as Mcast
+import qualified Network.Socket            as Net
 import qualified Network.Socket.ByteString as NB
-import qualified Network.Multicast as Mcast
-import qualified Data.ByteString as BS
+import           Options.Applicative
+import           UnliftIO
 
 type Host = String
 type Mcast = String
@@ -56,10 +55,10 @@ main = execParser options >>= \(direction, addr, rate) -> do
     cntErr <- newTVarIO (0::Int)
     cntErrTotal <- newTVarIO (0::Integer)
     let operator = case direction of
-            Forward -> (+)
+            Forward  -> (+)
             Backward -> (-)
         report = forever $ do
-            threadDelay $ round $ (1000*1000 * rate)
+            threadDelay $ round (1000*1000 * rate)
             (c1,c2,c3) <- atomically $ (,,)
                 <$> swapTVar cntOk 0
                 <*> swapTVar cntErr 0
@@ -83,13 +82,13 @@ main = execParser options >>= \(direction, addr, rate) -> do
         msg <- fst <$> NB.recvFrom sock (2^(16::Int))
         case BS.length msg > 1 of
             False -> loop
-            True -> return $ BS.head msg
+            True  -> pure $ BS.head msg
 
     options = info (parser <**> helper) ( progDesc "UDP receiver")
 
     acquire addr = do
         let (ip, port, mc) = case addr of
-                Unicast ip' port' -> (ip', port', Nothing)
+                Unicast ip' port'         -> (ip', port', Nothing)
                 Multicast mcast' port' m' -> (mcast', port', Just m')
         (serveraddr:_) <- Net.getAddrInfo
             (Just (Net.defaultHints {Net.addrFlags = [Net.AI_PASSIVE]}))
@@ -98,11 +97,11 @@ main = execParser options >>= \(direction, addr, rate) -> do
         sock <- Net.socket
             (Net.addrFamily serveraddr) Net.Datagram Net.defaultProtocol
         case mc of
-            Nothing -> return ()
+            Nothing -> pure ()
             Just mloc -> do
                 Net.setSocketOption sock Net.ReuseAddr 1
                 Mcast.addMembership sock ip (Just mloc)
         Net.bind sock (Net.addrAddress serveraddr)
-        return sock
+        pure sock
 
     release = Net.close

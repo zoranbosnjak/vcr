@@ -14,20 +14,20 @@ module Replay
     , module Pipes
     ) where
 
-import           UnliftIO
 import           Control.Monad
 import           Options.Applicative
 import           Pipes
+import           UnliftIO
 
 -- local import
 import           Common
-import           Udp
+import           Replay.Controller   (controller)
 import           Replay.Types
+import           Replay.View.Wx      (runUI)
 import           Streaming
-import           Vcr
 import           Time
-import           Replay.Controller (controller)
-import           Replay.View.Wx    (runUI)          -- use WX user interface
+import           Udp
+import           Vcr
 
 -- | Tick period in miliseconds.
 tickMs :: Int

@@ -5,25 +5,25 @@
 module DiskTest where
 
 import           Control.Monad
-import           System.IO.Temp
-import           System.FilePath
-import           System.Random
-import           System.IO
-import           Data.Time
 import           Data.Aeson
-import qualified Data.ByteString as BS
+import qualified Data.ByteString       as BS
+import           Data.Time
+import           System.FilePath
+import           System.IO
+import           System.IO.Temp
+import           System.Random
 
 import           Test.Tasty
-import           Test.Tasty.QuickCheck as QC
 import           Test.Tasty.HUnit
+import           Test.Tasty.QuickCheck as QC
 
-import           Pipes as P
+import           Pipes                 as P
+import qualified Pipes.Prelude         as PP
 import           Pipes.Safe
-import qualified Pipes.Prelude as PP
 
-import           Vcr
-import           Time
 import           Streaming.Disk
+import           Time
+import           Vcr
 
 import           TestCommon
 
@@ -44,11 +44,11 @@ limitsP = QC.testProperty "file limits" $ \(enc::FileEncoding) -> QC.ioProperty 
             forM sizes $ \n -> do
                 let s = BS.pack $ replicate n 255
                 writeBytes enc h s
-                return s
+                pure s
 
         let lst' = init lst
             x = fromIntegral (sum (fmap BS.length lst'))
-                + fromIntegral ((length lst' * delimiterSize enc))
+                + fromIntegral (length lst' * delimiterSize enc)
 
         (o1, o2) <- getFileLimits enc f
         assertEqual "offset1" 0 o1
@@ -64,11 +64,11 @@ vcrEvents title mkRec mkPl = testCaseSteps title $ \step -> do
         samples :: [Event ()] <- do
             n <- getPositive <$> generate arbitrary
             t0 <- generate arbitrary
-            generate $ take n <$> (genEvents ["ch1", "ch2"] 100 t0)
+            generate $ take n <$> genEvents ["ch1", "ch2"] 100 t0
         step $ "gen"
             <> ", events: " <> show (length samples)
         withSystemTempDirectory "vcr-test" $ \base -> do
-            let logger _ = return ()
+            let logger _ = pure ()
                 recorder = mkRec base enc
                 player = mkPl base enc
 
@@ -91,7 +91,7 @@ vcrEvents title mkRec mkPl = testCaseSteps title $ \step -> do
                     assertBool "index" (i <= ix2)
                     assertEqual "readback" x y
 
-                return result1
+                pure result1
 
             step "replay from any valid index"
             do
@@ -121,7 +121,7 @@ saveFile nMax enc (gen0, acc0) f = do
     n <- randomRIO (1, nMax)
     withFile f WriteMode $ go n (gen0, acc0)
       where
-        go 0 (gen, acc) _h = return (gen, acc)
+        go 0 (gen, acc) _h = pure (gen, acc)
         go n (gen, acc) h = do
             Right (event, gen') <- P.next gen
             writeBytes enc h $ encodeJSON event
@@ -135,8 +135,7 @@ locateEvents step t1 player samples = do
     readback <- do
         (a, _b) <- runSafeT $ limits player
         let p = runPlayer player Forward a Nothing
-        result <- runSafeT $ PP.toListM p
-        return result
+        runSafeT $ PP.toListM p
     assertEqual "readback" samples (fmap snd readback)
 
     step "lookup UTC before"
@@ -235,7 +234,7 @@ dirRotate numFiles = testCaseSteps title $ \step -> do
                     f  = fileSuffixToFileName base fs
                 withFile f WriteMode $ \h -> do
                     mapM_ (writeBytes enc h . encodeJSON) samples
-                return samples
+                pure samples
 
             step "readback"
             readback <- do

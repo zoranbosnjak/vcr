@@ -5,13 +5,13 @@ This module is an example recorder configurator.
 
 Usage:
 
-# to run a program.
+To run a program:
 vcr custom --program "</abs/path/to/this/script> --script-arguments" --run
 
-# to check
+To check:
 vcr custom --program "</abs/path/to/this/script>" --validate
 
-# to make it executable, use shebang, something like this
+To make it executable, use shebang, something like this
 #! /usr/bin/env -S vcr-custom.sh --script-arguments
 -}
 
@@ -30,7 +30,7 @@ recorders =
     -- add more recorders as necessary
     ]
 
-data Options = Options
+newtype Options = Options
     { optConfigFile :: Maybe FilePath
     } deriving (Show)
 
@@ -42,7 +42,6 @@ main :: IO ()
 main = do
     opt <- execParser (info (options <**> helper) idm)
     initialConfig <- case optConfigFile opt of
-        Nothing -> return mempty
+        Nothing        -> pure mempty
         Just _filename -> undefined
     runConfigurator recorders initialConfig
-

@@ -1,40 +1,40 @@
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE DeriveAnyClass    #-}
+{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE MultiWayIf        #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveAnyClass #-}
 
 -- | This module implements recording and replay to/from disk.
 
 module Streaming.Disk where
 
-import           GHC.Generics (Generic)
 import           Control.Monad
 import           Control.Monad.Fix
-import qualified Data.Vector as V
 import           Data.Aeson
-import qualified Data.Text as T
-import           Data.Void
-import qualified Data.List.NonEmpty as NE
-import qualified Data.Aeson.Types as AT
-import qualified System.IO as IO
-import qualified Data.ByteString as BS
+import qualified Data.Aeson.Types              as AT
+import qualified Data.ByteString               as BS
+import qualified Data.ByteString.Char8         as BS8
 import           Data.ByteString.Lazy.Internal (defaultChunkSize)
-import qualified Data.ByteString.Char8 as BS8
-import qualified Data.Time
-import           Data.List (sort)
+import           Data.List                     (sort)
+import qualified Data.List.NonEmpty            as NE
 import           Data.Maybe
+import qualified Data.Text                     as T
+import qualified Data.Time
+import qualified Data.Vector                   as V
+import           Data.Void
+import           GHC.Generics                  (Generic)
 import           System.Directory
 import           System.FilePath
-import           Text.Printf
-import qualified Text.Megaparsec as MP
-import qualified Text.Megaparsec.Char as MPC
-import qualified Text.Megaparsec.Char.Lexer as L
-import           Text.Read (readPrec)
-import qualified Text.Read as TR
+import qualified System.IO                     as IO
 import           Test.QuickCheck
+import qualified Text.Megaparsec               as MP
+import qualified Text.Megaparsec.Char          as MPC
+import qualified Text.Megaparsec.Char.Lexer    as L
+import           Text.Printf
+import qualified Text.Read                     as TR
+import           Text.Read                     (readPrec)
 
 import           Pipes
-import qualified Pipes.Prelude as PP
+import qualified Pipes.Prelude                 as PP
 import           Pipes.Safe
 
 -- local imports
@@ -42,7 +42,7 @@ import           Time
 import           Vcr
 
 data Buffering = Buffering
-    { bFileMode :: Maybe IO.BufferMode
+    { bFileMode       :: Maybe IO.BufferMode
     , bFlushEachEvent :: Bool
     }
 
@@ -109,7 +109,7 @@ getFileLimits :: FileEncoding -> FilePath -> IO (FileOffset, FileOffset)
 getFileLimits enc path = IO.withFile path IO.ReadMode $ \h -> do
     size <- IO.hFileSize h
     ix <- go h size $ max 0 (size - chunkSize)
-    return (0, ix)
+    pure (0, ix)
   where
     go h size ix = do
         IO.hSeek h IO.AbsoluteSeek ix
@@ -117,11 +117,11 @@ getFileLimits enc path = IO.withFile path IO.ReadMode $ \h -> do
         let events = splitBytes enc s
         case length events <= 1 of
             True -> case ix <= 0 of
-                True -> return 0
+                True  -> pure 0
                 False -> go h size $ max 0 (ix - chunkSize)
             False -> do
                 let n = fromIntegral $ BS.length $ last events
-                return $ size - n - delimiterSize enc
+                pure $ size - n - delimiterSize enc
 
 -- | Get approx. middle between 2 file offsets.
 getFileMiddle :: FileEncoding -> FilePath -> FileOffset -> FileOffset -> IO FileOffset
@@ -131,14 +131,14 @@ getFileMiddle enc path a b = IO.withFile path IO.ReadMode $ \h -> do
     void $ readBytes enc h  -- first line is likely unusable
     ix1 <- IO.hTell h
     if
-        | ix1 < b -> return ix1
+        | ix1 < b -> pure ix1
         | otherwise -> do
             IO.hSeek h IO.AbsoluteSeek a
             void $ readBytes enc h  -- skip line
             ix2 <- IO.hTell h
             if
-                | ix2 < b -> return ix2 -- got it
-                | otherwise -> return a -- not found (return first limit)
+                | ix2 < b   -> pure ix2 -- got it
+                | otherwise -> pure a -- not found (return first limit)
 
 -- | Read some bytes from given index.
 readBytesAt :: FileEncoding -> FilePath -> FileOffset -> IO BS.ByteString
@@ -162,7 +162,7 @@ playFile enc path direction ix0 = do
                         s <- liftIO $ readBytes enc h
                         yield (ix, s)
                         loop
-                    _ -> return ()
+                    _ -> pure ()
 
             -- traverse the file backward
             -- Filesystem can only read forward efectively.
@@ -173,10 +173,10 @@ playFile enc path direction ix0 = do
                         if
                             -- no need to read more data
                             | length acc > 1 || (ixRead == 0 && length acc == 1)
-                                -> return $ Just acc
+                                -> pure $ Just acc
                             -- can not read any more
                             | ixRead < 0 -> throwM $ PlayError "negative read index value"
-                            | ixRead == 0 -> return Nothing
+                            | ixRead == 0 -> pure Nothing
                             -- read more data
                             | otherwise -> do
                                 let ixRead' = max 0 (ixRead - chunkSize)
@@ -189,7 +189,7 @@ playFile enc path direction ix0 = do
                 let loop !ixYield acc = do
                         proceed <- fillAccumulator acc
                         case proceed of
-                            Nothing -> return ()
+                            Nothing -> pure ()
                             Just acc' -> do
                                 let val = last acc'
                                     ixYield' = ixYield - fromIntegral (BS.length val) - delimiterSize enc
@@ -207,33 +207,33 @@ mkFilePlayer (FileArchive enc path) = Player
     { limits = liftIO $ getFileLimits enc path
     , middle = \ix1 ix2 -> liftIO $ getFileMiddle enc path ix1 ix2
     , peekItem = \ix ->
-        (liftIO $ readBytesAt enc path ix) >>= decodeJSON
+        liftIO (readBytesAt enc path ix) >>= decodeJSON
     , runPlayer = \direction ix flt ->
         playFile enc path direction ix
         >-> PP.mapM (\(i, s) -> do
             s' <- decodeJSON s
-            return (i, s'))
+            pure (i, s'))
         >-> dashEvents' direction flt
     }
 
 -- | Directory Streaming.
 
 data Rotate = Rotate
-    { rotateKeep            :: Maybe Int    -- remove old files, keep some files
-    , rotateSizeMegaBytes   :: Maybe Double -- max size of a single file
-    , rotateTimeHours       :: Maybe Double -- max age of a single file
+    { rotateKeep          :: Maybe Int    -- remove old files, keep some files
+    , rotateSizeMegaBytes :: Maybe Double -- max size of a single file
+    , rotateTimeHours     :: Maybe Double -- max age of a single file
     } deriving (Generic, Eq, Show, ToJSON, FromJSON)
 
 data DirectoryArchive = DirectoryArchive FileEncoding FilePath
     deriving (Show)
 
 data FileSuffix = FileSuffix
-    { fsYear    :: Integer
-    , fsMonth   :: Int
-    , fsDay     :: Int
-    , fsHour    :: Int
-    , fsMinute  :: Int
-    , fsSecond  :: Int
+    { fsYear   :: Integer
+    , fsMonth  :: Int
+    , fsDay    :: Int
+    , fsHour   :: Int
+    , fsMinute :: Int
+    , fsSecond :: Int
     } deriving (Generic, Eq)
 
 instance Show FileSuffix where
@@ -309,7 +309,7 @@ instance IsIndex DirectoryIndex where
         ]
     fromIndex (Index lst) = DirectoryIndex
         ( FileSuffix
-            (lst NE.!! 0)
+            (NE.head lst)
             (fromInteger $ lst NE.!! 1)
             (fromInteger $ lst NE.!! 2)
             (fromInteger $ lst NE.!! 3)
@@ -340,7 +340,7 @@ fileSuffixToFileName base suf = base ++ "-" ++ printf "%d-%02d-%02dT%02d-%02d-%0
 getFileSuffix :: FilePath -> FilePath -> Maybe FileSuffix
 getFileSuffix base filename = case MP.runParser p "" filename of
     Right a -> Just a
-    _ -> Nothing
+    _       -> Nothing
   where
     p = FileSuffix
         <$> (MPC.string base >> MPC.string "-" >> (L.decimal :: StrParser Integer))
@@ -352,33 +352,33 @@ getFileSuffix base filename = case MP.runParser p "" filename of
 
 -- | Recognize a recording file by name.
 isRecordingFile :: FilePath -> FilePath -> Bool
-isRecordingFile base filename = maybe False (const True) $ getFileSuffix base filename
+isRecordingFile base filename = isJust $ getFileSuffix base filename
 
 -- | Get current recording files.
 getRecordingFiles :: FilePath -> IO [FilePath]
 getRecordingFiles base = do
     listing <- listDirectory (takeDirectory base)
-    return $ sort $ Prelude.filter (isRecordingFile $ takeFileName base) listing
+    pure $ sort $ Prelude.filter (isRecordingFile $ takeFileName base) listing
 
 -- | Get recording files suffixes.
 getRecordingFileSuffixes:: FilePath -> IO [FileSuffix]
 getRecordingFileSuffixes base = do
     listing <- listDirectory (takeDirectory base)
-    return $ sort $ catMaybes $ fmap (getFileSuffix $ takeFileName base) listing
+    pure $ sort $ mapMaybe (getFileSuffix $ takeFileName base) listing
 
 getDirLimits :: FileEncoding -> FilePath -> IO (DirectoryIndex, DirectoryIndex)
 getDirLimits enc base = do
     files <- getRecordingFiles base
     let dirName = takeDirectory base
         lst = fmap (dirName </>) files
-    when (lst == []) $ throwM $ IndexError "empty recording"
+    when (null lst) $ throwM $ IndexError "empty recording"
     let a = head lst
         b = last lst
     fsA <- maybe (throwM $ IndexError $ "filesuffix " <> a) pure $ getFileSuffix base a
     fsB <- maybe (throwM $ IndexError $ "filesuffix " <> b) pure $ getFileSuffix base b
     (a1, _a2) <- getFileLimits enc a
     (_b1, b2) <- getFileLimits enc b
-    return
+    pure
         ( DirectoryIndex fsA a1
         , DirectoryIndex fsB b2
         )
@@ -387,14 +387,14 @@ getDirMiddle :: FileEncoding -> FilePath -> DirectoryIndex -> DirectoryIndex -> 
 getDirMiddle enc base di1@(DirectoryIndex fsA i1) di2@(DirectoryIndex fsB i2)
     | fsA == fsB = do   -- same file
         i <- getFileMiddle enc (fileSuffixToFileName base fsA) i1 i2
-        return $ DirectoryIndex fsA i
+        pure $ DirectoryIndex fsA i
     | otherwise = do    -- different files
         lst <- getRecordingFileSuffixes base
-            >>= return . filter (\fs -> fs >= fsA && fs <= fsB)
+            >>= pure . filter (\fs -> fs >= fsA && fs <= fsB)
         case lst of
             [] -> throwM $ IndexError "empty recording" -- unexpected at this point
-            (_:[]) -> throwM $ IndexError "single recording file" -- unexpected at this point
-            (fs1:fs2:[]) -> do    -- 2 files
+            [_] -> throwM $ IndexError "single recording file" -- unexpected at this point
+            [fs1, fs2] -> do    -- 2 files
                 when (fs1 >= fs2) $ throwM $ IndexError "internal index error"
                 (a1, b1) <- getFileLimits enc $ fileSuffixToFileName base fs1
                 (a2, b2) <- getFileLimits enc $ fileSuffixToFileName base fs2
@@ -403,9 +403,9 @@ getDirMiddle enc base di1@(DirectoryIndex fsA i1) di2@(DirectoryIndex fsB i2)
                 when (i2 < a2) $ throwM $ IndexError "internal index error"
                 when (i2 > b2) $ throwM $ IndexError "internal index error"
                 if
-                    | i1 >= b1 && i2 <= a2 -> return $ DirectoryIndex fs1 b1
-                    | i1 >= b1 -> return $ DirectoryIndex fs2 a2
-                    | otherwise -> return $ DirectoryIndex fs1 b1
+                    | i1 >= b1 && i2 <= a2 -> pure $ DirectoryIndex fs1 b1
+                    | i1 >= b1             -> pure $ DirectoryIndex fs2 a2
+                    | otherwise            -> pure $ DirectoryIndex fs1 b1
             _ -> do             -- more files
                 let ix = length lst `div` 2
                     fs = lst !! ix
@@ -415,16 +415,16 @@ getDirMiddle enc base di1@(DirectoryIndex fsA i1) di2@(DirectoryIndex fsB i2)
                 let result = DirectoryIndex fs i
                 when (result <= di1) $ throwM $ IndexError "internal index error"
                 when (result >= di2) $ throwM $ IndexError "internal index error"
-                return result
+                pure result
 
 mkDirectoryRecorder :: Buffering -> (DirectoryArchive, Rotate) -> Recorder (SafeT IO) BS.ByteString r
 mkDirectoryRecorder buf (DirectoryArchive enc base, rotate) logM = forever $ do
     -- cleanup directory
     case rotateKeep rotate of
-        Nothing -> return ()
+        Nothing -> pure ()
         Just keep -> do
             let dirName = takeDirectory base
-            olds <- drop keep . reverse <$> (liftIO $ getRecordingFiles base)
+            olds <- drop keep . reverse <$> liftIO (getRecordingFiles base)
             mapM_ (liftIO . removeFile) (fmap (dirName </>) olds)
             forM_ olds $ \i -> do
                 lift $ logM $ "old file removed: " <> T.pack (show i)
@@ -441,7 +441,7 @@ mkDirectoryRecorder buf (DirectoryArchive enc base, rotate) logM = forever $ do
             n <- IO.hFileSize h
             IO.hClose h
             when (n == 0) $ do
-                runSafeT $ logM $ "removing empty file " <> (T.pack $ show recFile)
+                runSafeT $ logM $ "removing empty file " <> T.pack (show recFile)
                 removeFile recFile
         writeEvent h s = case bFlushEachEvent buf of
             False -> writeBytes enc h s
@@ -453,7 +453,7 @@ mkDirectoryRecorder buf (DirectoryArchive enc base, rotate) logM = forever $ do
         recorder !n t0 h = do
             s <- await
             t <- liftIO getPOSIXTime
-            let n' = n + (fromIntegral $ BS.length s)
+            let n' = n + fromIntegral (BS.length s)
                 fileAge = t - t0
                 sizeLimit = case rotateSizeMegaBytes rotate of
                     Nothing -> False
@@ -461,10 +461,10 @@ mkDirectoryRecorder buf (DirectoryArchive enc base, rotate) logM = forever $ do
 
                 timeLimit = case rotateTimeHours rotate of
                     Nothing -> False
-                    Just hours -> (round fileAge) >= ((round $ hours * 3600)::Integer)
+                    Just hours -> round fileAge >= ((round $ hours * 3600)::Integer)
             liftIO $ writeEvent h s
-            case (sizeLimit || timeLimit) of
-                True -> return ()
+            case sizeLimit || timeLimit of
+                True  -> pure ()
                 False -> recorder n' t0 h
 
     lift $ logM $ "recording to: "
@@ -488,23 +488,23 @@ playDirectory enc base direction (DirectoryIndex fs i) = do
             go p'
         Left () -> do
             nextFile fs >>= \case
-                Nothing -> return ()
+                Nothing -> pure ()
                 Just (fs', i') -> do
                     playDirectory enc base direction (DirectoryIndex fs' i')
     nextFile fsCurrent = do
         lst <- liftIO $ getRecordingFileSuffixes base
         let result = case direction of
-                Forward -> dropWhile (<= fsCurrent) lst
+                Forward  -> dropWhile (<= fsCurrent) lst
                 Backward -> dropWhile (>= fsCurrent) (reverse lst)
         case result of
-                [] -> return Nothing
+                [] -> pure Nothing
                 (fs':_) -> do
                     let f' = fileSuffixToFileName base fs'
                     (a, b) <- liftIO $ getFileLimits enc f'
                     let ix = case direction of
-                            Forward -> a
+                            Forward  -> a
                             Backward -> b
-                    return $ Just (fs', ix)
+                    pure $ Just (fs', ix)
 
 mkDirectoryPlayer :: FromJSON a => DirectoryArchive
     -> Player (SafeT IO) DirectoryIndex (Event a)
@@ -518,6 +518,6 @@ mkDirectoryPlayer (DirectoryArchive enc base) = Player
         playDirectory enc base direction ix
         >-> PP.mapM (\(i, s) -> do
             s' <- decodeJSON s
-            return (i, s'))
+            pure (i, s'))
         >-> dashEvents' direction flt
     }

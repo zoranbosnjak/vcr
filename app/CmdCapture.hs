@@ -1,4 +1,3 @@
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | VCR capture command.
@@ -6,42 +5,42 @@
 module CmdCapture where
 
 -- standard imports
+import qualified Control.Concurrent.STM     as STM
 import           Control.Monad
 import           Control.Monad.Fix
-import           UnliftIO
-import qualified Control.Concurrent.STM as STM
-import           GHC.Generics (Generic)
-import           Options.Applicative
-import qualified Data.UUID
-import           Data.UUID.V4 (nextRandom)
-import qualified Data.Map as Map
-import           Data.String (fromString)
-import qualified Data.Text as T
-import qualified Data.ByteString.Lazy.Char8 as BSL8
-import qualified Data.ByteString.Lazy as BSL
-import qualified Network.Socket as Net
-import           Network.Wai
-import qualified Network.Wai.Handler.Warp as Warp
-import           Network.HTTP.Types
 import           Data.Aeson
-import           System.Posix.Signals
-import qualified System.IO as IO
+import qualified Data.ByteString.Lazy       as BSL
+import qualified Data.ByteString.Lazy.Char8 as BSL8
+import qualified Data.Map                   as Map
+import           Data.String                (fromString)
+import qualified Data.Text                  as T
+import qualified Data.UUID
+import           Data.UUID.V4               (nextRandom)
+import           GHC.Generics               (Generic)
+import           Network.HTTP.Types
+import qualified Network.Socket             as Net
+import           Network.Wai
+import qualified Network.Wai.Handler.Warp   as Warp
+import           Options.Applicative
 import           Pipes
-import qualified Pipes.Safe as PS
+import qualified Pipes.Safe                 as PS
+import qualified System.IO                  as IO
+import           System.Posix.Signals
+import           UnliftIO
 
 -- local imports
-import           Logging
-import           Common
-import           Vcr
-import           Time
-import           Sequential
-import           Udp
-import           Streaming.Disk
 import           Capture.Types
+import           Common
+import           Logging
+import           Sequential
+import           Streaming.Disk
+import           Time
+import           Udp
+import           Vcr
 
 data InputProcess = InputProcess
     { inProcess :: Async ()
-    , inStatus :: TVar (TVar Bool)
+    , inStatus  :: TVar (TVar Bool)
     }
 
 type InputStatus = Map.Map Channel InputProcess
@@ -61,11 +60,11 @@ data ConfigMethod
 
 -- | Speciffic command options.
 data CmdOptions = CmdOptions
-    { optVerbose    :: Maybe Priority
-    , optSyslog     :: Maybe Priority
-    , optHttp       :: Maybe (String, Warp.Port)
-    , optConfig     :: ConfigMethod
-    , optFileMode   :: Maybe IO.BufferMode
+    { optVerbose     :: Maybe Priority
+    , optSyslog      :: Maybe Priority
+    , optHttp        :: Maybe (String, Warp.Port)
+    , optConfig      :: ConfigMethod
+    , optFileMode    :: Maybe IO.BufferMode
     , optFlushEvents :: Bool
     } deriving (Generic, Eq, Show)
 
@@ -107,8 +106,8 @@ options = CmdOptions
         <$> strOption (long "http" <> metavar "IP" <> help "enable http server")
         <*> option auto (long "httpPort" <> metavar "PORT" <> help "http server port")
     configMethod
-        = (flag' () (long "arguments" <> help "use command line arguments")) *> confArguments
-        <|> (flag' () (long "file" <> help "use config file")) *> confFile
+        = flag' () (long "arguments" <> help "use command line arguments") *> confArguments
+        <|> flag' () (long "file" <> help "use config file") *> confFile
       where
         confArguments = ConfigArguments
             <$> conf
@@ -157,17 +156,16 @@ httpServer ::
 httpServer logM startTimeMono startTimeUtc sesId config getStatus cfgMethod (ip, port) = do
     let settings =
             Warp.setPort port $
-            Warp.setHost (fromString ip) $
-            Warp.defaultSettings
+            Warp.setHost (fromString ip) Warp.defaultSettings
     logM INFO $ "http server, ip: " ++ show ip ++ ", port: " ++ show port
-    Warp.runSettings settings $ app
+    Warp.runSettings settings app
   where
     app request respond = withLog go
       where
         jsonEncFormat :: Data.Aeson.ToJSON a => a -> BSL.ByteString
         jsonEncFormat = case "pretty" `elem` (fst <$> queryString request) of
             False -> encode
-            True -> encodeJSONPrettyL
+            True  -> encodeJSONPrettyL
 
         withLog act = case parseMethod (requestMethod request) of
             Left _ -> respond $ responseLBS
@@ -177,7 +175,7 @@ httpServer logM startTimeMono startTimeUtc sesId config getStatus cfgMethod (ip,
             Right mtd -> do
                 let level = case mtd of
                         GET -> DEBUG
-                        _ -> INFO
+                        _   -> INFO
                 logM level $ show request
                 act (pathInfo request) mtd
 
@@ -202,14 +200,15 @@ httpServer logM startTimeMono startTimeUtc sesId config getStatus cfgMethod (ip,
             (BSL8.pack $ show sesId ++ "\n")
 
         go ["config"] GET = do
-            cfg <- atomically $ readTVar config
+            cfg <- readTVarIO config
             respond $ responseLBS status200
                 [("Content-Type", "application/json")]
                 (jsonEncFormat cfg)
 
         go ["config"] PUT = case cfgMethod of
             ConfigFile path HttpConfigEnabled _sigHupFlag -> do
-                (eitherDecode <$> strictRequestBody request) >>= \case
+                result <- eitherDecode <$> strictRequestBody request
+                case result of
                     Left e -> respond $ responseLBS status400
                         [("Content-Type", "text/plain")] (BSL8.pack $ e ++ "\n")
                     Right cfg -> do
@@ -281,7 +280,7 @@ singleInput sesId logM consume ch i = do
         result <- tryIO $ PS.runSafeT $ runEffect $
             src >-> mkEvent trackId (firstSequence :: SequenceNumber) >-> dst
         let msg = case result of
-                Left e -> "with exception: " ++ show e
+                Left e  -> "with exception: " ++ show e
                 Right _ -> "without exception"
         logM NOTICE $ "Input terminated: " ++ show i ++ ", " ++ msg
         -- Status will become 'True' evenutally, when stable long enough,
@@ -304,7 +303,7 @@ processInputs sesId logM consume getInputs inputStatus = do
     loop mempty `finally` terminate
   where
     terminate = mask $ \_restore -> do
-        atomically (readTVar inputStatus) >>= mapM_ (cancel . inProcess)
+        readTVarIO inputStatus >>= mapM_ (cancel . inProcess)
         atomically (writeTVar inputStatus mempty)
 
     onStart ch i = do
@@ -320,7 +319,7 @@ processInputs sesId logM consume getInputs inputStatus = do
             Just p <- atomically $ do
                 orig <- readTVar inputStatus
                 modifyTVar' inputStatus $ Map.delete ch
-                return $ Map.lookup ch orig
+                pure $ Map.lookup ch orig
             cancel $ inProcess p
 
     onRestart ch (i,j) = do
@@ -331,7 +330,7 @@ processInputs sesId logM consume getInputs inputStatus = do
         newCfg <- atomically $ do
             newCfg <- getInputs
             when (newCfg == current) retrySTM
-            return newCfg
+            pure newCfg
 
         let removed = current `Map.difference` newCfg
             added = newCfg `Map.difference` current
@@ -339,7 +338,7 @@ processInputs sesId logM consume getInputs inputStatus = do
                 oldParam <- Map.lookup k current
                 newParam <- Map.lookup k newCfg
                 guard $ newParam /= oldParam
-                return (v, newParam)
+                pure (v, newParam)
             changed = Map.mapMaybeWithKey checkF current
 
         _ <- Map.traverseWithKey onStop removed
@@ -366,7 +365,7 @@ runRecorder buf logM' getConfig fetchEvent = do
         event <- liftIO $ atomically
             (fmap Left cfgChange `STM.orElse` fmap Right fetchEvent)
         case event of
-            Left cfg' -> return cfg'
+            Left cfg' -> pure cfg'
             Right val -> do
                 yield val
                 loop
@@ -374,7 +373,7 @@ runRecorder buf logM' getConfig fetchEvent = do
         cfgChange = do
             newConfig <- getConfig
             when (newConfig == cfg) retrySTM
-            return newConfig
+            pure newConfig
 
     -- run until config change, then restart with new config
     go cfg = do
@@ -392,7 +391,7 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
     startTimeUtc <- getUtcTime
 
     logM <- case optConfig opt of
-        ConfigArguments _cfg True -> return noLogger -- no logging on bootstrap
+        ConfigArguments _cfg True -> pure noLogger -- no logging on bootstrap
         _ -> setupLogging pName "capture" (optVerbose opt) (optSyslog opt) Nothing
 
     logM "main" INFO $ "startup " ++ show pName ++ ", " ++ version ++ ", " ++ show pArgs
@@ -409,18 +408,18 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
     proceed <- case optConfig opt of
         ConfigArguments cfg True -> do
             BSL.putStr $ encodeJSONPrettyL cfg
-            return False
+            pure False
         ConfigArguments cfg False -> do
             atomically $ writeTVar config cfg
-            return True
+            pure True
         ConfigFile path _httpFlag sigHupFlag -> do
             let loadConfig = do
                     logM "main" INFO $ "Loading configuration from " ++ show path
                     result <- tryIO $ do
                         s <- BSL.readFile path
                         case eitherDecode s of
-                            Right val -> return val
-                            Left e -> fail e
+                            Right val -> pure val
+                            Left e    -> fail e
                     case result of
                         Left e -> do
                             let msg = "Error loading file: " ++ show e
@@ -434,7 +433,7 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
             loadConfig
             when (sigHupFlag == SigHUPConfigEnabled) $ do
                 void $ installHandler sigHUP (Catch reloadConfig) Nothing
-            return True
+            pure True
 
     when proceed $ do
         ix <- runAll
@@ -445,7 +444,7 @@ runCmd opt pName pArgs version _ghc _wxcLib = do
 
             -- http server
             , httpServer (logM "main") startTimeMono startTimeUtc sesId config (readTVar inputStatus) (optConfig opt)
-                `whenSpecified` (optHttp opt)
+                `whenSpecified` optHttp opt
 
             -- recorder
             , do

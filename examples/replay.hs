@@ -5,37 +5,38 @@ This module is an example replay configuration.
 
 Usage:
 
-# to run a program.
+To run a program:
 vcr custom --program "</abs/path/to/this/script> --asterix <abs/path/to/asterix/files>" --run
 
-# to check
+To check:
 vcr custom --program "</abs/path/to/this/script>" --validate
 
-# to make it executable, use shebang, something like this
+To make it executable, use shebang, something like this
 #! /usr/bin/env -S vcr-custom.sh --asterix /path/to/asterix-data/xml
 -}
 
 {-# LANGUAGE OverloadedStrings #-}
 
 -- standard imports
-import qualified Data.Text as T
-import qualified Data.ByteString as BS
-import           Data.List (nub)
 import           Data.Bool
-import           Data.Char (toUpper)
+import qualified Data.ByteString  as BS
+import           Data.Char        (toUpper)
+import           Data.List        (nub)
+import           Data.Maybe
+import qualified Data.Text        as T
 import           Data.Word
-import           Text.Printf
+import qualified Pipes.Prelude    as PP
+import qualified Pipes.Safe       as PS
 import           System.Directory (getDirectoryContents)
-import           System.FilePath ((</>))
-import qualified Pipes.Safe as PS
-import qualified Pipes.Prelude as PP
+import           System.FilePath  ((</>))
+import           Text.Printf
 
 -- VCR imports
 import           Replay
 
 -- Asterix processor
-import qualified Data.Asterix as Ast
-import qualified Data.BitString as Bits
+import qualified Data.Asterix     as Ast
+import qualified Data.BitString   as Bits
 
 -- List of recorders.
 recorders :: [(Name, Source)]
@@ -61,7 +62,7 @@ channelMaps =
     [ ("transparent", id)   -- no manipulation
     , ("chTest", \ch -> case ch of  -- append "Test"
         "special" -> ch             -- this name is exception, do not change
-        _ -> ch <> "Test"           -- append "Test" to other channels,
+        _         -> ch <> "Test"           -- append "Test" to other channels,
                                     -- such that "ch1" becomes "ch1Test"
       )
     -- add more as necessary
@@ -123,8 +124,8 @@ dgRestamp uaps = forever $ do
                     20 -> Just "140"
                     34 -> Just "030"
                     48 -> Just "140"
-                    _ -> Nothing
-                modifyItem i rec = maybe rec id $ Ast.update rec $ do
+                    _  -> Nothing
+                modifyItem i rec = fromMaybe rec $ Ast.update rec $ do
                     Ast.modifyItem i $ \j dsc -> do
                         t1 <- Ast.toRaw j
                         t2 <- Ast.fromNatural oldUtc dsc >>= Ast.toRaw
@@ -197,7 +198,7 @@ outputs uaps =
         ])
     ]
 
-data Options = Options
+newtype Options = Options
     { optAstData    :: [FilePath]
     } deriving (Show)
 
@@ -219,12 +220,12 @@ main = do
         descriptions <- forM files $ \filename -> do
             xml <- readFile filename
             case Ast.categoryDescription xml of
-                Left msg -> error $ filename ++ ", " ++ msg
-                Right val -> return val
+                Left msg  -> error $ filename ++ ", " ++ msg
+                Right val -> pure val
         -- get latest revisions
         case Ast.categorySelect descriptions [] of
-                Left msg -> error msg
-                Right val -> return val
+                Left msg  -> error msg
+                Right val -> pure val
 
     runReplay
         (50*1000) -- console buffer size
@@ -236,9 +237,8 @@ collectFiles extensions dirs = nub . filter match . concat <$> mapM ls dirs
   where
     ls dir = do
         listing <- filter (`notElem` [".", ".."]) <$> getDirectoryContents dir
-        return $ map (\x -> dir </> x) listing
+        pure $ map (dir </>) listing
     match filename = any (matchSuffix filename) extensions
     matchSuffix filename suffix
         | length filename < length suffix = False
         | otherwise = and $ zipWith (==) (reverse filename) (reverse suffix)
-

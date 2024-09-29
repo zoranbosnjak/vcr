@@ -1,22 +1,22 @@
+{-# LANGUAGE DeriveAnyClass    #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveAnyClass #-}
 
 -- | This module implements UDP input (Producer) and output (Consumer).
 -- UDP unicast and multicast modes are supported.
 
 module Udp where
 
-import           GHC.Generics (Generic)
-import qualified UnliftIO as UIO
 import           Control.Monad
-import           Data.Text as Text
-import qualified Data.ByteString as BS
-import qualified Network.Socket as Net
-import qualified Network.Socket.ByteString as NB
-import qualified Network.Multicast as Mcast
 import           Data.Aeson
+import qualified Data.ByteString           as BS
+import           Data.Text                 as Text
+import           GHC.Generics              (Generic)
+import qualified Network.Multicast         as Mcast
+import qualified Network.Socket            as Net
+import qualified Network.Socket.ByteString as NB
 import           Pipes
 import           Pipes.Safe
+import qualified UnliftIO                  as UIO
 
 -- local imports
 import           Common
@@ -28,8 +28,8 @@ type Port = Text
 type TTL = Int
 
 data UdpContent = UdpContent
-    { udpDatagram  :: BS.ByteString
-    , udpSender    :: (Net.HostName, Net.ServiceName)
+    { udpDatagram :: BS.ByteString
+    , udpSender   :: (Net.HostName, Net.ServiceName)
     } deriving (Generic, Eq, Show)
 
 instance ToJSON UdpContent where
@@ -75,14 +75,14 @@ udpReader addr = bracket acquire Net.close action
         sock <- Net.socket
             (Net.addrFamily serveraddr) Net.Datagram Net.defaultProtocol
         case mc of
-            Nothing -> return ()
+            Nothing -> pure ()
             Just mloc -> do
                 Net.setSocketOption sock Net.ReuseAddr 1
                 Mcast.addMembership sock ip mloc
         UIO.onException
             (Net.bind sock (Net.addrAddress serveraddr))
             (Net.close sock)
-        return sock
+        pure sock
 
     action sock = forever $ do
         msg <- liftIO $ NB.recvFrom sock (2^(16::Int))
@@ -105,9 +105,9 @@ udpWriter addr = bracket acquire (Net.close . fst) action
             (Just port)
         sock <- Net.socket
             (Net.addrFamily serveraddr) Net.Datagram Net.defaultProtocol
-        maybe (return ()) (Mcast.setInterface sock) mLocal
-        maybe (return ()) (Mcast.setTimeToLive sock) mTTL
-        return (sock, Net.addrAddress serveraddr)
+        maybe (pure ()) (Mcast.setInterface sock) mLocal
+        maybe (pure ()) (Mcast.setTimeToLive sock) mTTL
+        pure (sock, Net.addrAddress serveraddr)
 
     action (sock, dst) = forever $ do
         msg <- await

@@ -18,60 +18,52 @@ To update revision of `nixpkgs` or other packages, see `nix/README.md`.
 ```bash
 # default
 nix-build
-./result/bin/{prog} --version
+./result/bin/vcr -h
 
 # override git revision
 nix-build --argstr gitrev {some-revision}
-./result/bin/{prog} --version
+./result/bin/vcr --version
 
 # build from gitlab CI
 nix-build --argstr gitrev $CI_COMMIT_SHORT_SHA
 ```
 
-### Development build from nix-shell
+## Development from nix-shell
 
 ```bash
 nix-shell
+
+# cabal build
 cabal configure
 cabal build -j
-```
 
-### Use ghcid environment
+# auto adjust style
+stylish-haskell --inplace {path}
+find . | grep "\.hs$" | xargs stylish-haskell --inplace
 
-```bash
-nix-shell
-ghcid "--command=ghci -Wall -ilib -iapp app/Main.hs"
-```
+# lint
+hlint {path}
+find . | grep "\.hs$" | xargs hlint
 
-### Running unit/property tests
+# ghcid monitor
+ghcid --command="ghci -Wall -ilib -iapp app/Main.hs" --lint=hlint
 
-```bash
-nix-shell
-ghcid "--command=ghci -Wall -ilib -itest test/Main.hs"
+# Running unit/property tests
+ghcid --command="ghci -Wall -ilib -itest test/Main.hs" --lint=hlint
 runhaskell -Wall -ilib -itest test/Main.hs
 cabal test --test-show-details=always
-```
 
-### Running (inside nix-shell)
-```bash
-nix-shell
+# Running
 cabal build -j && ./dist... +RTS -M300m -RTS {args}
 runhaskell -ilib -iapp app/Main.hs -h
-```
 
-### Running custom script (inside nix-shell)
-```bash
-nix-shell
-runhaskell -Wall -ilib -iapp ./app/Main.hs custom --program "/path/to/custom.hs --custom args" --ghcOpts "-i/path/to -more-opts" --run
+# Running custom script
+runhaskell -Wall -ilib -iapp ./app/Main.hs custom --program \
+    "/path/to/custom.hs --custom args" --ghcOpts "-i/path/to -more-opts" \
+    --run
 
-# or
-nix-build
-./dist.../vcr custom --program /path/to/custom.hs --ghcOpts "-i/path/to/lib -more-opts" --run
-```
-
-# Running replay in devel mode (inside nix-shell)
-```bash
-nix-shell
+# Running configurator/replay in devel mode
+runhaskell -Wall -ilib -iapp ./examples/configurator.hs
 runhaskell -Wall -ilib -iapp ./examples/replay.hs --asterix path/to/xml
 ```
 

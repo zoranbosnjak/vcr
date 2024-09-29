@@ -4,11 +4,11 @@
 
 module Sequential where
 
-import           GHC.Generics (Generic)
-import           GHC.TypeNats
-import           Data.Proxy
-import           Data.Bool
 import           Data.Aeson
+import           Data.Bool
+import           Data.Proxy
+import           GHC.Generics    (Generic)
+import           GHC.TypeNats
 
 import           Test.QuickCheck
 
@@ -30,7 +30,7 @@ instance Sequential Integer where
     compareSequences    = compare
     countSequential     = [0..]
 
-data Periodic (n :: Nat) = UnsafeMkPeriodic { getPeriodic :: !Integer}
+newtype Periodic (n :: Nat) = UnsafeMkPeriodic { getPeriodic :: Integer}
     deriving (Generic, Eq)
 
 instance ToJSON (Periodic n) where
@@ -68,4 +68,3 @@ instance KnownNat n => Arbitrary (Periodic n) where
     arbitrary = UnsafeMkPeriodic <$> choose (0, pred top)
       where
         top = fromIntegral (natVal (Proxy @n))
-

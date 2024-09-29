@@ -9,10 +9,10 @@ where
 
 import           Data.Time
 import           Data.Time.Clock
-import Data.Time.Format.ISO8601 (iso8601Show, iso8601ParseM)
-import qualified Data.Time.Clock.POSIX as DTP
+import qualified Data.Time.Clock.POSIX    as DTP
+import           Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
+import           Numeric                  (showFFloat)
 import qualified System.Clock
-import           Numeric (showFFloat)
 
 import           Test.QuickCheck
 
@@ -42,7 +42,7 @@ uptimeDaysStr t0 t =
 -- | Parse ISO time.
 parseIsoTime :: String -> Either String UtcTime
 parseIsoTime s = case iso8601ParseM s of
-    Nothing -> Left $ "Can not parse time: " ++ show s
+    Nothing  -> Left $ "Can not parse time: " ++ show s
     Just val -> Right val
 
 -- | Format ISO time.
@@ -57,4 +57,5 @@ arbitraryUtc = UTCTime
 
 -- | Helper function to increment Utc time:
 addMonoTimeNS :: MonoTimeNs -> UtcTime -> UtcTime
-addMonoTimeNS deltaNs t = addUTCTime (fromRational (toRational deltaNs / (1000*1000*1000))) t
+addMonoTimeNS deltaNs = addUTCTime
+    (fromRational (toRational deltaNs / (1000*1000*1000)))

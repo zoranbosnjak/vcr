@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | VCR 'server' command.
@@ -7,38 +7,38 @@ module CmdServer where
 
 -- standard imports
 import           Control.Monad.Trans.Except
-import           GHC.Generics (Generic)
-import           UnliftIO
-import           Options.Applicative
-import           Data.String (fromString)
-import           Data.Text (Text)
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
-import qualified Data.ByteString.Lazy.Char8 as BSL8
-import qualified Data.ByteString.Lazy as BSL
-import qualified Data.ByteString.Builder as BSBB
-import           Network.Wai
-import qualified Network.Wai.Handler.Warp as Warp
-import           Network.HTTP.Types
 import           Data.Aeson
+import qualified Data.ByteString            as BS
+import qualified Data.ByteString.Builder    as BSBB
+import qualified Data.ByteString.Char8      as BS8
+import qualified Data.ByteString.Lazy       as BSL
+import qualified Data.ByteString.Lazy.Char8 as BSL8
+import           Data.String                (fromString)
+import           Data.Text                  (Text)
+import           GHC.Generics               (Generic)
+import           Network.HTTP.Types
+import           Network.Wai
+import qualified Network.Wai.Handler.Warp   as Warp
+import           Options.Applicative
 import           Pipes
-import qualified Pipes.Safe as PS
-import qualified Pipes.Prelude as PP
+import qualified Pipes.Prelude              as PP
+import qualified Pipes.Safe                 as PS
+import           UnliftIO
 
 -- local imports
-import           Logging
 import           Common
-import           Vcr
+import           Logging
+import           Streaming
 import           Time
 import           Udp
-import           Streaming
+import           Vcr
 
 -- | Speciffic command options.
 data CmdOptions = CmdOptions
-    { optVerbose    :: Maybe Priority
-    , optSyslog     :: Maybe Priority
-    , optSource     :: Source
-    , optHttp       :: (String, Warp.Port)
+    { optVerbose :: Maybe Priority
+    , optSyslog  :: Maybe Priority
+    , optSource  :: Source
+    , optHttp    :: (String, Warp.Port)
     } deriving (Generic, Eq, Show)
 
 options :: Parser CmdOptions
@@ -78,17 +78,16 @@ httpServer ::
 httpServer logM startTimeMono startTimeUtc src (ip, port) = do
     let settings =
             Warp.setPort port $
-            Warp.setHost (fromString ip) $
-            Warp.defaultSettings
+            Warp.setHost (fromString ip) Warp.defaultSettings
     logM INFO $ "http server, ip: " ++ show ip ++ ", port: " ++ show port
-    Warp.runSettings settings $ app
+    Warp.runSettings settings app
   where
     app request respond = withLog go
       where
         jsonEncFormat :: Data.Aeson.ToJSON a => a -> BSL.ByteString
         jsonEncFormat = case "pretty" `elem` (fst <$> queryString request) of
             False -> encode
-            True -> encodeJSONPrettyL
+            True  -> encodeJSONPrettyL
 
         withLog ::
             ([Text] -> StdMethod -> IO ResponseReceived)
@@ -101,7 +100,7 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
             Right mtd -> do
                 let level = case mtd of
                         GET -> DEBUG
-                        _ -> INFO
+                        _   -> INFO
                 logM level $ show request
                 act (pathInfo request) mtd
 
@@ -116,8 +115,8 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
             -> (BS8.ByteString -> m a) -- action on argument's value
             -> m a
         withArgValue a f1 f2 f3 = case getArg a of
-            Nothing -> f1
-            Just Nothing -> f2
+            Nothing         -> f1
+            Just Nothing    -> f2
             Just (Just val) -> f3 val
 
         -- | Get index argument.
@@ -130,9 +129,9 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
         -- | Return 'pipe' that maybe limits number of items.
         getLimit :: (Monad m, Functor f) => ExceptT String m (Pipe (ix,a) (ix,a) f ())
         getLimit = withArgValue "limit"
-            (return cat)        -- no limit, identity pipe
+            (pure cat)        -- no limit, identity pipe
             (throwE "limit argument not present")
-            ((either throwE (return . PP.take)) <$> eitherDecodeStrict')
+            (either throwE (pure . PP.take) <$> eitherDecodeStrict')
 
         respondJson :: ToJSON a => Either (Status, String) a -> IO ResponseReceived
         respondJson = \case
@@ -181,7 +180,7 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
             act = do
                 ix <- getIndex "ix"
                 event <- lift $ PS.runSafeT $ peekItem player ix
-                return (event :: Event UdpContent)
+                pure (event :: Event UdpContent)
 
         go ["next"] GET = runExceptT act >>= respondJson where
             act = do
@@ -192,8 +191,8 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
 
                 result <- lift $ PS.runSafeT $ findEventByTimeUtc player t
                 case result of
-                    Nothing -> return Nothing
-                    Just (ix, _ :: Event UdpContent) -> return (Just ix)
+                    Nothing                          -> pure Nothing
+                    Just (ix, _ :: Event UdpContent) -> pure (Just ix)
 
         -- stream events from the recording files
         --  - optionally starting from some index
@@ -212,8 +211,8 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
                 ix <- withArgValue "ix"
                         (do
                             (ix1, ix2) <- lift $ PS.runSafeT $ limits player
-                            return $ case direction of
-                                Forward -> ix1
+                            pure $ case direction of
+                                Forward  -> ix1
                                 Backward -> ix2
                         )
                         (throwE "'ix' argument not present")
@@ -235,9 +234,9 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
                 let flt = genericFilter <|> channelFilter
                 let producer :: Producer (Index, Event UdpContent) (PS.SafeT IO) ()
                     producer = runPlayer player direction ix $ case flt of
-                        Nothing -> Nothing
+                        Nothing  -> Nothing
                         Just val -> Just (val, to)
-                return (producer >-> limit, includeIndex)
+                pure (producer >-> limit, includeIndex)
             case eArgs of
                 Left err -> do
                     logM NOTICE err
@@ -253,13 +252,13 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
                                 flush
                         tryIO (PS.runSafeT $ runEffect effect) >>= \case
                             Left e -> logM DEBUG $ show e
-                            Right _ -> return ()
+                            Right _ -> pure ()
           where
             getIncludeIndex :: Monad m => ExceptT String m Bool
             getIncludeIndex = withArgValue "includeIndex"
-                (return False)
-                (return True)
-                (\_ -> throwE $ "unexpected argument value: ")
+                (pure False)
+                (pure True)
+                (\_ -> throwE "unexpected argument value: ")
 
         go _ _ = notFound
 
@@ -295,4 +294,3 @@ cmdServer :: ParserInfo Command
 cmdServer = info
     ((runCmd <$> options) <**> helper)
     (progDesc "Http interface to recording")
-

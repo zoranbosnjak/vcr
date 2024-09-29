@@ -4,42 +4,43 @@
 
 module Replay.View.Wx where
 
-import           UnliftIO
-import           Control.Concurrent.STM (flushTQueue)
-import           Data.Bool
-import           Data.Void
-import           Data.ReactiveValue.Extended
-import           Data.Char (toLower)
-import qualified Data.List.NonEmpty as NEL
-import qualified Data.Map as Map
+import           Control.Concurrent.STM           (flushTQueue)
 import           Control.Monad
 import           Control.Monad.Fix
 import           Control.Monad.Trans.Except
-import           Text.Printf
-import qualified Data.Text as T
-import qualified Data.Time.Clock as Clk
-import qualified Data.Time.Calendar as Cal
-import           Lens.Micro.Platform hiding (set)
-import           System.Directory (doesPathExist)
+import           Data.Bool
+import           Data.Char                        (toLower)
+import qualified Data.List.NonEmpty               as NEL
+import qualified Data.Map                         as Map
+import           Data.Maybe
+import           Data.ReactiveValue.Extended
+import qualified Data.Text                        as T
+import qualified Data.Time.Calendar               as Cal
+import qualified Data.Time.Clock                  as Clk
+import           Data.Void
+import           Lens.Micro.Platform              hiding (set)
 import           Pipes
-import qualified Pipes.Safe as PS
+import qualified Pipes.Safe                       as PS
+import           System.Directory                 (doesPathExist)
+import           Text.Printf
+import           UnliftIO
 
-import qualified Text.Megaparsec as MP
-import qualified Text.Megaparsec.Char as MC
-import qualified Text.Megaparsec.Char.Lexer as ML
+import qualified Text.Megaparsec                  as MP
+import qualified Text.Megaparsec.Char             as MC
+import qualified Text.Megaparsec.Char.Lexer       as ML
 
-import           Graphics.UI.WXCore
 import           Graphics.UI.WX
 import           Graphics.UI.WX.Reactive.Extended
+import           Graphics.UI.WXCore
 
 -- local imports
 import           Common
-import           Time
-import           Vcr
-import           Streaming
-import           Streaming.Disk
 import           Replay.Engine
 import           Replay.Types
+import           Streaming
+import           Streaming.Disk
+import           Time
+import           Vcr
 
 data SaveToFile
     = AppendFile FilePath
@@ -47,14 +48,14 @@ data SaveToFile
     deriving (Eq, Show)
 
 data Buttons act upd evt btn rv1 rv2 lyo = Buttons
-    { bChannel          :: Channel
-    , bActiveFlag       :: act
-    , bUpdateBlinker    :: upd
-    , bEnableConsole    :: btn
-    , bEnableOutput     :: btn
-    , bEnableConsoleRV  :: rv1
-    , bEnableOutputRV   :: rv2
-    , bChLayout         :: lyo
+    { bChannel         :: Channel
+    , bActiveFlag      :: act
+    , bUpdateBlinker   :: upd
+    , bEnableConsole   :: btn
+    , bEnableOutput    :: btn
+    , bEnableConsoleRV :: rv1
+    , bEnableOutputRV  :: rv2
+    , bChLayout        :: lyo
     }
 
 colorNormal :: Color
@@ -70,7 +71,7 @@ colorActive = green
 pTimeEntry :: MP.Parsec Void String UtcTime
 pTimeEntry = Clk.UTCTime <$> datePart <*> (MC.char ' ' *> timePart)
   where
-    nDigits n = (replicateM_ n MC.digitChar) >> MP.notFollowedBy MC.digitChar
+    nDigits n = replicateM_ n MC.digitChar >> MP.notFollowedBy MC.digitChar
     digits n p = MP.lookAhead (nDigits n) >> p
 
     datePart = Cal.fromGregorian
@@ -83,13 +84,13 @@ pTimeEntry = Clk.UTCTime <$> datePart <*> (MC.char ' ' *> timePart)
         guard $ h < 24
         m :: Int <- MC.char ':' *> digits 2 ML.decimal
         guard $ m < 60
-        s :: Int <- (MC.char ':' *> digits 2 ML.decimal)
-        ms :: Int <- (MC.char '.' *> digits 3 ML.decimal)
-        let seconds :: Double = fromIntegral s + (fromIntegral ms) / 1000
+        s :: Int <- MC.char ':' *> digits 2 ML.decimal
+        ms :: Int <- MC.char '.' *> digits 3 ML.decimal
+        let seconds :: Double = fromIntegral s + fromIntegral ms / 1000
         guard $ seconds < 62 -- leap seconds
         let dt = ((fromIntegral h * 60) + fromIntegral m) * 60 + seconds
             picoSec = dt * 1000 * 1000 * 1000 * 1000
-        return $ Clk.picosecondsToDiffTime (round picoSec)
+        pure $ Clk.picosecondsToDiffTime (round picoSec)
 
 -- display time in different formats
 showTimeEntry :: Clk.UTCTime -> (String, (String, String))
@@ -116,16 +117,16 @@ entryUtcTime t0 ctr = do
     let updateVar = do
             s <- get ctr text
             case MP.parseMaybe pTimeEntry s of
-                Nothing -> return ()
-                Just t -> void $ swapMVar var t
+                Nothing -> pure ()
+                Just t  -> void $ swapMVar var t
     let getter = readMVar var
         setter t = do
-            set ctr [ text := (fst $ showTimeEntry t) ]
+            set ctr [ text := fst (showTimeEntry t) ]
             void $ swapMVar var t
             runNotifiers notifiers
-        notifier p = modifyMVar_ notifiers (\x -> return (x ++ [p]))
+        notifier p = modifyMVar_ notifiers (\x -> pure (x ++ [p]))
     set ctr [ on onText :~ \kbd -> kbd >> updateVar >> runNotifiers notifiers ]
-    return $ ReactiveFieldReadWrite setter getter notifier
+    pure $ ReactiveFieldReadWrite setter getter notifier
 
 -- | Save recording interval to a file.
 saveAs :: Window a -> EngineConfig -> IO ()
@@ -142,9 +143,9 @@ saveAs f cfg = do
 
         targetFile <- do
             let suggestedFile = snd ( snd $ showTimeEntry t1) ++ ".vcr"
-                    & map (\x -> case x of
+                    & map (\case
                         ' ' -> '_'
-                        c -> c)
+                        c   -> c)
             result <- liftIO $ fileSaveDialog f True False "Save selection"
                 [ ("Recordings",["*.vcr"])
                 , ("Any file", ["*.*"])
@@ -152,7 +153,7 @@ saveAs f cfg = do
             targetFile <- maybe (throwE ()) pure result
             exists <- liftIO $ doesPathExist targetFile
             case exists of
-                False -> return $ AppendFile targetFile
+                False -> pure $ AppendFile targetFile
                 True -> do
                     d <- liftIO $ dialog f [text := "File exists."]
                     ctr <- liftIO $ radioBox d Vertical
@@ -170,14 +171,14 @@ saveAs f cfg = do
                         set bCancel [ on command := fin Nothing ]
                         set bOk [ on command := do
                             sel <- get ctr selection >>= \case
-                                0 -> return $ AppendFile targetFile
-                                1 -> return $ ReplaceFile targetFile
+                                0 -> pure $ AppendFile targetFile
+                                1 -> pure $ ReplaceFile targetFile
                                 _ -> fail "unexpected selection"
                             fin (Just sel)]
                         )
                     case res of
                         Nothing -> throwE ()
-                        Just x -> return x
+                        Just x  -> pure x
 
         -- get channel selection
         channelSelection <- do
@@ -208,16 +209,16 @@ saveAs f cfg = do
                     Control.Monad.when (null channelList) $ do
                         liftIO $ errorDialog f "error" "channel list is empty"
                         throwE ()
-                    return $ NEL.nonEmpty channelList
+                    pure $ NEL.nonEmpty channelList
                 -- all channels
-                Just 1 -> return Nothing
+                Just 1 -> pure Nothing
                 _ -> error $ "internal error, unexpected value: " ++ show result
 
-        return (t1, t2, targetFile, channelSelection)
+        pure (t1, t2, targetFile, channelSelection)
 
     -- perform file save
     case result of
-        Left _ -> return ()
+        Left _ -> pure ()
         Right (t1, t2, targetFile, channelSelection) -> do
             tSavedSTM <- newTVarIO t1
             tSavedRV <- eqCheck . cbmvarReactiveRW <$> newCBMVar t1
@@ -234,7 +235,7 @@ saveAs f cfg = do
                 ]
 
             follow tSavedRV $ \t -> do
-                set lab [ text := (snd $ snd $ showTimeEntry t) ]
+                set lab [ text := snd (snd $ showTimeEntry t) ]
 
             let saveAction :: IO ()
                 saveAction = do
@@ -242,11 +243,11 @@ saveAs f cfg = do
                     ix0 <- fix $ \loop -> do
                         PS.runSafeT (findEventByTimeUtc player t1) >>= \case
                             Nothing -> threadDelaySec 1.0 >> loop
-                            Just (i, _event) -> return i
+                            Just (i, _event) -> pure i
 
                     let playerFlt = do
                             cs <- channelSelection
-                            return (onlyChannels cs, Just 1.0)
+                            pure (onlyChannels cs, Just 1.0)
 
                         producer = runPlayer player Vcr.Forward ix0 playerFlt
 
@@ -264,14 +265,14 @@ saveAs f cfg = do
                             atomically $ writeTVar tSavedSTM t
                             case t > t2 of
                                 False -> yield evt >> loop
-                                True -> return ()
+                                True  -> pure ()
 
                     targetFile' <- case targetFile of
-                            AppendFile fn -> return fn
+                            AppendFile fn -> pure fn
                             ReplaceFile fn -> do
-                                withFile fn WriteMode $ \_ -> return ()
-                                return fn
-                    let logM _msg = return ()
+                                withFile fn WriteMode $ \_ -> pure ()
+                                pure fn
+                    let logM _msg = pure ()
                         fa = FileArchive TextEncoding targetFile'
                         buffering = Buffering Nothing False
                         recorder = jsonRecorder $ mkFileRecorder buffering fa
@@ -283,24 +284,23 @@ saveAs f cfg = do
             -- run saveAction as async, so that a GUI will respond during save
             ioResult <- withAsync saveAction $ \saveLoop -> showModal d $ \fin -> do
                 let closeDialog val = do
-                        set d [ on idle := return False ]
+                        set d [ on idle := pure False ]
                         fin val
                 set bCancel [on command := closeDialog Nothing]
                 set d [on idle := do
-                    atomically (readTVar tSavedSTM)
-                        >>= reactiveValueWrite tSavedRV
+                    readTVarIO tSavedSTM >>= reactiveValueWrite tSavedRV
                     poll saveLoop >>= \case
-                        Nothing -> return ()
+                        Nothing -> pure ()
                         Just (Left e) -> closeDialog (Just e)
                         Just (Right _) -> closeDialog Nothing
                     threadDelaySec 0.05 -- delay to prevent looping too fast
-                    return False
+                    pure False
                     ]
 
             case ioResult of
                 Just e -> errorDialog f "error" $ "fatal error: " ++ show e
                 Nothing -> do
-                    tLast <- atomically (readTVar tSavedSTM)
+                    tLast <- readTVarIO tSavedSTM
                     Control.Monad.when (tLast >= t2) $ do
                         infoDialog f "done" "Transfer finished!"
 
@@ -341,7 +341,7 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
 
     -- recorder selector
     recorderSelector <- choice p
-        [ items := (fmap fst sources)
+        [ items := fmap fst sources
         , selection := 0
         ]
 
@@ -350,13 +350,13 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
     fileSelector <- button p
         [ text := "Select File"
         , on command := do
-            current <- fmap (maybe "" id) (reactiveValueRead selectedFilenameRV)
+            current <- fmap (fromMaybe "") (reactiveValueRead selectedFilenameRV)
             result <- fileOpenDialog f True True "Select recording file"
                 [ ("Recordings",["*.vcr"])
                 , ("Any file", ["*"])
                 ] "" current
             case result of
-                Nothing -> return ()
+                Nothing -> pure ()
                 Just filename -> do
                     reactiveValueWrite selectedFilenameRV (Just filename)
         ]
@@ -367,7 +367,7 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
 
     -- channel map selector
     channelMapSelector <- choice p
-        [ items := (fmap fst channelMaps)
+        [ items := fmap fst channelMaps
         , selection := 0
         ]
 
@@ -392,7 +392,7 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
                 Just (a,b) -> do
                     set limit1 [ text := snd (snd (showTimeEntry a)) ]
                     set limit2 [ text := snd (snd (showTimeEntry b)) ]
-        return (val, limit1, limit2)
+        pure (val, limit1, limit2)
 
     -- buffer level gauge
     bufferLevelSTM <- newTVarIO 0
@@ -412,7 +412,7 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
                     [ selection := x
                     , bgcolor := lightgrey
                     ]
-        return (val, ctr)
+        pure (val, ctr)
 
     -- time buttons
     t1Button <- button p [ text := "marker 1" ]
@@ -425,7 +425,7 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
             s <- get ctr text
             let c = maybe red (const white) (MP.parseMaybe pTimeEntry s)
             set ctr [ bgcolor := c ]
-    now <- atomically $ readTVar tUtc
+    now <- readTVarIO tUtc
     t1 <- textEntry p [ tooltip := tTip, text := fst $ showTimeEntry now ]
     tC <- textEntry p [ tooltip := tTip, text := fst $ showTimeEntry now ]
     t2 <- textEntry p [ tooltip := tTip, text := fst $ showTimeEntry now ]
@@ -479,7 +479,7 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
                 MouseLeftUp _ _ -> do
                     set w [ selection := 0 ]
                     reactiveValueWrite tSliderRV 0
-                _ -> return ()
+                _ -> pure ()
         ]
 
     -- marker action selector
@@ -515,12 +515,12 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
             , textColor := green
             ]
         textCtrlSetEditable control False
-        return control
+        pure control
 
     -- auto update clock(s)
     follow tFeedbackRVInternal $ \t -> do
-        set tC [ text := (fst $ showTimeEntry t) ]
-        set bigClock [ text := (fst $ snd $ showTimeEntry t) ]
+        set tC [ text := fst (showTimeEntry t) ]
+        set bigClock [ text := fst (snd $ showTimeEntry t) ]
 
     -- console
     dumpWindow <- do
@@ -529,7 +529,7 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
             , wrap := WrapNone
             ]
         textCtrlSetEditable control False
-        return control
+        pure control
 
     -- Unfortunately, the "on click" triggers BEFORE the change,
     -- so the actual "notebookGetSelection" must be called later.
@@ -574,18 +574,18 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
                 ]
 
             let updateBlinker event = case blink event of
-                    Nothing -> return () :: IO ()
+                    Nothing -> pure () :: IO ()
                     Just t -> do
                         v <- registerDelay (round $ t * 1000 * 1000)
                         atomically $ writeTVar activeFlag v
 
-                chLayout = widget $ row 5 $
+                chLayout = widget $ row 5
                     [ widget enableConsole
                     , widget enableOutput
                     , label $ T.unpack channel
                     ]
 
-            return $ Buttons
+            pure $ Buttons
                 channel
                 activeFlag
                 updateBlinker
@@ -595,7 +595,7 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
                 (readOnly enableOutputRV)
                 chLayout
 
-        return (name, cp, controls)
+        pure (name, cp, controls)
 
     -- setup frame
     set f
@@ -643,7 +643,7 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
 
     -- set p1 layout
     set p1 [ layout := fill $ minsize (sz (-1) 200) $
-        tabs nb [ tab name $ container pnl $ empty | (name, pnl, _) <- outputPanels] ]
+        tabs nb [ tab name $ container pnl empty | (name, pnl, _) <- outputPanels] ]
     forM_ outputPanels $ \(_name, pnl, controls) -> do
         let outLayout = column 5 (fmap bChLayout controls)
         set pnl [ layout := outLayout ]
@@ -667,21 +667,21 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
         <*> pure (readOnly t2RV)
         <*> pure directionRV
         <*> selectorR atMarker
-        <*> (liftR ((!!) speedChoices) <$> selectorR speedSelector)
+        <*> (liftR (speedChoices !!) <$> selectorR speedSelector)
         <*> checkableR runButton
         <*> (liftR (fst . (!!) outputs) <$> pure nbRV)
         <*> pure (do
                 (name, _, controls) <- outputPanels
                 let lst = do
                         btns <- controls
-                        return
+                        pure
                             ( bChannel btns
                             , ( bEnableConsoleRV btns
                               , bEnableOutputRV btns
                               , bUpdateBlinker btns
                               )
                             )
-                return (name, lst)
+                pure (name, lst)
                 )
 
     -- setup reactive relations
@@ -699,27 +699,24 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
         [ interval := periodMs
         , on command := do
             -- auto update clock(s)
-            atomically (readTVar tUtc)
-                >>= reactiveValueWrite tFeedbackRVInternal
+            readTVarIO tUtc >>= reactiveValueWrite tFeedbackRVInternal
 
             -- work around notebook selection problem
             notebookGetSelection nb >>= reactiveValueWrite nbRV
 
             -- move current time with a slider
             reactiveValueRead tSliderRV >>= \case
-                0 -> return ()
+                0 -> pure ()
                 n -> do
                     let k = (fromIntegral periodMs / 10) * ((fromIntegral n / 100) ^ (7::Int))
                         dt = k * Clk.nominalDay
                     reactiveValueModify tCRV (Clk.addUTCTime dt)
 
             -- update limits
-            atomically (readTVar limitsSTM)
-                >>= reactiveValueWrite limitsRV
+            readTVarIO limitsSTM >>= reactiveValueWrite limitsRV
 
             -- update bufferLevel
-            atomically (readTVar bufferLevelSTM)
-                >>= reactiveValueWrite bufferLevelRV
+            readTVarIO bufferLevelSTM >>= reactiveValueWrite bufferLevelRV
 
             -- update button colors
             do
@@ -729,10 +726,10 @@ runUI tUtc maxDump speedChoices sources channelMaps outputs controller periodMs 
                     col <- atomically $ do
                         var <- readTVar $ bActiveFlag btns -- get inner variable first
                         readTVar var >>= \case      -- then it's value
-                            True -> return colorStandBy
-                            False -> return colorActive
+                            True -> pure colorStandBy
+                            False -> pure colorActive
                     let updateButton w = get w checked >>= \case
-                            False -> return ()
+                            False -> pure ()
                             True -> set w [ bgcolor := col ]
                     updateButton (bEnableConsole btns)
                     updateButton (bEnableOutput btns)

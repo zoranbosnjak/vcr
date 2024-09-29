@@ -60,6 +60,10 @@
 # - ignore: {name: Use let}
 # - ignore: {name: Use const, within: SpecialModule} # Only within certain modules
 - ignore: {name: Use if}
+- ignore: {name: Redundant multi-way if}
+- ignore: {name: Redundant <$>, within CmdCat}
+- ignore: {name: Use <&>}
+- ignore: {name: Redundant flip}
 
 # Define some custom infix operators
 # - fixity: infixr 3 ~^#^~

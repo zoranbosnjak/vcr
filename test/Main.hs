@@ -5,8 +5,8 @@ module Main (main) where
 
 import           Test.Tasty
 
-import qualified VcrTest
 import qualified DiskTest
+import qualified VcrTest
 
 tests :: TestTree
 tests = testGroup "Tests"

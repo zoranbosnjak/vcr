@@ -8,14 +8,15 @@
 module CmdCustom where
 
 -- standard imports
-import           GHC.Generics (Generic)
+import           Data.Maybe
+import           GHC.Generics         (Generic)
 import           Options.Applicative
-import           System.Exit (ExitCode(ExitFailure,ExitSuccess))
-import           System.Process (runProcess, waitForProcess)
-import           System.IO.Temp (withSystemTempDirectory)
-import           System.FilePath ((</>))
-import           System.Directory (copyFile)
+import           System.Directory     (copyFile)
+import           System.Exit          (ExitCode (ExitFailure, ExitSuccess))
+import           System.FilePath      ((</>))
+import           System.IO.Temp       (withSystemTempDirectory)
 import           System.Posix.Process (executeFile)
+import           System.Process       (runProcess, waitForProcess)
 
 -- local imports
 import           Common
@@ -29,7 +30,7 @@ data CustomAction
 data CmdOptions = CmdOptions
     { optProgram :: FilePath
     , optGhcOpts :: Maybe String
-    , optAction :: CustomAction
+    , optAction  :: CustomAction
     } deriving (Generic, Eq, Show)
 
 options :: Parser CmdOptions
@@ -67,7 +68,7 @@ runCmd opt _pName _pArgs _version ghcBase wxcLib = do
             , "-o", buildTarget
             , cmd
             ]
-            ++ words (maybe "" id (optGhcOpts opt))
+            ++ words (fromMaybe "" (optGhcOpts opt))
             )
             (Just tmp)
             Nothing
@@ -75,9 +76,9 @@ runCmd opt _pName _pArgs _version ghcBase wxcLib = do
             Nothing
             Nothing
         waitForProcess ghcProc >>= \case
-            ExitFailure _rc -> return ()
+            ExitFailure _rc -> pure ()
             ExitSuccess -> case optAction opt of
-                Validate -> return ()
+                Validate -> pure ()
                 Build dst -> copyFile buildTarget dst
                 Run -> executeFile buildTarget False
                     cmdArgs
@@ -87,4 +88,3 @@ cmdCustom :: ParserInfo Command
 cmdCustom = info
     ((runCmd <$> options) <**> helper)
     (progDesc "Run custom program")
-

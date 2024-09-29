@@ -8,21 +8,21 @@ module CmdCat where
 -- standard imports
 import           Control.Monad
 import           Control.Monad.Fix
-import           GHC.Generics (Generic)
-import           UnliftIO
-import           Options.Applicative
-import qualified Data.Set as Set
-import qualified Data.Text.IO as T
 import qualified Data.ByteString.Char8 as BS8
+import qualified Data.Set              as Set
+import qualified Data.Text.IO          as T
+import           GHC.Generics          (Generic)
+import           Options.Applicative
 import           Pipes
-import qualified Pipes.Safe as PS
+import qualified Pipes.Safe            as PS
+import           UnliftIO
 
 -- local imports
 import           Common
-import           Vcr
+import           Streaming
 import           Time
 import           Udp
-import           Streaming
+import           Vcr
 
 data DumpMode
     = Replay Direction
@@ -55,7 +55,8 @@ options = CmdOptions
 
     srcDir = SDirectory
         <$> pure TextEncoding
-        <*> strOption (long "dir" <> metavar "FILE" <> help "directory backend (base filename)")
+        <*> strOption (long "dir" <> metavar "FILE"
+                       <> help "directory backend (base filename)")
 
     srcHttp = SHttp
         <$> strOption (long "url" <> metavar "URL" <> help "url backend")
@@ -82,21 +83,21 @@ runCmd opt _pName _pArgs _version _ghc _wxcLib = do
         t1 = optT1 opt
         t2 = optT2 opt
 
-        findTime t = (PS.runSafeT $ findEventByTimeUtc player t) >>= \case
+        findTime t = PS.runSafeT (findEventByTimeUtc player t) >>= \case
             Nothing -> fail $ "Can not find time: " <> show t
-            Just (ix, _event) -> return ix
+            Just (ix, _event) -> pure ix
 
-        timeCheck Forward  _mt1 Nothing _t = True
+        timeCheck Forward  _mt1 Nothing _t    = True
         timeCheck Forward  _mt1 (Just tLim) t = t <= tLim
-        timeCheck Backward Nothing _mt2 _t = True
+        timeCheck Backward Nothing _mt2 _t    = True
         timeCheck Backward (Just tLim) _mt2 t = t >= tLim
 
     case optCmd opt of
 
         ShowLimits -> do
             (limit1, limit2) <- PS.runSafeT $ limits player
-            (eTimeUtc <$> (PS.runSafeT $ peekItem player limit1)) >>= putStrLn . fmtTime
-            (eTimeUtc <$> (PS.runSafeT $ peekItem player limit2)) >>= putStrLn . fmtTime
+            PS.runSafeT (peekItem player limit1) >>= (putStrLn . fmtTime) . eTimeUtc
+            PS.runSafeT (peekItem player limit2) >>= (putStrLn . fmtTime) . eTimeUtc
 
         ShowChannels -> do
             (limit1, _limit2) <- PS.runSafeT $ limits player
@@ -120,7 +121,7 @@ runCmd opt _pName _pArgs _version _ghc _wxcLib = do
 
         DumpData mode channels -> do
             let flt = case channels of
-                    [] -> Nothing
+                    []  -> Nothing
                     lst -> Just (onlyChannels lst, Nothing)
 
             case mode of
@@ -160,7 +161,7 @@ runCmd opt _pName _pArgs _version _ghc _wxcLib = do
                             Left _e -> do
                                 threadDelaySec dt
                                 loop
-                            Right val -> return val
+                            Right val -> pure val
 
                     go limit2
 
@@ -169,4 +170,3 @@ cmdCat :: ParserInfo Command
 cmdCat = info
     ((runCmd <$> options) <**> helper)
     (progDesc "Dump events")
-

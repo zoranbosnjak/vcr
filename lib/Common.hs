@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 
 -- | Common functions and definitions.
@@ -17,16 +16,16 @@ module Common
     )
   where
 
-import           Control.Monad
+import           Control.Concurrent     (threadDelay)
 import           Control.Concurrent.STM
-import           Control.Concurrent (threadDelay)
+import           Control.Monad
 import           Data.Bool
-import           UnliftIO.Async (race)
+import           UnliftIO.Async         (race)
 
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
+import qualified Data.ByteString        as BS
 import qualified Data.ByteString.Base16 as B16
-import           Data.Word (Word8)
+import qualified Data.ByteString.Char8  as BS8
+import           Data.Word              (Word8)
 
 type Prog = String
 type Args = [String]
@@ -45,24 +44,24 @@ periodic period act = forever (act >> threadDelaySec period)
 
 -- | Sleep indefinetly.
 doNothing :: IO a
-doNothing = periodic 1.0 $ return ()
+doNothing = periodic 1.0 $ pure ()
 
 -- | Run all processes concurrently, return index of a terminated process.
 runAll :: [IO ()] -> IO Int
 runAll lst = go $ zip [0..] lst where
-    go [] = doNothing >> return (-1)
-    go ((ix,p):[]) = p >> return ix
+    go [] = doNothing >> pure (-1)
+    go [(ix,p)] = p >> pure ix
     go ((ix,p):rest) = race p (go rest) >>= \case
-        Left _a -> return ix
-        Right b -> return b
+        Left _a -> pure ix
+        Right b -> pure b
 
 -- | Run action if given argument is (Just x).
 runMaybe :: Monad m => Maybe a -> (a -> m ()) -> m ()
-runMaybe mVal act = maybe (return ()) act mVal
+runMaybe mVal act = maybe (pure ()) act mVal
 
 -- | Run process if given argument is (Just x), otherwise run empty loop.
 whenSpecified :: (t -> IO a) -> Maybe t -> IO a
-whenSpecified _act Nothing = doNothing
+whenSpecified _act Nothing   = doNothing
 whenSpecified act (Just val) = act val
 
 -- | Restart process on STM value change.
@@ -71,9 +70,9 @@ restartOnChange getVar compareValue act = atomically getVar >>= go where
     go x = do
         result <- race (act x) $ atomically $ do
             y <- getVar
-            bool (return y) retry (compareValue y == compareValue x)
+            bool (pure y) retry (compareValue y == compareValue x)
         case result of
-            Left a -> return a
+            Left a  -> pure a
             Right y -> go y
 
 -- | Convert bytestring to hex representation.

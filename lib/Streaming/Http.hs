@@ -135,7 +135,7 @@ mkHttpPlayer (HttpArchive url) = Player
                 ++ case flt of
                     Nothing -> ""
                     Just (val1, timeout) ->
-                        "&ch=" ++ objToUrl val1
+                        "&filter=" ++ objToUrl val1
                         ++ case timeout of
                             Nothing -> ""
                             Just val2 -> "&timeout=" ++ objToUrl val2

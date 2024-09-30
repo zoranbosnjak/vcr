@@ -20,6 +20,8 @@ import qualified Data.List.NonEmpty as NE
 import           Control.Monad
 import           Control.Monad.Catch
 import           Control.Monad.Trans.Maybe
+import           Data.Text.Encoding        (decodeUtf8)
+import qualified Data.ByteString.Char8     as BS8
 import           Pipes
 import qualified Pipes.Prelude as PP
 import qualified Data.ByteString as BS
@@ -143,6 +145,10 @@ applyFilter flt event = case flt of
 -- | Helper function to construct channel filter.
 onlyChannels :: Foldable t => t Channel -> Filter
 onlyChannels = Prelude.foldr (Or . FChannel . TextFilterMatch) (Not Pass)
+
+-- | Helper function to decode channels in the form "ch1|ch2|...".
+decodeChannelsSimple :: BS8.ByteString -> Either String Filter
+decodeChannelsSimple = pure . onlyChannels . Text.splitOn "|" . decodeUtf8
 
 -- | Player methods structure.
 data Player m ix a = Player

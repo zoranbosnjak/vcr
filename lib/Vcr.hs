@@ -14,9 +14,11 @@ import           Control.Monad.Trans.Maybe
 import           Data.Aeson
 import qualified Data.Aeson.Encode.Pretty  as AesonP
 import qualified Data.ByteString           as BS
+import qualified Data.ByteString.Char8     as BS8
 import qualified Data.ByteString.Lazy      as BSL
 import qualified Data.List.NonEmpty        as NE
 import           Data.Text                 as Text
+import           Data.Text.Encoding        (decodeUtf8)
 import           GHC.Generics              (Generic)
 import           Pipes
 import qualified Pipes.Prelude             as PP
@@ -139,6 +141,10 @@ applyFilter flt event = case flt of
 -- | Helper function to construct channel filter.
 onlyChannels :: Foldable t => t Channel -> Filter
 onlyChannels = Prelude.foldr (Or . FChannel . TextFilterMatch) (Not Pass)
+
+-- | Helper function to decode channels in the form "ch1|ch2|...".
+decodeChannelsSimple :: BS8.ByteString -> Either String Filter
+decodeChannelsSimple = pure . onlyChannels . Text.splitOn "|" . decodeUtf8
 
 -- | Player methods structure.
 data Player m ix a = Player

@@ -223,10 +223,15 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
                     (pure Nothing)
                     (throwE "timeout argument not present")
                     (either throwE pure . eitherDecodeStrict')
-                flt <- withArgValue "ch"
+                genericFilter <- withArgValue "filter"
                     (pure Nothing)
-                    (throwE "ch argument not present")
+                    (throwE "filter argument not present")
                     (either throwE (pure . Just) . eitherDecodeStrict')
+                channelFilter <- withArgValue "channels"
+                    (pure Nothing)
+                    (throwE "channels argument not present")
+                    (either throwE (pure . Just) . decodeChannelsSimple)
+                let flt = genericFilter <|> channelFilter
                 let producer :: Producer (Index, Event UdpContent) (PS.SafeT IO) ()
                     producer = runPlayer player direction ix $ case flt of
                         Nothing  -> Nothing

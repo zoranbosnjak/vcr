@@ -97,6 +97,6 @@ curl "localhost:12345/next?t=\"2021-01-06T09:20:29.2250Z\""
 # get events
 curl "localhost:12345/events"
 curl localhost:12345/events?includeIndex
-curl "localhost:12345/events?includeIndex&ch=\"ch1\""
-curl "localhost:12345/events?includeIndex&ch=\"ch1|ch2\""
+curl "localhost:12345/events?includeIndex&channels=ch1"
+curl "localhost:12345/events?includeIndex&channels=ch1|ch2"
 ```

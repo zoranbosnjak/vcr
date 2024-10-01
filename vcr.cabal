@@ -118,6 +118,22 @@ executable vcr
     hs-source-dirs:   app
     default-language: GHC2021
 
+executable vcr-generator
+    import:           base
+    ghc-options:
+        -O2 -rtsopts -funbox-strict-fields -with-rtsopts=-T -threaded
+    main-is:          generator.hs
+    hs-source-dirs:   test-tools
+    default-language: GHC2021
+
+executable vcr-receiver
+    import:           base
+    ghc-options:
+        -O2 -rtsopts -funbox-strict-fields -with-rtsopts=-T -threaded
+    main-is:          receiver.hs
+    hs-source-dirs:   test-tools
+    default-language: GHC2021
+
 test-suite vcr-test
     import:           base
     default-language: GHC2021

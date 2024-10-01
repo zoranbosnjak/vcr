@@ -98,6 +98,11 @@ let
         ./.;
       preBuild = preHook;
       buildInputs = oldAttrs.buildInputs ++ deps;
+      postInstall = ''
+        cp scripts/vcr-custom.sh $out/bin
+        mkdir $out/examples
+        cp examples/* $out/examples
+      '';
   });
 
   drv = if static == true
@@ -117,7 +122,6 @@ let
         ];
       })
     else drv2;
-
 
   env = haskellPackages.shellFor {
     packages = p: with p; [

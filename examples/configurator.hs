@@ -10,9 +10,6 @@ vcr custom --program "</abs/path/to/this/script> --script-arguments" --run
 
 To check:
 vcr custom --program "</abs/path/to/this/script>" --validate
-
-To make it executable, use shebang, something like this
-#! /usr/bin/env -S vcr-custom.sh --script-arguments
 -}
 
 {-# LANGUAGE OverloadedStrings #-}

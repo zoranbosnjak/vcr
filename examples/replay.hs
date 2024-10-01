@@ -10,9 +10,6 @@ vcr custom --program "</abs/path/to/this/script> --asterix <abs/path/to/asterix/
 
 To check:
 vcr custom --program "</abs/path/to/this/script>" --validate
-
-To make it executable, use shebang, something like this
-#! /usr/bin/env -S vcr-custom.sh --asterix /path/to/asterix-data/xml
 -}
 
 {-# LANGUAGE OverloadedStrings #-}

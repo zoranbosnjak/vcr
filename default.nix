@@ -99,7 +99,6 @@ let
       preBuild = preHook;
       buildInputs = oldAttrs.buildInputs ++ deps;
       postInstall = ''
-        cp scripts/vcr-custom.sh $out/bin
         mkdir $out/examples
         cp examples/* $out/examples
       '';

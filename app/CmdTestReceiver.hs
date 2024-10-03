@@ -1,18 +1,21 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 -- | Simple UDP receiver - for test purposes.
 
-module Main where
+module CmdTestReceiver where
 
+-- standard imports
 import           Control.Concurrent        (threadDelay)
 import           Control.Monad
 import           Control.Monad.Fix
 import qualified Data.ByteString           as BS
+import           GHC.Generics              (Generic)
 import qualified Network.Multicast         as Mcast
 import qualified Network.Socket            as Net
 import qualified Network.Socket.ByteString as NB
 import           Options.Applicative
 import           UnliftIO
+
+-- local imports
+import           Common
 
 type Host = String
 type Mcast = String
@@ -33,8 +36,14 @@ data Destination
     | Multicast Ip Port Ip
     deriving (Eq, Show)
 
-parser :: Parser (Direction, Destination, Rate)
-parser = (,,)
+data CmdOptions = CmdOptions
+    { optDirection   :: Direction
+    , optDestination :: Destination
+    , optRate        :: Rate
+    } deriving (Generic, Eq, Show)
+
+options :: Parser CmdOptions
+options = CmdOptions
     <$> (flag' Backward ( long "backward" <> help "assume backward replay")
         <|> pure Forward)
     <*> (parseUnicast <|> parseMulticast)
@@ -49,11 +58,11 @@ parser = (,,)
         <*> strOption (long "port" <> help "Port number")
         <*> strOption (long "localif" <> help "Local interface Ip")
 
-main :: IO ()
-main = execParser options >>= \(direction, addr, rate) -> do
-    cntOk <- newTVarIO (0::Int)
-    cntErr <- newTVarIO (0::Int)
-    cntErrTotal <- newTVarIO (0::Integer)
+runCmd :: CmdOptions -> Prog -> Args -> Version -> IO ()
+runCmd (CmdOptions direction addr rate) _pName _pArgs _version = do
+    cntOk <- newTVarIO (0 :: Integer)
+    cntErr <- newTVarIO (0 :: Integer)
+    cntErrTotal <- newTVarIO (0 :: Integer)
     let operator = case direction of
             Forward  -> (+)
             Backward -> (-)
@@ -63,8 +72,9 @@ main = execParser options >>= \(direction, addr, rate) -> do
                 <$> swapTVar cntOk 0
                 <*> swapTVar cntErr 0
                 <*> readTVar cntErrTotal
-            putStrLn $ "ok: " ++ show c1 ++ ", err: " ++ show c2 ++ ", errTotal: " ++ show c3
-    withAsync report $ \_ -> bracket (acquire addr) release $ \sock -> do
+            putStrLn $ "ok: " ++ show c1 ++ ", err: " ++ show c2
+                ++ ", errTotal: " ++ show c3
+    withAsync report $ \_ -> bracket acquire release $ \sock -> do
         let loop n = do
                 x <- getFirst sock
                 atomically $ case x == n of
@@ -84,9 +94,7 @@ main = execParser options >>= \(direction, addr, rate) -> do
             False -> loop
             True  -> pure $ BS.head msg
 
-    options = info (parser <**> helper) ( progDesc "UDP receiver")
-
-    acquire addr = do
+    acquire = do
         let (ip, port, mc) = case addr of
                 Unicast ip' port'         -> (ip', port', Nothing)
                 Multicast mcast' port' m' -> (mcast', port', Just m')
@@ -105,3 +113,9 @@ main = execParser options >>= \(direction, addr, rate) -> do
         pure sock
 
     release = Net.close
+
+-- | toplevel command
+cmdTestReceiver :: ParserInfo Command
+cmdTestReceiver = info
+    ((runCmd <$> options) <**> helper)
+    (progDesc "Test UDP receiver")

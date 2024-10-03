@@ -18,17 +18,21 @@ import           Text.Read                (readMaybe)
 -- local imports
 import           CmdCapture               (cmdCapture)
 import           CmdCat                   (cmdCat)
-import           CmdCustom                (cmdCustom)
+import           CmdConfigurator          (cmdConfigurator)
 import           CmdServer                (cmdServer)
+import           CmdTestGenerator         (cmdTestGenerator)
+import           CmdTestReceiver          (cmdTestReceiver)
 import           Common
 import           TH                       (getEnvVariableExpr)
 
 commands :: [(String, ParserInfo Command)]
 commands =
-    [ ("custom", cmdCustom)
-    , ("capture", cmdCapture)
+    [ ("capture", cmdCapture)
+    , ("configurator", cmdConfigurator)
     , ("server", cmdServer)
     , ("cat", cmdCat)
+    , ("test-generator", cmdTestGenerator)
+    , ("test-receiver", cmdTestReceiver)
     ]
 
 data Options = Options
@@ -69,12 +73,6 @@ main = do
             "version: " ++ swVersion
             ++ ", git rev: " ++ gitRev
 
-        ghcBase :: String
-        ghcBase = $( getEnvVariableExpr "GHC_BASE" )
-
-        wxcLib :: String
-        wxcLib = $( getEnvVariableExpr "WXC_LIB" )
-
     -- parse options
     opt <- do
         let showVersion = flag' True (long "version" <> help "Show version and exit")
@@ -92,4 +90,4 @@ main = do
         _ <- Ekg.forkServer ip port
         pure ()
 
-    optCommand opt pName pArgs versionString ghcBase wxcLib
+    optCommand opt pName pArgs versionString

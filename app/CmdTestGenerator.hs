@@ -1,16 +1,19 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 -- | Simple UDP data generator - for test purposes.
 
-module Main where
+module CmdTestGenerator where
 
+-- standard imports
 import           Control.Concurrent        (threadDelay)
 import qualified Data.ByteString           as BS
+import           GHC.Generics              (Generic)
 import qualified Network.Multicast         as Mcast
 import qualified Network.Socket            as Net
 import qualified Network.Socket.ByteString as NB
 import           Options.Applicative
 import           UnliftIO
+
+-- local imports
+import           Common
 
 type Host = String
 type Mcast = String
@@ -26,8 +29,14 @@ data Destination
     | Multicast Ip Port Ip TTL
     deriving (Eq, Show)
 
-parser :: Parser (Destination, Payload, Rate)
-parser = (,,)
+data CmdOptions = CmdOptions
+    { optDestination :: Destination
+    , optpayload     :: Payload
+    , optRate        :: Rate
+    } deriving (Generic, Eq, Show)
+
+options :: Parser CmdOptions
+options = CmdOptions
     <$> (parseUnicast <|> parseMulticast)
     <*> option auto (long "size" <> help "UDP payload bytes")
     <*> option auto (long "rate" <> help "packets per second")
@@ -41,18 +50,16 @@ parser = (,,)
         <*> strOption (long "localif" <> help "Local interface Ip")
         <*> option auto (long "ttl" <> help "TTL value")
 
-main :: IO ()
-main = execParser options >>= \(out, payload, rate) -> do
+runCmd :: CmdOptions -> Prog -> Args -> Version -> IO ()
+runCmd (CmdOptions out payload rate) _pName _pArgs _version = do
     bracket (acquire out) release $ \(sock, dst) -> do
         let loop !n = do
                 let msg = BS.singleton n <> BS.replicate (toEnum payload - 1) 0
                 NB.sendAllTo sock msg dst
                 threadDelay $ round $ (1000*1000) / rate
-                loop $ succ n
+                loop (n + 1)
         loop 0
   where
-    options = info (parser <**> helper) ( progDesc "UDP generator")
-
     acquire addr = do
         let (ip, port, mLocal, mTTL) = case addr of
                 Unicast ip' port' ->
@@ -73,3 +80,9 @@ main = execParser options >>= \(out, payload, rate) -> do
         pure (sock, Net.addrAddress serveraddr)
 
     release = Net.close . fst
+
+-- | toplevel command
+cmdTestGenerator :: ParserInfo Command
+cmdTestGenerator = info
+    ((runCmd <$> options) <**> helper)
+    (progDesc "Test UDP generator")

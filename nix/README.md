@@ -35,7 +35,4 @@ __propagatePkgConfigDepends = false;
 hsh=...
 nix-prefetch-git --rev $hsh https://github.com/zoranbosnjak/keera-hails.git \
     > nix/extra/keera-hails.json
-
-# deseo
-cabal2nix https://github.com/zoranbosnjak/deseo > nix/extra/deseo.nix
 ```

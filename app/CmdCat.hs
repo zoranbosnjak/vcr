@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 
--- | VCR 'cat command.
+-- | VCR 'cat' command.
 
 module CmdCat where
 
@@ -75,8 +75,8 @@ options = CmdOptions
         follow = flag' Follow (long "follow" <> short 'f' <> help "Wait until new data is available")
         replay = flag Forward Backward (long "backward" <> help "Run backward in time")
 
-runCmd :: CmdOptions -> Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()
-runCmd opt _pName _pArgs _version _ghc _wxcLib = do
+runCmd :: CmdOptions -> Prog -> Args -> Version -> IO ()
+runCmd opt _pName _pArgs _version = do
     let player :: Player (PS.SafeT IO) Index (Event UdpContent)
         player = mkPlayer $ optSource opt
 

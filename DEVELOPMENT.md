@@ -46,25 +46,24 @@ hlint {path}
 find . | grep "\.hs$" | xargs hlint
 
 # ghcid monitor
-ghcid --command="ghci -Wall -ilib -iapp app/Main.hs" --lint=hlint
+ghcid --lint=hlint --command="ghci -Wall -ilib -iapp app/Main.hs"
 
 # Running unit/property tests
-ghcid --command="ghci -Wall -ilib -itest test/Main.hs" --lint=hlint
+ghcid --lint=hlint --command="ghci -Wall -ilib -itest test/Main.hs"
 runhaskell -Wall -ilib -itest test/Main.hs
 cabal test --test-show-details=always
 
 # Running
-cabal build -j && ./dist... +RTS -M300m -RTS {args}
+cabal build -j
+vcr=$(find dist-newstyle/ -executable -type f | grep "vcr$")
+${vcr} +RTS -M300m -RTS -h
 runhaskell -ilib -iapp app/Main.hs -h
 
-# Running custom script
-runhaskell -Wall -ilib -iapp ./app/Main.hs custom --program \
-    "/path/to/custom.hs --custom args" --ghcOpts "-i/path/to -more-opts" \
-    --run
-
-# Running configurator/replay in devel mode
-runhaskell -Wall -ilib -iapp ./examples/configurator.hs
-runhaskell -Wall -ilib -iapp ./examples/replay.hs --asterix path/to/xml
+# Running replay example
+# In real configuration, this will be part of a separate project
+# with some additional external libraries (like Asterx processing)
+ghcid --lint=hlint --command="ghci -Wall -ilib examples/replay.hs"
+runhaskell -ilib examples/replay.hs
 ```
 
 # Http server API
@@ -78,7 +77,7 @@ runhaskell -Wall -ilib -iapp ./examples/replay.hs --asterix path/to/xml
 - events
 - next
 
-`curl` examples
+`curl` examples (with running 'vcr server' on 'localhost:12345')
 
 ```bash
 curl localhost:12345/ping

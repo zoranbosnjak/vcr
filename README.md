@@ -122,37 +122,16 @@ Streaming data from http is a 2-step process:
   The user is free to interrupt/pause the transfer at any point, resume
   the transfer or start the transfer process again.
 
-## Custom module
+## Cat module
 
-`vcr custom ...`
+`vcr cat ...`
 
-Features:
-
-- recompiles and runs custom *haskell* program in the *vcr* environment;
-
-This module is required to handle a complicated configurations which
-require a programming language. A *haskell* programming language
-is used in this case.
-
-An example includes a packet custom manipulation during packet replay.
-The manipulation required is generally not known in advance, therefore
-it can not be a part of the recorder's core.
-
-The custom program has a full control over the program execution,
-including the `main` function.
-
-Running a custom program:
+This module is a bridge between vcr recorded data and bash command line.
+It sends recording (either from the file/dir or url) to 'stdout', such that
+can be processed with standard text based tools. For example
 
 ```bash
-vcr custom --program "/path/to/program.hs --args..." \
-    --ghcOpts "-i/path/to/other/includes" --run
-```
-
-Compiling custom program to a binary:
-
-```bash
-vcr custom --program "/path/to/program.hs --args..." \
-    --ghcOpts "-i/path/to/other/includes" --build targetBinaryFile
+vcr cat {args} | grep {some pattern} | head -n 10 > my-recording.vcr
 ```
 
 ## Supporting library
@@ -168,12 +147,11 @@ See documentation in `lib/` directory for details.
 
 # Replay
 
-A `vcr custom` module is used for the replay.
-See `replay/example.hs` file.
+See `examples/replay.hs` file.
 
 # Testing tools
 
-## `vcr-generator`
+## `vcr test-generator`
 
 Features:
 
@@ -184,7 +162,7 @@ Features:
 - configurable multicast time-to-leave
 - configurable packet rate
 
-## `vcr-receiver`
+## `vcr test-receiver`
 
 Features:
 
@@ -198,16 +176,27 @@ Features:
 Start some test UDP generators:
 
 ```bash
-vcr-generator --unicast 127.0.0.1 --port 56001 --size 100 --rate 4
-vcr-generator --unicast 127.0.0.1 --port 56002 --size 100 --rate 4
+vcr test-generator --unicast 127.0.0.1 --port 56001 --size 100 --rate 4
+vcr test-generator --unicast 127.0.0.1 --port 56002 --size 100 --rate 4
 ...
 ```
 
-Run capture, use example configuration:
 
 ```bash
 mkdir rec
-vcr capture -v INFO --file --path result/examples/capture-config.json
+
+# create initial capture configuration (bootstrap):
+vcr capture --arguments --mega 1 --rotateKeep 10 --fileOutput rec/recording \
+    --bootstrap > capture-config.json
+
+# run capture
+vcr capture -v INFO --file --path ./capture-config.json \
+    --flush-each-event \
+    --http 127.0.0.1 --httpPort 12344 \
+    --enableHttpConfig
+
+# run configuration (add channels)
+vcr configurator --recorder localhost "http://127.0.0.1:12344/"
 ```
 
 Check recording files:
@@ -224,23 +213,17 @@ vcr server -v INFO --dir rec/recording --http "127.0.0.1" --httpPort 12345
 Start test UDP receivers:
 
 ```bash
-vcr-receiver --unicast 127.0.0.1 --port 59001
-vcr-receiver --unicast 127.0.0.1 --port 59002
+vcr test-receiver --unicast 127.0.0.1 --port 59001
+vcr test-receiver --unicast 127.0.0.1 --port 59002
 ...
 ```
 
 Run replay:
 
-```bash
-vcr custom --program "/path/to/examples/replay.hs --asterix /path/to/asterix-data/xml" --run
-```
+(this is a custom program, compile separately)
+
 - select recorder
 - select output
 - run replay
 - check results on the receiver
 
-Run configurator:
-
-```bash
-vcr custom --program "/path/to/examples/configurator.hs" --run
-```

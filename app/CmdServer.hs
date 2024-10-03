@@ -267,8 +267,8 @@ httpServer logM startTimeMono startTimeUtc src (ip, port) = do
             [("Content-Type", "text/plain")]
             "404 - Not Found\n"
 
-runCmd :: CmdOptions -> Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()
-runCmd opt pName pArgs version _ghc _wxcLib = do
+runCmd :: CmdOptions -> Prog -> Args -> Version -> IO ()
+runCmd opt pName pArgs version = do
     startTimeMono <- getMonoTimeNs
     startTimeUtc <- getUtcTime
 

@@ -3,7 +3,7 @@
 -- | Common functions and definitions.
 
 module Common
-    ( Prog, Args, Version, Command, GhcBase, WxcLib
+    ( Prog, Args, Version, Command
     , threadDelaySec
     , runAll
     , periodic
@@ -30,9 +30,7 @@ import           Data.Word              (Word8)
 type Prog = String
 type Args = [String]
 type Version = String
-type GhcBase = String
-type WxcLib = String
-type Command = Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()
+type Command = Prog -> Args -> Version -> IO ()
 
 -- | Wait for given number of seconds.
 threadDelaySec :: Double -> IO ()

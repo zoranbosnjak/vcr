@@ -385,8 +385,8 @@ runRecorder buf logM' getConfig fetchEvent = do
                     in jsonRecorder (mkDirectoryRecorder buf (dirArchive, rotate)) logM
         PS.runSafeT (runEffect (src cfg >-> dst)) >>= go
 
-runCmd :: CmdOptions -> Prog -> Args -> Version -> GhcBase -> WxcLib -> IO ()
-runCmd opt pName pArgs version _ghc _wxcLib = do
+runCmd :: CmdOptions -> Prog -> Args -> Version -> IO ()
+runCmd opt pName pArgs version = do
     startTimeMono <- getMonoTimeNs
     startTimeUtc <- getUtcTime
 

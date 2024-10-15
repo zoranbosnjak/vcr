@@ -21,7 +21,7 @@ cabal2nix https://github.com/l0negamer/ekg > nix/extra/ekg.nix
 cabal2nix https://github.com/L0neGamer/ekg-json > nix/extra/ekg-json.nix
 
 # wxHaskell - marked broken in nixpkgs
-hsh=...
+hsh=HEAD
 nix-prefetch-git --rev $hsh https://codeberg.org/wxHaskell/wxHaskell.git \
     > nix/extra/wxHaskell.json
 cabal2nix --revision $hsh https://codeberg.org/wxHaskell/wxHaskell \
@@ -32,7 +32,7 @@ vi nix/extra/wxcore.nix
 __propagatePkgConfigDepends = false;
 
 # keera-hails - marked broken in nixpkgs
-hsh=...
+hsh=HEAD
 nix-prefetch-git --rev $hsh https://github.com/zoranbosnjak/keera-hails.git \
     > nix/extra/keera-hails.json
 ```

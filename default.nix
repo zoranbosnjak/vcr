@@ -57,12 +57,6 @@ let
         "keera-hails-reactive-mvc-view" "${khDir}/keera-hails-reactive-mvc-view" { };
   };};
 
-  preHook = ''
-    export LC_ALL=C.UTF-8
-    export SW_VERSION=$(cat *.cabal | grep "^version:" | awk '{print $2}')
-    export GIT_REV=${gitrev}
-  '';
-
   drv1 = haskellPackages.callCabal2nix "vcr" ./. { };
 
   drv = drv1.overrideDerivation (oldAttrs: {
@@ -71,8 +65,12 @@ let
           (type != "directory" || baseNameOf path != ".git")
           && (type != "symlink" || baseNameOf path != "result"))
         ./.;
-      preBuild = preHook;
       buildInputs = oldAttrs.buildInputs ++ deps;
+      preBuild = ''
+        export LC_ALL=C.UTF-8
+        export SW_VERSION=$(cat *.cabal | grep "^version:" | awk '{print $2}')
+        export GIT_REV=${gitrev}
+      '';
   });
 
   env = haskellPackages.shellFor {
@@ -97,7 +95,12 @@ let
 
     withHoogle = withHoogle;
 
-    shellHook = preHook;
+    shellHook = ''
+      export LC_ALL=C.UTF-8
+      export SW_VERSION=$(cat *.cabal | grep "^version:" | awk '{print $2}')
+      export GIT_REV=${gitrev}
+      vcr() { runhaskell -Wall -ilib -iapp app/Main.hs "$@"; }
+    '';
   };
 
 in

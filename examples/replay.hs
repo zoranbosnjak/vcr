@@ -100,6 +100,8 @@ outputs =
         , ("ch3", blink 0.2, dump, txUnicast dg "127.0.0.1" "59003")
         , ("ch4", noBlink  , dump, txUnicast dg "127.0.0.1" "59004")
         , ("čšžtest", blink 1.0, dump, txUnicast dg "127.0.0.1" "59005")
+        , ("ch6", blink 1.0, dump, txUnicast dg "127.0.0.1" "59006")
+        , ("ch7", blink 1.0, dump, txUnicast dg "127.0.0.1" "59007")
         ])
     , ("prepend",   -- prepend byte
         [ ("ch1", blink 1.0, dump, txUnicast (dg >-> prepend 1) "127.0.0.1" "59001")

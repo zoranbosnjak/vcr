@@ -183,14 +183,14 @@ vcr test-generator --unicast 127.0.0.1 --port 56002 --size 100 --rate 4
 
 
 ```bash
-mkdir rec
+mkdir -p ../rec
 
 # create initial capture configuration (bootstrap):
-vcr capture --arguments --mega 1 --rotateKeep 10 --fileOutput rec/recording \
-    --bootstrap > capture-config.json
+vcr capture --arguments --mega 1 --rotateKeep 10 --fileOutput ../rec/recording \
+    --bootstrap > ../capture-config.json
 
 # run capture
-vcr capture -v INFO --file --path ./capture-config.json \
+vcr capture -v INFO --file --path ../capture-config.json \
     --flush-each-event \
     --http 127.0.0.1 --httpPort 12344 \
     --enableHttpConfig
@@ -202,12 +202,12 @@ vcr configurator --recorder localhost "http://127.0.0.1:12344/"
 Check recording files:
 
 ```bash
-ls -l rec/*
+ls -l ../rec/*
 ```
 
 Run server:
 ```bash
-vcr server -v INFO --dir rec/recording --http "127.0.0.1" --httpPort 12345
+vcr server -v INFO --dir ../rec/recording --http "127.0.0.1" --httpPort 12345
 ```
 
 Start test UDP receivers:
@@ -220,7 +220,13 @@ vcr test-receiver --unicast 127.0.0.1 --port 59002
 
 Run replay:
 
-(this is a custom program, compile separately)
+In the actual configuration, this is a custom program. It is compiled
+separately. In the development mode (inside nix-shell), the example
+will also work with:
+
+```bash
+runhaskell -ilib examples/replay.hs
+```
 
 - select recorder
 - select output

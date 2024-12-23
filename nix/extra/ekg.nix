@@ -4,11 +4,11 @@
 }:
 mkDerivation {
   pname = "ekg";
-  version = "0.4.1.0";
+  version = "0.4.1.1";
   src = fetchgit {
     url = "https://github.com/l0negamer/ekg";
-    sha256 = "1zmp1k3wv9mf5bgrnqxl0sxjfvnwjx3k99r1f6miinnmj8c2qw22";
-    rev = "aee2d5d96573371cdfa9489777ead5db54319244";
+    sha256 = "1czm3lzdlph02zy1yg2hmcl91k3zs44b9rgvzjszk1sfjb6r775w";
+    rev = "15220cdf0c5756045059c75e9d16717c244a357f";
     fetchSubmodules = true;
   };
   enableSeparateDataOutput = true;

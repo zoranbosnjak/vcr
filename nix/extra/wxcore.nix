@@ -5,9 +5,9 @@ mkDerivation {
   pname = "wxcore";
   version = "0.93.0.0";
   src = fetchgit {
-    url = "https://codeberg.org/wxHaskell/wxHaskell";
-    sha256 = "1xh2lyz68w0yy3wk9qgf4dklrvgy3dvrhb7wby71ff4avvnf5ps3";
-    rev = "cbcb56f1b3d49fbea716902994fe7c73619a5582";
+    url = "https://codeberg.org/wxHaskell/wxHaskell.git";
+    sha256 = "1hvzf9802wsgl3zyghjrk6wj78gw5s8g5zkjzqg7jpzcczvplpv6";
+    rev = "5ce677420cbc49bc810ee075922732ed0f3e838c";
     fetchSubmodules = true;
   };
   postUnpack = "sourceRoot+=/wxcore; echo source root reset to $sourceRoot";

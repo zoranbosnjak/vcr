@@ -3,11 +3,11 @@
 }:
 mkDerivation {
   pname = "ekg-json";
-  version = "0.1.1.0";
+  version = "0.1.1.1";
   src = fetchgit {
     url = "https://github.com/L0neGamer/ekg-json";
-    sha256 = "1qbnws7y6hc7w33m3zhr3yshha85frhja8sbnnsj3l7haw8wr19r";
-    rev = "b56408fab35642b27b874cf17a522e6ff5154bd6";
+    sha256 = "1r3gdaxd9hffx8bbv68aarr4sr2ifmz2w8l74mfp2b53c8wsppbd";
+    rev = "bd0592818882f9cf34d2991d01f7dcb3d8bca309";
     fetchSubmodules = true;
   };
   libraryHaskellDepends = [

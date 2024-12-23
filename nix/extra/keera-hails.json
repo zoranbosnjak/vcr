@@ -2,7 +2,7 @@
   "url": "https://github.com/zoranbosnjak/keera-hails.git",
   "rev": "302edca0648e8a5e6545bf5096352671dece0656",
   "date": "2024-09-28T15:17:12+02:00",
-  "path": "/nix/store/qcqfryj1kvv4xaip9qa6vfgfl4zj48zh-keera-hails-302edca",
+  "path": "/nix/store/hkzq5vcrfg0aywl3kpxvj48w5zivr0ji-keera-hails",
   "sha256": "0n7ivrnxh396lnrmir09m5f2ibb9lwnmzrih6mrah9g1787p7ajn",
   "hash": "sha256-VqpzDzrhJahyNTDmXy2naa0oXKkJ5FizpSYN2G3e8Vg=",
   "fetchLFS": false,

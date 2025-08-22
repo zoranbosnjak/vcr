@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               vcr
-version:            2.0.0
+version:            2.0.1
 synopsis:           UDP datagram recorder and replay
 -- description:
 homepage:           https://github.com/zoranbosnjak/vcr

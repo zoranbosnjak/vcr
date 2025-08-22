@@ -44,7 +44,7 @@ limitsTest = QC.testProperty "check limits" $ \utc0 -> do
         a2 = fromJust $ peekItem p i2
 
     pure
-        (   ((i1, a1) === (0, head events))
+        (   ((i1, a1) === (0, events !! 0))
        .&&. ((i2, a2) === (pred n, events !! pred n))
         )
 

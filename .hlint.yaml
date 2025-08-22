@@ -64,6 +64,7 @@
 - ignore: {name: Redundant <$>, within CmdCat}
 - ignore: {name: Use <&>}
 - ignore: {name: Redundant flip}
+- ignore: {name: Use head}
 
 # Define some custom infix operators
 # - fixity: infixr 3 ~^#^~

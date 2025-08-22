@@ -372,7 +372,7 @@ getDirLimits enc base = do
     let dirName = takeDirectory base
         lst = fmap (dirName </>) files
     when (null lst) $ throwM $ IndexError "empty recording"
-    let a = head lst
+    let a = lst !! 0
         b = last lst
     fsA <- maybe (throwM $ IndexError $ "filesuffix " <> a) pure $ getFileSuffix base a
     fsB <- maybe (throwM $ IndexError $ "filesuffix " <> b) pure $ getFileSuffix base b

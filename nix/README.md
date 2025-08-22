@@ -16,10 +16,6 @@ nix-shell -p niv --run "niv update nixpkgs -b release-..."
 ## haskell packages
 
 ```bash
-# ekg, ekg-json - marked broken in nixpkgs
-cabal2nix https://github.com/l0negamer/ekg > nix/extra/ekg.nix
-cabal2nix https://github.com/L0neGamer/ekg-json > nix/extra/ekg-json.nix
-
 # wxHaskell - marked broken in nixpkgs
 src=https://codeberg.org/wxHaskell/wxHaskell.git
 hsh=HEAD

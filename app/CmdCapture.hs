@@ -114,8 +114,7 @@ options = CmdOptions
             <*> switch (long "bootstrap" <> help "dump configuration")
           where
             conf :: Parser Config
-            conf = Config
-                <$> (Map.fromList <$> many
+            conf = (Config . Map.fromList <$> many
                     ((,) <$> channelOption <*> (inUnicast <|> inMulticast)))
                 <*> optional fileOutOptions
               where

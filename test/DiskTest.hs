@@ -141,7 +141,7 @@ locateEvents step t1 player samples = do
     step "lookup UTC before"
     do
         Just (_ix, y) <- runSafeT $ findEventByTimeUtc player t1
-        assertEqual "check" (head samples) y
+        assertEqual "check" (samples !! 0) y
 
     step "lookup UTC exact"
     forM_ samples $ \event -> do

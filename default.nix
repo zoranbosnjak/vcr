@@ -39,9 +39,6 @@ let
       # haskellPackage2 = self.callCabal2nix "name" "${path}/path" { };
       # ...
 
-      ekg = self.callPackage ./nix/extra/ekg.nix { };
-      ekg-json = self.callPackage ./nix/extra/ekg-json.nix { };
-
       wx = self.callCabal2nix "wx" "${wxHaskellDir}/wx" { };
       wxcore = self.callPackage ./nix/extra/wxcore.nix { };
       wxdirect = self.callCabal2nix "wxdirect" "${wxHaskellDir}/wxdirect" { };

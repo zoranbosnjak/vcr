@@ -25,5 +25,5 @@ mirror manual:
         - set -u
         - mkdir -p $TARGET
         - nix-build --argstr gitrev $CI_COMMIT_SHORT_SHA
-        - nix-store --add-root $TARGET/$(readlink result | awk -F"-" '{print $4}')-$CI_COMMIT_SHORT_SHA --indirect -r $(readlink result)
+        - nix-store --add-root $TARGET/$(readlink result | rev | cut -d "-" -f1 | rev)-$CI_COMMIT_SHORT_SHA --indirect -r $(readlink result)
 

@@ -13,7 +13,7 @@ build-type:         Simple
 extra-doc-files:    CHANGELOG.md
 -- extra-source-files:
 
-common base
+common baseopt
     ghc-options:
         -Wall
         -Wincomplete-uni-patterns
@@ -21,63 +21,29 @@ common base
         -Wcompat
         -Widentities
         -Wredundant-constraints
+        -Wunused-packages
     default-language:
         GHC2021
+
+common basedep
     build-depends:
         base < 5
-      , with-utf8
-      , unliftio
-      , microlens-platform
-      , exceptions
-      , optparse-applicative
-      , template-haskell
-      , temporary
-      , process
-      , directory
-      , filepath
-      , unix
-      , bytestring
-      , base16-bytestring
-      , base64-bytestring
-      , text
-      , text-format
-      , time
-      , containers
-      , unordered-containers
-      , network
-      , network-multicast
-      , stm
-      , clock
-      , transformers
-      , hslogger
-      , hsyslog
-      , deepseq
-      , aeson
-      , aeson-pretty
-      , uuid
-      , wai
-      , warp
-      , megaparsec
-      , pipes
-      , pipes-concurrency
-      , pipes-safe
-      , http-types
-      , http-client
-      , http-client-tls
-      , vector
-      , ekg
-      , random
-      , QuickCheck
-      , wx
-      , wxcore
-      , keera-hails-reactivevalues
-      , keera-hails-reactive-cbmvar
-      , keera-hails-reactive-wx
-      , keera-hails-mvc-view
-      , keera-callbacks
+        , unliftio
+        , optparse-applicative
+        , bytestring
+        , text
+        , containers
+        , network
+        , network-multicast
+        , stm
+        , transformers
+        , aeson
+        , pipes
+        , pipes-safe
+        , http-types
 
 library
-    import:           base
+    import:           baseopt, basedep
     exposed-modules:
         TH
         , Vcr
@@ -98,10 +64,32 @@ library
         , Replay.View.Wx
         , Capture.Types
         , Configurator
+    build-depends:
+        template-haskell
+        , microlens-platform
+        , filepath
+        , aeson-pretty
+        , exceptions
+        , base16-bytestring
+        , http-client
+        , http-client-tls
+        , time
+        , clock
+        , vector
+        , directory
+        , megaparsec
+        , hslogger
+        , QuickCheck
+        , wx
+        , wxcore
+        , keera-callbacks
+        , keera-hails-reactive-cbmvar
+        , keera-hails-reactivevalues
+        , keera-hails-reactive-wx
     hs-source-dirs:   lib
 
 executable vcr
-    import:           base
+    import:           baseopt, basedep
     ghc-options:
         -O2 -rtsopts -funbox-strict-fields -with-rtsopts=-T -threaded
     main-is:          Main.hs
@@ -113,14 +101,18 @@ executable vcr
       , CmdServer
       , CmdTestGenerator
       , CmdTestReceiver
-
     build-depends:
         vcr
+        , unix
+        , ekg
+        , uuid
+        , wai
+        , warp
     hs-source-dirs:   app
     default-language: GHC2021
 
 test-suite vcr-test
-    import:           base
+    import:           baseopt
     default-language: GHC2021
     other-modules:
         TestCommon
@@ -130,7 +122,19 @@ test-suite vcr-test
     hs-source-dirs:   test
     main-is:          Main.hs
     build-depends:
-        vcr
-      , tasty
-      , tasty-quickcheck
-      , tasty-hunit
+          base
+        , vcr
+        , temporary
+        , aeson
+        , filepath
+        , time
+        , text
+        , bytestring
+        , exceptions
+        , random
+        , pipes
+        , pipes-safe
+        , tasty
+        , tasty-quickcheck
+        , tasty-hunit
+

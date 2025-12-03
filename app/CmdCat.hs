@@ -32,7 +32,7 @@ data DumpMode
 data Subcommand
     = ShowLimits
     | ShowChannels
-    | DumpData DumpMode [Channel]
+    | DumpData DumpMode [Channel] NominalDiffTime
     deriving (Generic, Eq, Show)
 
 data CmdOptions = CmdOptions
@@ -71,6 +71,8 @@ options = CmdOptions
     dumpData = DumpData
         <$> (follow <|> fmap Replay replay)
         <*> many (strOption (long "channel" <> metavar "CH" <> help "channel identifier"))
+        <*> option auto (long "filter-timeout" <> showDefault <> value 1.0 <> metavar "SEC"
+            <> help "Ensure that some events are sent from remote producer")
       where
         follow = flag' Follow (long "follow" <> short 'f' <> help "Wait until new data is available")
         replay = flag Forward Backward (long "backward" <> help "Run backward in time")
@@ -119,10 +121,18 @@ runCmd opt _pName _pArgs _version = do
 
             PS.runSafeT $ runEffect (producer >-> consumer mempty)
 
-        DumpData mode channels -> do
+        DumpData mode channels to -> do
             let flt = case channels of
                     []  -> Nothing
-                    lst -> Just (onlyChannels lst, Nothing)
+                    lst -> Just (onlyChannels lst, Just to)
+
+                isValid event = case flt of
+                    Nothing -> True
+                    Just (f, _) -> applyFilter f event
+
+                -- producer might be 'leaky', need to re-check filter
+                outputValid event = when (isValid event) $ do
+                    liftIO $ BS8.putStrLn $ encodeJSON event
 
             case mode of
                 Replay direction -> do
@@ -138,7 +148,7 @@ runCmd opt _pName _pArgs _version = do
                         consumer = do
                             (_ix, event) <- await
                             when (timeCheck direction t1 t2 $ eTimeUtc event) $ do
-                                liftIO $ BS8.putStrLn $ encodeJSON event
+                                outputValid event
                                 consumer
 
                     PS.runSafeT $ runEffect (producer >-> consumer)
@@ -152,7 +162,7 @@ runCmd opt _pName _pArgs _version = do
                                     threadDelaySec dt
                                     go ix
                                 Right (ix', event) -> do
-                                    liftIO $ BS8.putStrLn $ encodeJSON event
+                                    outputValid event
                                     go ix'
 
                     (_limit1, limit2) <- fix $ \loop -> do

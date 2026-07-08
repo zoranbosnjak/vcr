@@ -17,7 +17,7 @@ import qualified Data.ByteString           as BS
 import qualified Data.ByteString.Char8     as BS8
 import qualified Data.ByteString.Lazy      as BSL
 import qualified Data.List.NonEmpty        as NE
-import           Data.Text                 as Text
+import           Data.Text                 as Text hiding (show)
 import           Data.Text.Encoding        (decodeUtf8)
 import           GHC.Generics              (Generic)
 import           Pipes

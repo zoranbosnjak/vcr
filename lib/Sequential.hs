@@ -2,6 +2,8 @@
 -- used as a 'sequence number' for the 'Event'.
 -- The value wraps around to 'zero', when reaches a 'Period'.
 
+{-# LANGUAGE DataKinds #-}
+
 module Sequential where
 
 import           Data.Aeson

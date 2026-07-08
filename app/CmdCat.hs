@@ -132,7 +132,7 @@ runCmd opt _pName _pArgs _version = do
 
                 -- producer might be 'leaky', need to re-check filter
                 outputValid event = when (isValid event) $ do
-                    liftIO $ BS8.putStrLn $ encodeJSON event
+                    BS8.putStrLn $ encodeJSON event
 
             case mode of
                 Replay direction -> do
@@ -148,7 +148,7 @@ runCmd opt _pName _pArgs _version = do
                         consumer = do
                             (_ix, event) <- await
                             when (timeCheck direction t1 t2 $ eTimeUtc event) $ do
-                                outputValid event
+                                liftIO $ outputValid event
                                 consumer
 
                     PS.runSafeT $ runEffect (producer >-> consumer)
